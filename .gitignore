@@ -24,6 +24,9 @@ appsettings.Production.json
 appsettings.*.json
 .env
 
+## Claude Code
+.claude/
+
 ## VS Code
 .vscode/*
 !.vscode/settings.json
