@@ -32,6 +32,12 @@ public class LocalListDbContext : DbContext
             .HasForeignKey(ps => ps.PlanId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        modelBuilder.Entity<PlanStop>()
+            .HasOne(ps => ps.Place)
+            .WithMany(p => p.PlanStops)
+            .HasForeignKey(ps => ps.PlaceId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         modelBuilder.Entity<FollowSession>()
             .HasOne(fs => fs.User)
             .WithMany(u => u.FollowSessions)
