@@ -1,0 +1,6 @@
+@LocalList.API.NET_HostAddress = http://localhost:5084
+
+GET {{LocalList.API.NET_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
