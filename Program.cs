@@ -9,9 +9,17 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add Database Context
+// Parse PostgreSQL URL from Railway/Neon to standard ADO.NET format
+var connectionUrl = builder.Configuration.GetConnectionString("DefaultConnection");
+if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres"))
+{
+    var databaseUri = new Uri(connectionUrl);
+    var userInfo = databaseUri.UserInfo.Split(':');
+    connectionUrl = $"Host={databaseUri.Host};Port={databaseUri.Port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;Trust Server Certificate=true;";
+}
+
 builder.Services.AddDbContext<LocalListDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseNpgsql(connectionUrl));
 
 // Add DI Services
 builder.Services.AddScoped<JwtTokenService>();
