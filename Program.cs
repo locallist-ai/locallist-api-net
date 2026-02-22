@@ -15,7 +15,8 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
 {
     var databaseUri = new Uri(connectionUrl);
     var userInfo = databaseUri.UserInfo.Split(':');
-    connectionUrl = $"Host={databaseUri.Host};Port={databaseUri.Port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;Trust Server Certificate=true;";
+    var port = databaseUri.Port > 0 ? databaseUri.Port : 5432;
+    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;Trust Server Certificate=true;";
 }
 
 builder.Services.AddDbContext<LocalListDbContext>(options =>
