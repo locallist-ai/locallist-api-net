@@ -44,6 +44,30 @@ public class LocalListDbContext : DbContext
             .HasForeignKey(fs => fs.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        modelBuilder.Entity<FollowSession>()
+            .HasOne(fs => fs.Plan)
+            .WithMany(p => p.FollowSessions)
+            .HasForeignKey(fs => fs.PlanId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Plan>()
+            .HasOne(p => p.CreatedBy)
+            .WithMany(u => u.CreatedPlans)
+            .HasForeignKey(p => p.CreatedById)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<Place>()
+            .HasOne(p => p.SubmittedBy)
+            .WithMany(u => u.SubmittedPlaces)
+            .HasForeignKey(p => p.SubmittedById)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<Place>()
+            .HasOne(p => p.ReviewedBy)
+            .WithMany(u => u.ReviewedPlaces)
+            .HasForeignKey(p => p.ReviewedById)
+            .OnDelete(DeleteBehavior.SetNull);
+
         // Map explicit indices mentioned in schema.ts
         modelBuilder.Entity<User>().HasIndex(u => u.Email).IsUnique();
         modelBuilder.Entity<User>().HasIndex(u => u.AppleUserId).IsUnique();
