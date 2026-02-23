@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.ComponentModel.DataAnnotations;
 using LocalList.API.NET.Data;
 using LocalList.API.NET.Data.Models;
 using LocalList.API.NET.Services;
@@ -44,7 +45,7 @@ public class AuthController : ControllerBase
         var existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
         
         if (existingUser != null)
-            return Conflict(new { error = "Email already registered" });
+            return BadRequest(new { error = "Registration failed. Please check your details or try logging in." }); // M2 Fix: Generic error prevents email enumeration
 
         var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
@@ -73,17 +74,21 @@ public class AuthController : ControllerBase
         {
             if (request.Provider == "apple")
             {
-                // TODO: Verify Apple JWT signature. Mocked for brevity right now.
-                providerUserId = "mock_apple_sub";
-                email = "mock@apple.com";
+                // C1 Fix: Apple OAuth Mock is strictly disabled. Will return 501 until native JWT verification is built.
+                return StatusCode(501, new { error = "Apple Sign-In is not fully implemented yet on the backend." });
             }
-            else // google
+            else if (request.Provider == "google")
             {
                 var payload = await GoogleJsonWebSignature.ValidateAsync(request.IdToken);
                 providerUserId = payload.Subject;
                 email = payload.Email;
                 userName = userName ?? payload.Name;
                 image = payload.Picture;
+            }
+            else
+            {
+                // M6 Fix: Whitelist supported OAuth providers to prevent catch-all impersonation
+                return BadRequest(new { error = "Unsupported OAuth provider" });
             }
         }
         catch
@@ -131,6 +136,14 @@ public class AuthController : ControllerBase
     {
         if (string.IsNullOrEmpty(request.RefreshToken))
             return BadRequest(new { error = "Invalid request" });
+
+        // M3 Fix: Clean up expired tokens periodically during refresh attempts
+        var expiredTokens = await _db.RefreshTokens.Where(rt => rt.ExpiresAt < DateTimeOffset.UtcNow).Take(20).ToListAsync();
+        if (expiredTokens.Any())
+        {
+            _db.RefreshTokens.RemoveRange(expiredTokens);
+            await _db.SaveChangesAsync();
+        }
 
         var tokenPrefix = request.RefreshToken.Substring(0, 16);
         
@@ -195,25 +208,47 @@ public class AuthController : ControllerBase
 
 public class LoginRequest
 {
-    public required string Email { get; set; }
-    public required string Password { get; set; }
+    [Required]
+    [EmailAddress]
+    [MaxLength(255)]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [MinLength(8)]
+    [MaxLength(100)]
+    public string Password { get; set; } = string.Empty;
 }
 
 public class RegisterRequest
 {
-    public required string Email { get; set; }
-    public required string Password { get; set; }
+    [Required]
+    [EmailAddress]
+    [MaxLength(255)]
+    public string Email { get; set; } = string.Empty;
+
+    [Required]
+    [MinLength(8)]
+    [MaxLength(100)]
+    public string Password { get; set; } = string.Empty;
+
+    [MaxLength(255)]
     public string? Name { get; set; }
 }
 
 public class OAuthRequest
 {
-    public required string Provider { get; set; }
-    public required string IdToken { get; set; }
+    [Required]
+    public string Provider { get; set; } = string.Empty;
+    
+    [Required]
+    public string IdToken { get; set; } = string.Empty;
+    
+    [MaxLength(255)]
     public string? Name { get; set; }
 }
 
 public class RefreshRequest
 {
-    public required string RefreshToken { get; set; }
+    [Required]
+    public string RefreshToken { get; set; } = string.Empty;
 }

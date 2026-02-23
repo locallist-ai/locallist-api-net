@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using System.Text.Json;
@@ -24,6 +25,7 @@ public class BuilderController : ControllerBase
 
     [HttpPost("chat")]
     [AllowAnonymous]
+    [EnableRateLimiting("BuilderLimit")]
     public async Task<IActionResult> GeneratePlan([FromBody] BuilderChatRequest request)
     {
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;

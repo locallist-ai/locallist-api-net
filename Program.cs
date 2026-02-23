@@ -9,6 +9,12 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// A5: Limit Kestrel MaxRequestBodySize to prevent huge payload DoS (10 MB)
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.Limits.MaxRequestBodySize = 10 * 1024 * 1024;
+});
+
 // Parse PostgreSQL URL from Railway/Neon to standard ADO.NET format
 var connectionUrl = builder.Configuration.GetConnectionString("DefaultConnection");
 if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres"))
@@ -16,7 +22,8 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
     var databaseUri = new Uri(connectionUrl);
     var userInfo = databaseUri.UserInfo.Split(':');
     var port = databaseUri.Port > 0 ? databaseUri.Port : 5432;
-    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;Trust Server Certificate=true;";
+    var trustCert = builder.Environment.IsDevelopment() ? "Trust Server Certificate=true;" : ""; // M4: Strict SSL in Prod
+    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;{trustCert}";
 }
 
 builder.Services.AddDbContext<LocalListDbContext>(options =>
@@ -37,6 +44,12 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 // Configure Authentication & Authorization
 var jwtSettings = builder.Configuration.GetSection("Jwt");
 var secretKey = jwtSettings["Secret"] ?? throw new InvalidOperationException("JWT Secret is missing.");
+
+// M1: Validate JWT Secret length and weak placeholders at startup
+if (secretKey.Length < 32 || (secretKey == "REPLACE_WITH_SECURE_KEY_IN_PRODUCTION" && builder.Environment.IsProduction()))
+{
+    throw new InvalidOperationException("CRITICAL: JWT Secret must be at least 32 characters and safely set in Environment Variables.");
+}
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -85,12 +98,28 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0,
                 Window = TimeSpan.FromMinutes(1)
             }));
+            
+    // A3: Builder specific rate limits (5 per hour per IP) to prevent Gemini abuse
+    options.AddPolicy("BuilderLimit", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 5,
+                QueueLimit = 0,
+                Window = TimeSpan.FromHours(1)
+            }));
+            
     options.RejectionStatusCode = 429;
 });
 
 // Add services to the container
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+// M5 Fix: Register Antiforgery to prepare the backend for the Razor Admin ERP
+builder.Services.AddAntiforgery();
 
 var app = builder.Build();
 
@@ -108,16 +137,34 @@ app.UseExceptionHandler(errorApp =>
         context.Response.StatusCode = 500;
         context.Response.ContentType = "application/json";
         var exceptionHandlerPathFeature = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerPathFeature>();
-        if (exceptionHandlerPathFeature?.Error is Exception ex)
+        
+        // C2: Exception Handler restricts error details to Development environment
+        if (app.Environment.IsDevelopment())
         {
-            await context.Response.WriteAsJsonAsync(new 
-            { 
-                error = ex.Message, 
-                inner = ex.InnerException?.Message,
-                type = ex.GetType().Name
-            });
+            if (exceptionHandlerPathFeature?.Error is Exception ex)
+            {
+                await context.Response.WriteAsJsonAsync(new 
+                { 
+                    error = ex.Message, 
+                    inner = ex.InnerException?.Message,
+                    type = ex.GetType().Name
+                });
+            }
+        }
+        else
+        {
+            await context.Response.WriteAsJsonAsync(new { error = "An internal server error occurred." });
         }
     });
+});
+
+// A1: Inject Security Headers to mitigate XSS, Clickjacking, and framing
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Append("X-Frame-Options", "DENY");
+    context.Response.Headers.Append("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    await next();
 });
 
 app.UseHttpsRedirection();

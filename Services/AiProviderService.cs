@@ -65,9 +65,13 @@ public class AiProviderService
             };
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
+            var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
             
-            var response = await _httpClient.PostAsync(url, content);
+            var requestMessage = new HttpRequestMessage(HttpMethod.Post, url);
+            requestMessage.Headers.Add("x-goog-api-key", apiKey); // A6: Secure key transit
+            requestMessage.Content = content;
+
+            var response = await _httpClient.SendAsync(requestMessage);
             response.EnsureSuccessStatusCode();
 
             var responseJson = await response.Content.ReadAsStringAsync();

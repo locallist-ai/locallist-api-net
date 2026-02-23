@@ -24,6 +24,13 @@ public class PlacesController : ControllerBase
         [FromQuery] int limit = 50,
         [FromQuery] int offset = 0)
     {
+        // C3 Fix: Prevent anonymous users from bypassing draft/review filters
+        var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
+        if (isAnonymous && status != "published")
+        {
+            return Unauthorized(new { error = "Only authenticated curators can view non-published places." });
+        }
+
         var query = _db.Places.AsQueryable();
 
         query = query.Where(p => p.Status == status);
