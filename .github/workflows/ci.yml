@@ -1,0 +1,29 @@
+name: .NET CI & Security
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-security:
+    name: Build & Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x' # Puedes adaptarlo a la versión exacta que uses y añadir global.json si hace falta
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore
+
+      - name: Test
+        # Opcional: ejecuta los tests si existen
+        run: dotnet test --no-build --verbosity normal
