@@ -4,9 +4,9 @@ WORKDIR /App
 # Copy everything
 COPY . ./
 # Restore as distinct layers
-RUN dotnet restore
+RUN dotnet restore LocalList.API.NET.csproj
 # Build and publish a release
-RUN dotnet publish -c Release -o out
+RUN dotnet publish LocalList.API.NET.csproj -c Release -o out
 
 # Build runtime image
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
