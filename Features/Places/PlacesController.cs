@@ -1,11 +1,13 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using LocalList.API.NET.Data;
+using LocalList.API.NET.Shared.Data;
 
-namespace LocalList.API.NET.Controllers;
+namespace LocalList.API.NET.Features.Places;
 
 [ApiController]
 [Route("places")]
+[AllowAnonymous]
 public class PlacesController : ControllerBase
 {
     private readonly LocalListDbContext _db;
@@ -22,8 +24,10 @@ public class PlacesController : ControllerBase
         [FromQuery] string? neighborhood,
         [FromQuery] string? status = "published",
         [FromQuery] int limit = 50,
-        [FromQuery] int offset = 0)
+        [FromQuery] int offset = 0,
+        CancellationToken ct = default)
     {
+        limit = Math.Clamp(limit, 1, 100);
         // C3 Fix: Prevent anonymous users from bypassing draft/review filters
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
         if (isAnonymous && status != "published")
@@ -48,7 +52,7 @@ public class PlacesController : ControllerBase
             .OrderBy(p => p.Name)
             .Skip(offset)
             .Take(limit)
-            .ToListAsync();
+            .ToListAsync(ct);
 
         return Ok(new
         {
@@ -58,9 +62,9 @@ public class PlacesController : ControllerBase
     }
 
     [HttpGet("{id}")]
-    public async Task<IActionResult> GetPlace(Guid id)
+    public async Task<IActionResult> GetPlace(Guid id, CancellationToken ct)
     {
-        var place = await _db.Places.FirstOrDefaultAsync(p => p.Id == id);
+        var place = await _db.Places.FirstOrDefaultAsync(p => p.Id == id, ct);
 
         if (place == null)
             return NotFound(new { error = "Place not found" });

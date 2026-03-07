@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
-using LocalList.API.NET.Data;
-using LocalList.API.NET.Services;
+using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Features.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -26,10 +27,16 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
     connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;{trustCert}";
 }
 
-builder.Services.AddDbContext<LocalListDbContext>(options =>
-    options.UseNpgsql(connectionUrl));
+// Only register Npgsql when a real connection string is available.
+// Integration tests leave this empty and inject SQLite via ConfigureTestServices.
+if (!string.IsNullOrEmpty(connectionUrl))
+{
+    builder.Services.AddDbContext<LocalListDbContext>(options =>
+        options.UseNpgsql(connectionUrl));
+}
 
 // Add DI Services
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<JwtTokenService>();
 builder.Services.AddHttpClient<AiProviderService>();
 builder.Services.AddScoped<AiProviderService>();
@@ -79,8 +86,8 @@ builder.Services.AddCors(options =>
             : new[] { "http://localhost:8081", "http://localhost:19006" };
 
         corsBuilder.WithOrigins(allowedOrigins)
-            .AllowAnyMethod()
-            .AllowAnyHeader()
+            .WithMethods("GET", "POST", "PATCH", "DELETE", "OPTIONS")
+            .WithHeaders("Content-Type", "Authorization")
             .AllowCredentials();
     });
 });
@@ -115,8 +122,7 @@ builder.Services.AddRateLimiter(options =>
 });
 
 // Add services to the container
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 
 // M5 Fix: Register Antiforgery to prepare the backend for the Razor Admin ERP
 builder.Services.AddAntiforgery();
@@ -126,8 +132,7 @@ var app = builder.Build();
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.MapOpenApi();
 }
 
 app.UseExceptionHandler(errorApp =>
@@ -176,11 +181,14 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-app.MapGet("/health", () =>
+app.MapGet("/health", (TimeProvider clock) =>
 {
-    return new { status = "ok", version = "0.1.0", timestamp = DateTimeOffset.UtcNow };
+    return new { status = "ok", version = "0.1.0", timestamp = clock.GetUtcNow() };
 })
 .WithName("HealthCheck")
-.WithOpenApi();
+;
 
 app.Run();
+
+// Make the implicit Program class accessible for WebApplicationFactory<Program> in tests
+public partial class Program { }

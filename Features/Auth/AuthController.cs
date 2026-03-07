@@ -1,13 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.ComponentModel.DataAnnotations;
-using LocalList.API.NET.Data;
-using LocalList.API.NET.Data.Models;
-using LocalList.API.NET.Services;
+using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Auth;
 using Google.Apis.Auth;
 using BCrypt.Net;
 
-namespace LocalList.API.NET.Controllers;
+namespace LocalList.API.NET.Features.Auth;
 
 [ApiController]
 [Route("auth")]
@@ -15,17 +14,19 @@ public class AuthController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly JwtTokenService _jwtTokenService;
+    private readonly TimeProvider _clock;
 
-    public AuthController(LocalListDbContext db, JwtTokenService jwtTokenService)
+    public AuthController(LocalListDbContext db, JwtTokenService jwtTokenService, TimeProvider clock)
     {
         _db = db;
         _jwtTokenService = jwtTokenService;
+        _clock = clock;
     }
 
     [HttpPost("login")]
-    public async Task<IActionResult> EmailLogin([FromBody] LoginRequest request)
+    public async Task<IActionResult> EmailLogin([FromBody] LoginRequest request, CancellationToken ct)
     {
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
 
         if (user == null)
             return Unauthorized(new { error = "Invalid credentials" });
@@ -36,14 +37,14 @@ public class AuthController : ControllerBase
         if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
             return Unauthorized(new { error = "Invalid credentials" });
 
-        return await GenerateTokensResponse(user);
+        return await GenerateTokensResponse(user, ct);
     }
 
     [HttpPost("register")]
-    public async Task<IActionResult> EmailRegister([FromBody] RegisterRequest request)
+    public async Task<IActionResult> EmailRegister([FromBody] RegisterRequest request, CancellationToken ct)
     {
-        var existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
-        
+        var existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
+
         if (existingUser != null)
             return BadRequest(new { error = "Registration failed. Please check your details or try logging in." }); // M2 Fix: Generic error prevents email enumeration
 
@@ -57,13 +58,13 @@ public class AuthController : ControllerBase
         };
 
         _db.Users.Add(newUser);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
 
-        return await GenerateTokensResponse(newUser);
+        return await GenerateTokensResponse(user: newUser, ct);
     }
 
     [HttpPost("signin")]
-    public async Task<IActionResult> OAuthSignIn([FromBody] OAuthRequest request)
+    public async Task<IActionResult> OAuthSignIn([FromBody] OAuthRequest request, CancellationToken ct)
     {
         string? providerUserId;
         string? email;
@@ -99,10 +100,10 @@ public class AuthController : ControllerBase
         if (string.IsNullOrEmpty(email))
             return BadRequest(new { error = "Email not provided by identity provider" });
 
-        var user = await _db.Users.FirstOrDefaultAsync(u => 
+        var user = await _db.Users.FirstOrDefaultAsync(u =>
             (request.Provider == "apple" && u.AppleUserId == providerUserId) ||
             (request.Provider == "google" && u.GoogleUserId == providerUserId) ||
-            u.Email == email);
+            u.Email == email, ct);
 
         if (user == null)
         {
@@ -124,62 +125,62 @@ public class AuthController : ControllerBase
                 user.AppleUserId = providerUserId;
             else if (request.Provider == "google" && user.GoogleUserId == null)
                 user.GoogleUserId = providerUserId;
-            user.UpdatedAt = DateTimeOffset.UtcNow;
+            user.UpdatedAt = _clock.GetUtcNow();
         }
 
-        await _db.SaveChangesAsync();
-        return await GenerateTokensResponse(user);
+        await _db.SaveChangesAsync(ct);
+        return await GenerateTokensResponse(user, ct);
     }
 
     [HttpPost("refresh")]
-    public async Task<IActionResult> RefreshToken([FromBody] RefreshRequest request)
+    public async Task<IActionResult> RefreshToken([FromBody] RefreshRequest request, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(request.RefreshToken))
             return BadRequest(new { error = "Invalid request" });
 
         // M3 Fix: Clean up expired tokens periodically during refresh attempts
-        var expiredTokens = await _db.RefreshTokens.Where(rt => rt.ExpiresAt < DateTimeOffset.UtcNow).Take(20).ToListAsync();
+        var expiredTokens = await _db.RefreshTokens.Where(rt => rt.ExpiresAt < _clock.GetUtcNow()).Take(20).ToListAsync(ct);
         if (expiredTokens.Any())
         {
             _db.RefreshTokens.RemoveRange(expiredTokens);
-            await _db.SaveChangesAsync();
+            await _db.SaveChangesAsync(ct);
         }
 
         var tokenPrefix = request.RefreshToken.Substring(0, 16);
-        
+
         var refreshTokens = await _db.RefreshTokens
             .Include(rt => rt.User)
             .Where(rt => rt.TokenPrefix == tokenPrefix)
-            .ToListAsync();
+            .ToListAsync(ct);
 
         foreach (var tokenRecord in refreshTokens)
         {
             if (BCrypt.Net.BCrypt.Verify(request.RefreshToken, tokenRecord.TokenHash))
             {
-                if (DateTimeOffset.UtcNow > tokenRecord.ExpiresAt)
+                if (_clock.GetUtcNow() > tokenRecord.ExpiresAt)
                 {
                     _db.RefreshTokens.Remove(tokenRecord);
-                    await _db.SaveChangesAsync();
+                    await _db.SaveChangesAsync(ct);
                     return Unauthorized(new { error = "Refresh token expired" });
                 }
 
                 _db.RefreshTokens.Remove(tokenRecord); // Enforce rotation
-                return await GenerateTokensResponse(tokenRecord.User!);
+                return await GenerateTokensResponse(tokenRecord.User!, ct);
             }
         }
 
         return Unauthorized(new { error = "Invalid refresh token" });
     }
 
-    private async Task<IActionResult> GenerateTokensResponse(User user)
+    private async Task<IActionResult> GenerateTokensResponse(User user, CancellationToken ct = default)
     {
         var accessToken = _jwtTokenService.GenerateAccessToken(user);
         var rawRefreshToken = _jwtTokenService.GenerateRefreshToken();
-        
+
         var tokenHash = BCrypt.Net.BCrypt.HashPassword(rawRefreshToken);
         var tokenPrefix = rawRefreshToken.Substring(0, 16);
 
-        var tokenEntity = new RefreshToken
+        var tokenEntity = new Shared.Data.Entities.RefreshToken
         {
             UserId = user.Id,
             TokenHash = tokenHash,
@@ -188,7 +189,7 @@ public class AuthController : ControllerBase
         };
 
         _db.RefreshTokens.Add(tokenEntity);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
 
         return Ok(new
         {
@@ -204,51 +205,4 @@ public class AuthController : ControllerBase
             }
         });
     }
-}
-
-public class LoginRequest
-{
-    [Required]
-    [EmailAddress]
-    [MaxLength(255)]
-    public string Email { get; set; } = string.Empty;
-
-    [Required]
-    [MinLength(8)]
-    [MaxLength(100)]
-    public string Password { get; set; } = string.Empty;
-}
-
-public class RegisterRequest
-{
-    [Required]
-    [EmailAddress]
-    [MaxLength(255)]
-    public string Email { get; set; } = string.Empty;
-
-    [Required]
-    [MinLength(8)]
-    [MaxLength(100)]
-    public string Password { get; set; } = string.Empty;
-
-    [MaxLength(255)]
-    public string? Name { get; set; }
-}
-
-public class OAuthRequest
-{
-    [Required]
-    public string Provider { get; set; } = string.Empty;
-    
-    [Required]
-    public string IdToken { get; set; } = string.Empty;
-    
-    [MaxLength(255)]
-    public string? Name { get; set; }
-}
-
-public class RefreshRequest
-{
-    [Required]
-    public string RefreshToken { get; set; } = string.Empty;
 }

@@ -2,9 +2,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
-using LocalList.API.NET.Data;
+using LocalList.API.NET.Shared.Data;
 
-namespace LocalList.API.NET.Controllers;
+namespace LocalList.API.NET.Features.Plans;
 
 [ApiController]
 [Route("plans")]
@@ -18,14 +18,16 @@ public class PlansController : ControllerBase
     }
 
     [HttpGet]
-    [AllowAnonymous] // Mimicking optional auth
+    [AllowAnonymous]
     public async Task<IActionResult> GetPlans(
         [FromQuery] string? city,
         [FromQuery] string? type,
         [FromQuery] bool showcase = false,
         [FromQuery] int limit = 50,
-        [FromQuery] int offset = 0)
+        [FromQuery] int offset = 0,
+        CancellationToken ct = default)
     {
+        limit = Math.Clamp(limit, 1, 100);
         var isAuthenticated = User.Identity?.IsAuthenticated ?? false;
 
         var query = _db.Plans.Where(p => p.IsPublic);
@@ -44,7 +46,7 @@ public class PlansController : ControllerBase
             .OrderBy(p => p.CreatedAt)
             .Skip(offset)
             .Take(limit)
-            .ToListAsync();
+            .ToListAsync(ct);
 
         return Ok(new
         {
@@ -55,12 +57,12 @@ public class PlansController : ControllerBase
 
     [HttpGet("{id}")]
     [AllowAnonymous]
-    public async Task<IActionResult> GetPlan(Guid id)
+    public async Task<IActionResult> GetPlan(Guid id, CancellationToken ct)
     {
         var plan = await _db.Plans
             .Include(p => p.Stops)
             .ThenInclude(s => s.Place)
-            .FirstOrDefaultAsync(p => p.Id == id);
+            .FirstOrDefaultAsync(p => p.Id == id, ct);
 
         if (plan == null)
             return NotFound(new { error = "Plan not found" });

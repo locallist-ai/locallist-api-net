@@ -4,7 +4,7 @@ using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json;
 
-namespace LocalList.API.NET.Data.Models;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 [Table("plans")]
 public class Plan

@@ -1,21 +1,21 @@
-using System;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
-using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
-using LocalList.API.NET.Data.Models;
+using LocalList.API.NET.Shared.Data.Entities;
 
-namespace LocalList.API.NET.Services;
+namespace LocalList.API.NET.Shared.Auth;
 
 public class JwtTokenService
 {
     private readonly IConfiguration _configuration;
+    private readonly TimeProvider _clock;
 
-    public JwtTokenService(IConfiguration configuration)
+    public JwtTokenService(IConfiguration configuration, TimeProvider clock)
     {
         _configuration = configuration;
+        _clock = clock;
     }
 
     public string GenerateAccessToken(User user)
@@ -41,7 +41,7 @@ public class JwtTokenService
         var tokenDescriptor = new SecurityTokenDescriptor
         {
             Subject = new ClaimsIdentity(claims),
-            Expires = DateTime.UtcNow.AddMinutes(15), // Same as node.js implementation
+            Expires = _clock.GetUtcNow().AddMinutes(15).UtcDateTime,
             Issuer = issuer,
             Audience = audience,
             SigningCredentials = credentials
@@ -62,6 +62,6 @@ public class JwtTokenService
 
     public DateTimeOffset GetRefreshTokenExpiry()
     {
-        return DateTimeOffset.UtcNow.AddDays(30);
+        return _clock.GetUtcNow().AddDays(30);
     }
 }

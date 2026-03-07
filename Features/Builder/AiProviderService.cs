@@ -1,29 +1,7 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using LocalList.API.NET.Data.Models;
-using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
-namespace LocalList.API.NET.Services;
-
-public class ExtractedPreferences
-{
-    public int Days { get; set; } = 1;
-    public List<string> Categories { get; set; } = new();
-    public List<string> Vibes { get; set; } = new();
-    public string GroupType { get; set; } = "couple";
-    public string PlanName { get; set; } = "My Plan";
-    public int MaxStopsPerDay { get; set; } = 5;
-}
-
-public class TripContextDto
-{
-    public string? GroupType { get; set; }
-    public List<string>? Preferences { get; set; }
-    public List<string>? Vibes { get; set; }
-    public int? Days { get; set; }
-    public string? City { get; set; }
-}
+namespace LocalList.API.NET.Features.Builder;
 
 public class AiProviderService
 {
@@ -41,15 +19,19 @@ public class AiProviderService
         _logger = logger;
     }
 
-    public async Task<ExtractedPreferences> ExtractPreferencesAsync(string message, TripContextDto? context)
+    public async Task<ExtractedPreferences> ExtractPreferencesAsync(string message, TripContextDto? context, CancellationToken ct = default)
     {
         try
         {
             var apiKey = _config["Gemini:ApiKey"];
-            if (string.IsNullOrEmpty(apiKey)) throw new Exception("Gemini API Key missing.");
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                _logger.LogWarning("Gemini API Key missing. Falling back to keywords.");
+                return ExtractWithKeywords(message, context);
+            }
 
             var prompt = BuildPrompt(message, context);
-            
+
             var requestBody = new
             {
                 contents = new[]
@@ -66,17 +48,17 @@ public class AiProviderService
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
             var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-            
+
             var requestMessage = new HttpRequestMessage(HttpMethod.Post, url);
             requestMessage.Headers.Add("x-goog-api-key", apiKey); // A6: Secure key transit
             requestMessage.Content = content;
 
-            var response = await _httpClient.SendAsync(requestMessage);
+            var response = await _httpClient.SendAsync(requestMessage, ct);
             response.EnsureSuccessStatusCode();
 
-            var responseJson = await response.Content.ReadAsStringAsync();
+            var responseJson = await response.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(responseJson);
-            
+
             var textResult = doc.RootElement
                 .GetProperty("candidates")[0]
                 .GetProperty("content")
@@ -85,18 +67,26 @@ public class AiProviderService
 
             return ParseAiResponse(textResult);
         }
-        catch (Exception ex)
+        catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "Gemini extraction failed. Falling back to keywords.");
+            _logger.LogError(ex, "Gemini API call failed. Falling back to keywords.");
+            return ExtractWithKeywords(message, context);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "Failed to parse Gemini response. Falling back to keywords.");
             return ExtractWithKeywords(message, context);
         }
     }
 
     private string BuildPrompt(string message, TripContextDto? context)
     {
+        // Sanitize user input to mitigate prompt injection
+        var sanitized = message.Replace("\"", "'").Replace("\\", "");
+        if (sanitized.Length > 500) sanitized = sanitized[..500];
         var ctxStr = JsonSerializer.Serialize(context ?? new TripContextDto());
         return $@"Extract travel plan preferences from this message. Return JSON only, no markdown.
-Message: ""{message}""
+Message: ""{sanitized}""
 Context: {ctxStr}
 
 Return this exact JSON shape:
@@ -115,12 +105,12 @@ Return this exact JSON shape:
         try
         {
             var cleaned = json.Replace("```json\n", "").Replace("```\n", "").Replace("```", "").Trim();
-            var result = JsonSerializer.Deserialize<ExtractedPreferences>(cleaned, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) 
+            var result = JsonSerializer.Deserialize<ExtractedPreferences>(cleaned, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                          ?? new ExtractedPreferences();
 
             result.Days = Math.Clamp(result.Days, 1, 7);
             result.MaxStopsPerDay = Math.Clamp(result.MaxStopsPerDay, 3, 6);
-            
+
             if (result.Categories != null)
                 result.Categories = result.Categories.Where(c => AllowedCategories.Contains(c.ToLower())).ToList();
             else result.Categories = new List<string>();
@@ -130,8 +120,9 @@ Return this exact JSON shape:
 
             return result;
         }
-        catch
+        catch (JsonException ex)
         {
+            _logger.LogWarning(ex, "Failed to deserialize AI response JSON");
             return new ExtractedPreferences();
         }
     }

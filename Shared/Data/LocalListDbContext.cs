@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
-using LocalList.API.NET.Data.Models;
+using LocalList.API.NET.Shared.Data.Entities;
 
-namespace LocalList.API.NET.Data;
+namespace LocalList.API.NET.Shared.Data;
 
 public class LocalListDbContext : DbContext
 {

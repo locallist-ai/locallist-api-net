@@ -2,10 +2,10 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
-using LocalList.API.NET.Data;
-using LocalList.API.NET.Data.Models;
+using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Data.Entities;
 
-namespace LocalList.API.NET.Controllers;
+namespace LocalList.API.NET.Features.Follow;
 
 [ApiController]
 [Route("follow")]
@@ -13,21 +13,23 @@ namespace LocalList.API.NET.Controllers;
 public class FollowController : ControllerBase
 {
     private readonly LocalListDbContext _db;
+    private readonly TimeProvider _clock;
 
-    public FollowController(LocalListDbContext db)
+    public FollowController(LocalListDbContext db, TimeProvider clock)
     {
         _db = db;
+        _clock = clock;
     }
 
     [HttpPost("start")]
-    public async Task<IActionResult> StartSession([FromBody] FollowStartRequest request)
+    public async Task<IActionResult> StartSession([FromBody] FollowStartRequest request, CancellationToken ct)
     {
         var userId = GetUserId();
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
         var existing = await _db.FollowSessions
             .Where(fs => fs.UserId == userId.Value && fs.Status == "active")
-            .FirstOrDefaultAsync();
+            .FirstOrDefaultAsync(ct);
 
         if (existing != null)
             return Conflict(new { error = "You already have an active follow session", sessionId = existing.Id });
@@ -42,20 +44,20 @@ public class FollowController : ControllerBase
         };
 
         _db.FollowSessions.Add(session);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
 
         return CreatedAtAction(nameof(GetActiveSession), new { }, session);
     }
 
     [HttpGet("active")]
-    public async Task<IActionResult> GetActiveSession()
+    public async Task<IActionResult> GetActiveSession(CancellationToken ct)
     {
         var userId = GetUserId();
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
         var session = await _db.FollowSessions
             .Where(fs => fs.UserId == userId.Value && fs.Status == "active")
-            .FirstOrDefaultAsync();
+            .FirstOrDefaultAsync(ct);
 
         if (session == null)
             return Ok(new { session = (object?)null });
@@ -65,7 +67,7 @@ public class FollowController : ControllerBase
             .Where(ps => ps.PlanId == session.PlanId)
             .OrderBy(ps => ps.DayNumber)
             .ThenBy(ps => ps.OrderIndex)
-            .ToListAsync();
+            .ToListAsync(ct);
 
         var currentDayStops = stops.Where(s => s.DayNumber == session.CurrentDayIndex).ToList();
 
@@ -88,45 +90,45 @@ public class FollowController : ControllerBase
     }
 
     [HttpPatch("{id:guid}/next")]
-    public async Task<IActionResult> AdvanceToNextStop(Guid id)
+    public async Task<IActionResult> AdvanceToNextStop(Guid id, CancellationToken ct)
     {
-        var updated = await AdvanceSessionInternal(id);
+        var updated = await AdvanceSessionInternal(id, ct);
         if (updated == null) return NotFound(new { error = "Session not found or not active" });
         return Ok(updated);
     }
 
     [HttpPatch("{id:guid}/skip")]
-    public async Task<IActionResult> SkipStop(Guid id)
+    public async Task<IActionResult> SkipStop(Guid id, CancellationToken ct)
     {
-        var updated = await AdvanceSessionInternal(id);
+        var updated = await AdvanceSessionInternal(id, ct);
         if (updated == null) return NotFound(new { error = "Session not found or not active" });
         return Ok(updated);
     }
 
     [HttpPatch("{id:guid}/pause")]
-    public async Task<IActionResult> PauseSession(Guid id)
+    public async Task<IActionResult> PauseSession(Guid id, CancellationToken ct)
     {
-        var session = await GetSessionForUpdate(id);
+        var session = await GetSessionForUpdate(id, ct);
         if (session == null) return NotFound(new { error = "Session not found" });
 
         session.Status = "paused";
-        session.LastActiveAt = DateTimeOffset.UtcNow;
-        
-        await _db.SaveChangesAsync();
+        session.LastActiveAt = _clock.GetUtcNow();
+
+        await _db.SaveChangesAsync(ct);
         return Ok(session);
     }
 
     [HttpPatch("{id:guid}/complete")]
-    public async Task<IActionResult> CompleteSession(Guid id)
+    public async Task<IActionResult> CompleteSession(Guid id, CancellationToken ct)
     {
-        var session = await GetSessionForUpdate(id);
+        var session = await GetSessionForUpdate(id, ct);
         if (session == null) return NotFound(new { error = "Session not found" });
 
         session.Status = "completed";
-        session.CompletedAt = DateTimeOffset.UtcNow;
-        session.LastActiveAt = DateTimeOffset.UtcNow;
-        
-        await _db.SaveChangesAsync();
+        session.CompletedAt = _clock.GetUtcNow();
+        session.LastActiveAt = _clock.GetUtcNow();
+
+        await _db.SaveChangesAsync(ct);
         return Ok(session);
     }
 
@@ -136,30 +138,30 @@ public class FollowController : ControllerBase
         return string.IsNullOrEmpty(idStr) ? null : Guid.Parse(idStr);
     }
 
-    private async Task<FollowSession?> GetSessionForUpdate(Guid sessionId)
+    private async Task<FollowSession?> GetSessionForUpdate(Guid sessionId, CancellationToken ct)
     {
         var userId = GetUserId();
         if (userId == null) return null;
 
         return await _db.FollowSessions
             .Where(fs => fs.Id == sessionId && fs.UserId == userId.Value)
-            .FirstOrDefaultAsync();
+            .FirstOrDefaultAsync(ct);
     }
 
-    private async Task<FollowSession?> AdvanceSessionInternal(Guid sessionId)
+    private async Task<FollowSession?> AdvanceSessionInternal(Guid sessionId, CancellationToken ct)
     {
         var userId = GetUserId();
         if (userId == null) return null;
 
         var session = await _db.FollowSessions
             .Where(fs => fs.Id == sessionId && fs.UserId == userId.Value && fs.Status == "active")
-            .FirstOrDefaultAsync();
+            .FirstOrDefaultAsync(ct);
 
         if (session == null) return null;
 
         var dayStopsCount = await _db.PlanStops
             .Where(ps => ps.PlanId == session.PlanId && ps.DayNumber == session.CurrentDayIndex)
-            .CountAsync();
+            .CountAsync(ct);
 
         int newStopIndex = session.CurrentStopIndex + 1;
         int newDayIndex = session.CurrentDayIndex;
@@ -172,14 +174,9 @@ public class FollowController : ControllerBase
 
         session.CurrentStopIndex = newStopIndex;
         session.CurrentDayIndex = newDayIndex;
-        session.LastActiveAt = DateTimeOffset.UtcNow;
+        session.LastActiveAt = _clock.GetUtcNow();
 
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
         return session;
     }
-}
-
-public class FollowStartRequest
-{
-    public Guid PlanId { get; set; }
 }

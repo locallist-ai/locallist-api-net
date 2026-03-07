@@ -2,7 +2,7 @@ using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Data.Models;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 [Table("refresh_tokens")]
 public class RefreshToken

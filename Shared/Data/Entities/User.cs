@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Data.Models;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 [Table("users")]
 public class User
@@ -53,7 +53,7 @@ public class User
 
     [Column("updated_at")]
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
-    
+
     // Navigation properties
     public ICollection<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
     public ICollection<Plan> CreatedPlans { get; set; } = new List<Plan>();

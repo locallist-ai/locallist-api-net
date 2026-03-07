@@ -4,11 +4,10 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using System.Text.Json;
-using LocalList.API.NET.Data;
-using LocalList.API.NET.Data.Models;
-using LocalList.API.NET.Services;
+using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Data.Entities;
 
-namespace LocalList.API.NET.Controllers;
+namespace LocalList.API.NET.Features.Builder;
 
 [ApiController]
 [Route("builder")]
@@ -16,33 +15,35 @@ public class BuilderController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly AiProviderService _aiProvider;
+    private readonly ILogger<BuilderController> _logger;
 
-    public BuilderController(LocalListDbContext db, AiProviderService aiProvider)
+    public BuilderController(LocalListDbContext db, AiProviderService aiProvider, ILogger<BuilderController> logger)
     {
         _db = db;
         _aiProvider = aiProvider;
+        _logger = logger;
     }
 
     [HttpPost("chat")]
     [AllowAnonymous]
     [EnableRateLimiting("BuilderLimit")]
-    public async Task<IActionResult> GeneratePlan([FromBody] BuilderChatRequest request)
+    public async Task<IActionResult> GeneratePlan([FromBody] BuilderChatRequest request, CancellationToken ct)
     {
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
-        
+
         var userIdString = User.FindFirstValue(ClaimTypes.NameIdentifier);
         Guid? userId = string.IsNullOrEmpty(userIdString) ? null : Guid.Parse(userIdString);
 
         try
         {
             // 1. Extract preferences from Gemini
-            var prefs = await _aiProvider.ExtractPreferencesAsync(request.Message, request.TripContext);
+            var prefs = await _aiProvider.ExtractPreferencesAsync(request.Message, request.TripContext, ct);
 
             // 2. Query Curated Places matching the City
             var city = request.TripContext?.City ?? "Miami"; // Default fallback
             var matchingPlaces = await _db.Places
                 .Where(p => p.Status == "published" && p.City == city)
-                .ToListAsync();
+                .ToListAsync(ct);
 
             // 3. Filter using Category preferences
             var filteredPlaces = FilterPlaces(matchingPlaces, prefs);
@@ -50,7 +51,8 @@ public class BuilderController : ControllerBase
             // 4. Build schedule (Haversine scheduling algorithm)
             var planStopsData = BuildPlanSchedule(filteredPlaces, prefs);
 
-            var planName = string.IsNullOrEmpty(prefs.PlanName) ? $"{request.Message.Substring(0, Math.Min(60, request.Message.Length))} Plan" : prefs.PlanName;
+            var sanitizedMessage = request.Message.Length > 60 ? request.Message[..60] : request.Message;
+            var planName = string.IsNullOrEmpty(prefs.PlanName) ? $"{sanitizedMessage} Plan" : prefs.PlanName;
 
             if (isAnonymous)
             {
@@ -60,7 +62,7 @@ public class BuilderController : ControllerBase
                     Name = planName,
                     City = city,
                     Type = "ai",
-                    Description = $"AI-generated plan: {request.Message}",
+                    Description = $"AI-generated plan: {sanitizedMessage}",
                     DurationDays = prefs.Days,
                     TripContext = request.TripContext,
                     IsPublic = false,
@@ -83,7 +85,7 @@ public class BuilderController : ControllerBase
                 Name = planName,
                 City = city,
                 Type = "ai",
-                Description = $"AI-generated plan: {request.Message}",
+                Description = $"AI-generated plan: {sanitizedMessage}",
                 DurationDays = prefs.Days,
                 TripContext = request.TripContext != null ? JsonDocument.Parse(JsonSerializer.Serialize(request.TripContext)) : JsonDocument.Parse("{}"),
                 IsPublic = false,
@@ -91,7 +93,7 @@ public class BuilderController : ControllerBase
             };
 
             _db.Plans.Add(plan);
-            await _db.SaveChangesAsync();
+            await _db.SaveChangesAsync(ct);
 
             var stopsToInsert = planStopsData.Select(sd => new PlanStop
             {
@@ -108,7 +110,7 @@ public class BuilderController : ControllerBase
             if (stopsToInsert.Any())
             {
                 _db.PlanStops.AddRange(stopsToInsert);
-                await _db.SaveChangesAsync();
+                await _db.SaveChangesAsync(ct);
             }
 
             var stopsWithPlaces = ResolveStopPlaces(planStopsData, filteredPlaces);
@@ -121,9 +123,19 @@ public class BuilderController : ControllerBase
             });
 
         }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499, new { error = "Request cancelled" });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Gemini API call failed during plan generation");
+            return StatusCode(502, new { error = "AI service temporarily unavailable" });
+        }
         catch (Exception ex)
         {
-            return StatusCode(500, new { error = "Failed to generate plan", details = ex.Message });
+            _logger.LogError(ex, "Plan generation failed");
+            return StatusCode(500, new { error = "Failed to generate plan" });
         }
     }
 
@@ -141,10 +153,10 @@ public class BuilderController : ControllerBase
             { "culture", "culture" }
         };
 
-        return allPlaces.Where(p => 
+        return allPlaces.Where(p =>
         {
             var pCat = p.Category.ToLower();
-            return prefs.Categories.Any(c => 
+            return prefs.Categories.Any(c =>
                 (catMap.ContainsKey(c) && catMap[c] == pCat) || pCat.Contains(c));
         }).ToList();
     }
@@ -171,7 +183,7 @@ public class BuilderController : ControllerBase
     {
         var stops = new List<ScheduledStopDto>();
         var usedPlaceIds = new HashSet<Guid>();
-        
+
         var random = new Random();
         var shuffled = filteredPlaces.OrderBy(x => random.Next()).ToList();
 
@@ -194,8 +206,8 @@ public class BuilderController : ControllerBase
             {
                 var slot = daySlots[i];
 
-                var place = shuffled.FirstOrDefault(p => 
-                    !usedPlaceIds.Contains(p.Id) && 
+                var place = shuffled.FirstOrDefault(p =>
+                    !usedPlaceIds.Contains(p.Id) &&
                     IsGoodTimeMatch(p, slot.TimeBlock));
 
                 if (place == null) continue;
@@ -288,8 +300,8 @@ public class BuilderController : ControllerBase
     private object ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces)
     {
         var placeMap = allPlaces.ToDictionary(p => p.Id);
-        
-        return stops.Select(stop => 
+
+        return stops.Select(stop =>
         {
             placeMap.TryGetValue(stop.PlaceId, out var place);
             return new
@@ -302,7 +314,7 @@ public class BuilderController : ControllerBase
                 suggestedArrival = stop.SuggestedArrival,
                 suggestedDurationMin = stop.SuggestedDurationMin,
                 travelFromPrevious = stop.TravelFromPrevious,
-                place = place != null ? new 
+                place = place != null ? new
                 {
                     id = place.Id,
                     name = place.Name,
@@ -317,10 +329,4 @@ public class BuilderController : ControllerBase
             };
         });
     }
-}
-
-public class BuilderChatRequest
-{
-    public required string Message { get; set; }
-    public TripContextDto? TripContext { get; set; }
 }

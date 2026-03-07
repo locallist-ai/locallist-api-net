@@ -2,13 +2,13 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
-using LocalList.API.NET.Data;
+using LocalList.API.NET.Shared.Data;
 
-namespace LocalList.API.NET.Controllers;
+namespace LocalList.API.NET.Features.Account;
 
 [ApiController]
 [Route("account")]
-[Authorize] // Requires a valid JWT token
+[Authorize]
 public class AccountController : ControllerBase
 {
     private readonly LocalListDbContext _db;
@@ -18,12 +18,11 @@ public class AccountController : ControllerBase
         _db = db;
     }
 
-    // ─── GET /account ────────────────────────────────────────
     [HttpGet]
-    public async Task<IActionResult> GetAccount()
+    public async Task<IActionResult> GetAccount(CancellationToken ct)
     {
         var userIdString = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        
+
         if (string.IsNullOrEmpty(userIdString) || !Guid.TryParse(userIdString, out Guid userId))
             return Unauthorized(new { error = "Invalid token claims" });
 
@@ -39,7 +38,7 @@ public class AccountController : ControllerBase
                 city = u.City,
                 createdAt = u.CreatedAt
             })
-            .FirstOrDefaultAsync();
+            .FirstOrDefaultAsync(ct);
 
         if (user == null)
             return NotFound(new { error = "User not found" });
@@ -47,34 +46,33 @@ public class AccountController : ControllerBase
         return Ok(new { user });
     }
 
-    // ─── DELETE /account ─────────────────────────────────────
     // Apple Guideline 5.1.1(v) - Account deletion
     [HttpDelete]
-    public async Task<IActionResult> DeleteAccount()
+    public async Task<IActionResult> DeleteAccount(CancellationToken ct)
     {
         var userIdString = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        
+
         if (string.IsNullOrEmpty(userIdString) || !Guid.TryParse(userIdString, out Guid userId))
             return Unauthorized(new { error = "Invalid token claims" });
 
-        var user = await _db.Users.FindAsync(userId);
+        var user = await _db.Users.FindAsync([userId], ct);
         if (user == null)
             return NotFound(new { error = "User not found" });
 
         // Nullify references in plans and places (no cascade on these FKs)
-        var plans = await _db.Plans.Where(p => p.CreatedById == userId).ToListAsync();
+        var plans = await _db.Plans.Where(p => p.CreatedById == userId).ToListAsync(ct);
         foreach (var plan in plans) { plan.CreatedById = null; }
 
-        var submittedPlaces = await _db.Places.Where(p => p.SubmittedById == userId).ToListAsync();
+        var submittedPlaces = await _db.Places.Where(p => p.SubmittedById == userId).ToListAsync(ct);
         foreach (var place in submittedPlaces) { place.SubmittedById = null; }
 
-        var reviewedPlaces = await _db.Places.Where(p => p.ReviewedById == userId).ToListAsync();
+        var reviewedPlaces = await _db.Places.Where(p => p.ReviewedById == userId).ToListAsync(ct);
         foreach (var place in reviewedPlaces) { place.ReviewedById = null; }
 
         // Delete user (RefreshTokens and FollowSessions will cascade automatically via DB constraints)
         _db.Users.Remove(user);
-        
-        await _db.SaveChangesAsync();
+
+        await _db.SaveChangesAsync(ct);
 
         return Ok(new { message = "Account deleted" });
     }
