@@ -16,14 +16,13 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x' # Puedes adaptarlo a la versión exacta que uses y añadir global.json si hace falta
+          dotnet-version: '10.0.x'
 
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore LocalList.API.slnx
 
       - name: Build
-        run: dotnet build --no-restore
+        run: dotnet build LocalList.API.slnx --no-restore
 
       - name: Test
-        # Opcional: ejecuta los tests si existen
-        run: dotnet test --no-build --verbosity normal
+        run: dotnet test LocalList.API.slnx --no-build --verbosity normal

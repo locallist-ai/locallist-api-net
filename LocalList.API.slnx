@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="LocalList.API.NET.csproj" />
+  <Project Path="Tests\LocalList.API.Tests.csproj" />
+</Solution>

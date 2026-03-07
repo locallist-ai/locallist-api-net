@@ -6,10 +6,11 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 
 | | Details |
 |---|---|
-| **Tech** | .NET 8 Core (Minimal APIs), C#, Entity Framework Core, Neon PostgreSQL |
+| **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Neon PostgreSQL |
+| **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Custom JWT (HS256) — Apple Sign In + Google + email/password. Password hashing with BCrypt. |
-| **AI** | Gemini 2.5 Flash via `Services/AiProviderService.cs`. |
+| **AI** | Gemini 2.5 Flash via `Features/Builder/AiProviderService.cs`. |
 | **Rate Limit** | 100 req/min global. Builder limited to 5/hr. |
 
 ## Running Locally
@@ -23,23 +24,49 @@ dotnet run
 Required User Secrets / Environment Variables:
 `ConnectionStrings__DefaultConnection`, `Jwt__Secret`, `Gemini__ApiKey`
 
+## Project Structure (VSA)
+
+```
+LocalList.API.NET/
+├── Program.cs                          # App config, DI, JWT, CORS, rate limiting
+├── Features/
+│   ├── Account/
+│   │   └── AccountController.cs        # GET /account, DELETE /account
+│   ├── Auth/
+│   │   ├── AuthController.cs           # POST /auth/login, /register, /signin, /refresh
+│   │   └── AuthDtos.cs                 # LoginRequest, RegisterRequest, OAuthRequest, RefreshRequest
+│   ├── Builder/
+│   │   ├── BuilderController.cs        # POST /builder/chat
+│   │   ├── BuilderDtos.cs             # BuilderChatRequest, ExtractedPreferences, TripContextDto
+│   │   └── AiProviderService.cs       # Gemini 2.5 Flash integration
+│   ├── Follow/
+│   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
+│   │   └── FollowDtos.cs              # FollowStartRequest
+│   ├── Places/
+│   │   └── PlacesController.cs         # GET /places, GET /places/:id
+│   └── Plans/
+│       └── PlansController.cs          # GET /plans, GET /plans/:id
+└── Shared/
+    ├── Auth/
+    │   └── JwtTokenService.cs          # JWT generation, refresh token management
+    └── Data/
+        ├── LocalListDbContext.cs        # EF Core DbContext, entity configs, indices
+        └── Entities/                    # EF Core entities
+            ├── User.cs
+            ├── RefreshToken.cs
+            ├── Plan.cs
+            ├── PlanStop.cs
+            ├── Place.cs
+            └── FollowSession.cs
+```
+
 ## Endpoints
 
-| Controller | Endpoints |
+| Feature | Endpoints |
 |---|---|
-| `AccountController.cs` | `GET /account`, `DELETE /account` |
-| `AuthController.cs` | `POST /auth/login`, `/auth/register`, `/auth/oauth-login`, `/auth/refresh` |
-| `PlacesController.cs` | `GET /places/`, `GET /places/:id` |
-| `PlansController.cs` | `GET /plans/`, `GET /plans/:id` |
-| `BuilderController.cs` | `POST /builder/chat` |
-| `FollowController.cs` | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
-
-## Key Files
-
-- `Program.cs` — Main app configuration, DI container setup, JWT Bearer configuration, CORS, Database connection.
-- `Data/LocalListDbContext.cs` — EF Core database context, entity configurations.
-- `Models/` — EF Core Entities (User, Place, Plan, PlanStop, FollowSession, RefreshToken).
-- `DTOs/` — Data Transfer Objects with DataAnnotation validations (crucial for security).
-- `Services/JwtTokenService.cs` — JWT generation and refresh token management.
-- `Services/AiProviderService.cs` — Gemini 2.5 integration for the Plan Builder.
-- `Helpers/Haversine.cs` — Distance calculations between coordinates.
+| Account | `GET /account`, `DELETE /account` |
+| Auth | `POST /auth/login`, `/auth/register`, `/auth/signin`, `/auth/refresh` |
+| Places | `GET /places/`, `GET /places/:id` |
+| Plans | `GET /plans/`, `GET /plans/:id` |
+| Builder | `POST /builder/chat` |
+| Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
