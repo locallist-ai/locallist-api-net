@@ -13,9 +13,6 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateBootstrapLogger();
 
-try
-{
-
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Host.UseSerilog((context, services, configuration) => configuration
@@ -222,16 +219,6 @@ app.MapGet("/health", (TimeProvider clock) =>
 ;
 
 app.Run();
-
-}
-catch (Exception ex)
-{
-    Log.Fatal(ex, "Application terminated unexpectedly");
-}
-finally
-{
-    Log.CloseAndFlush();
-}
 
 // Make the implicit Program class accessible for WebApplicationFactory<Program> in tests
 public partial class Program { }
