@@ -7,8 +7,22 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Threading.RateLimiting;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
+
+try
+{
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, services, configuration) => configuration
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services)
+    .Enrich.FromLogContext()
+    .WriteTo.Console());
 
 // A5: Limit Kestrel MaxRequestBodySize to prevent huge payload DoS (10 MB)
 builder.WebHost.ConfigureKestrel(serverOptions =>
@@ -142,15 +156,21 @@ app.UseExceptionHandler(errorApp =>
         context.Response.StatusCode = 500;
         context.Response.ContentType = "application/json";
         var exceptionHandlerPathFeature = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerPathFeature>();
-        
+
+        if (exceptionHandlerPathFeature?.Error is Exception exception)
+        {
+            var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+            logger.LogError(exception, "Unhandled exception");
+        }
+
         // C2: Exception Handler restricts error details to Development environment
         if (app.Environment.IsDevelopment())
         {
             if (exceptionHandlerPathFeature?.Error is Exception ex)
             {
-                await context.Response.WriteAsJsonAsync(new 
-                { 
-                    error = ex.Message, 
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    error = ex.Message,
                     inner = ex.InnerException?.Message,
                     type = ex.GetType().Name
                 });
@@ -172,6 +192,19 @@ app.Use(async (context, next) =>
     await next();
 });
 
+// Correlation ID middleware: read from request or generate new
+app.Use(async (context, next) =>
+{
+    var requestId = context.Request.Headers["X-Request-Id"].FirstOrDefault() ?? Guid.NewGuid().ToString();
+    context.Response.Headers["X-Request-Id"] = requestId;
+    using (Serilog.Context.LogContext.PushProperty("RequestId", requestId))
+    {
+        await next();
+    }
+});
+
+app.UseSerilogRequestLogging();
+
 app.UseHttpsRedirection();
 app.UseCors("AllowSpecificOrigins");
 app.UseRateLimiter();
@@ -189,6 +222,16 @@ app.MapGet("/health", (TimeProvider clock) =>
 ;
 
 app.Run();
+
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
 
 // Make the implicit Program class accessible for WebApplicationFactory<Program> in tests
 public partial class Program { }

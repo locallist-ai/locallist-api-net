@@ -14,13 +14,16 @@ public class FollowController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly TimeProvider _clock;
+    private readonly ILogger<FollowController> _logger;
 
-    public FollowController(LocalListDbContext db, TimeProvider clock)
+    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger)
     {
         _db = db;
         _clock = clock;
+        _logger = logger;
     }
 
+    /// <summary>Creates a new follow session (state: active). Rejects if user already has an active session. Requires auth.</summary>
     [HttpPost("start")]
     public async Task<IActionResult> StartSession([FromBody] FollowStartRequest request, CancellationToken ct)
     {
@@ -46,9 +49,11 @@ public class FollowController : ControllerBase
         _db.FollowSessions.Add(session);
         await _db.SaveChangesAsync(ct);
 
+        _logger.LogInformation("Follow session started: {SessionId} for plan {PlanId} by user {UserId}", session.Id, request.PlanId, userId.Value);
         return CreatedAtAction(nameof(GetActiveSession), new { }, session);
     }
 
+    /// <summary>Returns the user's active follow session with current/next stop details and progress. Returns null session if none active.</summary>
     [HttpGet("active")]
     public async Task<IActionResult> GetActiveSession(CancellationToken ct)
     {
@@ -89,22 +94,27 @@ public class FollowController : ControllerBase
         });
     }
 
+    /// <summary>Advances to the next stop. Transitions: active -> active (increments stop/day index). Auto-advances to next day when current day's stops are exhausted.</summary>
     [HttpPatch("{id:guid}/next")]
     public async Task<IActionResult> AdvanceToNextStop(Guid id, CancellationToken ct)
     {
         var updated = await AdvanceSessionInternal(id, ct);
         if (updated == null) return NotFound(new { error = "Session not found or not active" });
+        _logger.LogInformation("Follow session {SessionId}: {Action}", id, "next");
         return Ok(updated);
     }
 
+    /// <summary>Skips the current stop (same advancement logic as /next, semantically different for analytics).</summary>
     [HttpPatch("{id:guid}/skip")]
     public async Task<IActionResult> SkipStop(Guid id, CancellationToken ct)
     {
         var updated = await AdvanceSessionInternal(id, ct);
         if (updated == null) return NotFound(new { error = "Session not found or not active" });
+        _logger.LogInformation("Follow session {SessionId}: {Action}", id, "skip");
         return Ok(updated);
     }
 
+    /// <summary>Transitions session: active -> paused. Preserves current position for later resume.</summary>
     [HttpPatch("{id:guid}/pause")]
     public async Task<IActionResult> PauseSession(Guid id, CancellationToken ct)
     {
@@ -115,9 +125,11 @@ public class FollowController : ControllerBase
         session.LastActiveAt = _clock.GetUtcNow();
 
         await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Follow session {SessionId}: {Action}", id, "pause");
         return Ok(session);
     }
 
+    /// <summary>Transitions session: active/paused -> completed. Terminal state; sets CompletedAt timestamp.</summary>
     [HttpPatch("{id:guid}/complete")]
     public async Task<IActionResult> CompleteSession(Guid id, CancellationToken ct)
     {
@@ -129,6 +141,7 @@ public class FollowController : ControllerBase
         session.LastActiveAt = _clock.GetUtcNow();
 
         await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Follow session {SessionId}: {Action}", id, "complete");
         return Ok(session);
     }
 
