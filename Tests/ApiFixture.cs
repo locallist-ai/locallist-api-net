@@ -75,6 +75,10 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             {
                 options.GlobalLimiter = PartitionedRateLimiter.Create<Microsoft.AspNetCore.Http.HttpContext, string>(
                     _ => RateLimitPartition.GetNoLimiter("test"));
+                options.AddPolicy("AuthLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("BuilderLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
     }
