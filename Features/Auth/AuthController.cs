@@ -15,14 +15,17 @@ public class AuthController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly JwtTokenService _jwtTokenService;
     private readonly TimeProvider _clock;
+    private readonly ILogger<AuthController> _logger;
 
-    public AuthController(LocalListDbContext db, JwtTokenService jwtTokenService, TimeProvider clock)
+    public AuthController(LocalListDbContext db, JwtTokenService jwtTokenService, TimeProvider clock, ILogger<AuthController> logger)
     {
         _db = db;
         _jwtTokenService = jwtTokenService;
         _clock = clock;
+        _logger = logger;
     }
 
+    /// <summary>Authenticates a user with email + password. No auth required.</summary>
     [HttpPost("login")]
     public async Task<IActionResult> EmailLogin([FromBody] LoginRequest request, CancellationToken ct)
     {
@@ -35,11 +38,16 @@ public class AuthController : ControllerBase
             return Unauthorized(new { error = "Use Apple or Google to sign in" });
 
         if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+        {
+            _logger.LogWarning("Failed login attempt for {Email}", request.Email);
             return Unauthorized(new { error = "Invalid credentials" });
+        }
 
+        _logger.LogInformation("User {UserId} logged in via {Method}", user.Id, "password");
         return await GenerateTokensResponse(user, ct);
     }
 
+    /// <summary>Registers a new user with email + password. Returns generic error on duplicate to prevent email enumeration.</summary>
     [HttpPost("register")]
     public async Task<IActionResult> EmailRegister([FromBody] RegisterRequest request, CancellationToken ct)
     {
@@ -60,9 +68,11 @@ public class AuthController : ControllerBase
         _db.Users.Add(newUser);
         await _db.SaveChangesAsync(ct);
 
+        _logger.LogInformation("New user registered: {UserId} ({Email})", newUser.Id, newUser.Email);
         return await GenerateTokensResponse(user: newUser, ct);
     }
 
+    /// <summary>OAuth sign-in (Apple/Google). Creates user on first login or links provider to existing account. Apple returns 501 (not yet implemented).</summary>
     [HttpPost("signin")]
     public async Task<IActionResult> OAuthSignIn([FromBody] OAuthRequest request, CancellationToken ct)
     {
@@ -129,9 +139,11 @@ public class AuthController : ControllerBase
         }
 
         await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("User {UserId} signed in via {Provider}", user.Id, request.Provider);
         return await GenerateTokensResponse(user, ct);
     }
 
+    /// <summary>Exchanges a refresh token for a new access + refresh pair. Enforces token rotation (old token is consumed). Opportunistically cleans up expired tokens.</summary>
     [HttpPost("refresh")]
     public async Task<IActionResult> RefreshToken([FromBody] RefreshRequest request, CancellationToken ct)
     {
@@ -165,10 +177,12 @@ public class AuthController : ControllerBase
                 }
 
                 _db.RefreshTokens.Remove(tokenRecord); // Enforce rotation
+                _logger.LogInformation("Token refreshed for user {UserId}", tokenRecord.User!.Id);
                 return await GenerateTokensResponse(tokenRecord.User!, ct);
             }
         }
 
+        _logger.LogWarning("Token refresh failed: invalid or expired token");
         return Unauthorized(new { error = "Invalid refresh token" });
     }
 

@@ -1,52 +1,41 @@
 # LocalList.API.NET
 
-This is the central Backend API for the LocalList ecosystem, rewritten in **.NET 8 (C#)** for improved maintainability, debugging, and type safety. It replaces the legacy Node.js/Hono implementation.
+Backend API for the LocalList travel curation platform, built in **.NET 10 (C#)** with Vertical Slice Architecture (VSA).
 
-## 🏗️ Architecture
+For detailed technical context, architecture decisions, and endpoint reference, see **`CLAUDE.md`**.
 
-The project follows a standard ASP.NET Core MVC / Web API pattern, structured to be lightweight but fully typed.
-
-- **`Program.cs`**: The entry point. Configures Dependency Injection (DI), Middleware (CORS, JWT Authentication, Swagger), and routes.
-- **`Data/`**: Contains the Entity Framework Core configuration.
-  - **`Models/`**: The C# representations of our PostgreSQL tables (`User`, `Place`, `Plan`, etc.). These mirror the legacy Drizzle ORM schema exactly so no data is lost.
-  - **`LocalListDbContext.cs`**: The EF Core database context. Configures relationships, cascades, and constraints.
-- **`Controllers/`**: Contains the API endpoints.
-  - **`AuthController.cs`**: Handles Apple/Google OAuth, standard Email/Password registration, and JWT issuance/refreshing.
-- **`Services/`**: Contains business logic encapsulated for Dependency Injection.
-  - **`JwtTokenService.cs`**: Handles the generation of Access and Refresh tokens.
-
-## 🛠️ Tech Stack
-- **Framework**: .NET 8 (Web API)
+## Tech Stack
+- **Framework**: .NET 10 (Web API)
+- **Architecture**: Vertical Slice Architecture — feature folders under `Features/`
 - **Database**: PostgreSQL (Neon Serverless)
-- **ORM**: Entity Framework Core 8 (`Npgsql.EntityFrameworkCore.PostgreSQL`)
-- **Authentication**: Custom JWT Bearer Auth + `Google.Apis.Auth` + `BCrypt.Net-Next`
+- **ORM**: Entity Framework Core (`Npgsql.EntityFrameworkCore.PostgreSQL`)
+- **Authentication**: Custom JWT Bearer Auth (HS256) + `Google.Apis.Auth` + `BCrypt.Net-Next`
+- **AI**: Gemini 2.5 Flash via `Features/Builder/AiProviderService.cs`
+- **Rate Limiting**: 100 req/min global, Builder limited to 5/hr
+- **Deploy**: Railway (Dockerfile)
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
-1. Install [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
+1. Install [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 2. Install the EF Core CLI tools: `dotnet tool install --global dotnet-ef`
 
-### Database Setup
-Ensure your local PostgreSQL or Neon database connection string is placed in `appsettings.Development.json`:
+### Environment Setup
+Required User Secrets or Environment Variables:
+- `ConnectionStrings__DefaultConnection` — Neon PostgreSQL connection string
+- `Jwt__Secret` — JWT signing key
+- `Gemini__ApiKey` — Gemini Flash API key
 
-```json
-{
-  "ConnectionStrings": {
-    "DefaultConnection": "Host=localhost;Database=locallist_db;Username=postgres;Password=mypassword"
-  }
-}
-```
+For local development, configure via `dotnet user-secrets` or `appsettings.Development.json`.
 
 ### Running the API
 1. Open a terminal in this directory (`LocalList.API.NET`).
 2. Run `dotnet restore` to fetch NuGet packages.
-3. Run `dotnet run` (or press F5 in Visual Studio).
-4. The API will start, and you can view the Swagger UI at `https://localhost:<port>/swagger`.
+3. Run `dotnet run` (or press F5 in Visual Studio / VS Code).
+4. Swagger UI available at `https://localhost:<port>/swagger`.
 
-## 🐛 Debugging Guide for the Solo Founder
-The primary reason this stack exists is so you (the founder) can debug it easily using Visual Studio or VS Code C# extensions.
+## Debugging Guide
 
-1. **"The database query is failing"**: Open `LocalListDbContext.cs`. Ensure the properties match the exact PostgreSQL column names using the `[Column("name")]` attribute. 
-2. **"Login isn't working"**: Open `AuthController.cs`, put a breakpoint on `[HttpPost("login")]`, and step through the BCrypt validation.
-3. **"Token is always invalid"**: Check `JwtTokenService.cs`. Verify the `Issuer` and `Audience` match what the frontend expects, and ensure `appsettings.json` has the correct `Jwt:Secret`.
+1. **"The database query is failing"**: Check `Shared/Data/LocalListDbContext.cs`. Ensure entity properties match PostgreSQL column names via `[Column("name")]` attributes.
+2. **"Login isn't working"**: Open `Features/Auth/AuthController.cs`, set a breakpoint on `[HttpPost("login")]`, and step through BCrypt validation.
+3. **"Token is always invalid"**: Check `Shared/Auth/JwtTokenService.cs`. Verify `Issuer` and `Audience` match what the frontend expects, and ensure `Jwt:Secret` is configured.

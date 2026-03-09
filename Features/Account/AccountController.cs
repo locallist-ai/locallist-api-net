@@ -12,10 +12,12 @@ namespace LocalList.API.NET.Features.Account;
 public class AccountController : ControllerBase
 {
     private readonly LocalListDbContext _db;
+    private readonly ILogger<AccountController> _logger;
 
-    public AccountController(LocalListDbContext db)
+    public AccountController(LocalListDbContext db, ILogger<AccountController> logger)
     {
         _db = db;
+        _logger = logger;
     }
 
     [HttpGet]
@@ -74,6 +76,7 @@ public class AccountController : ControllerBase
 
         await _db.SaveChangesAsync(ct);
 
+        _logger.LogInformation("Account deleted: {UserId}", userId);
         return Ok(new { message = "Account deleted" });
     }
 }
