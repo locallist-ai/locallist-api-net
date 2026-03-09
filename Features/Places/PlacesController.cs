@@ -11,10 +11,12 @@ namespace LocalList.API.NET.Features.Places;
 public class PlacesController : ControllerBase
 {
     private readonly LocalListDbContext _db;
+    private readonly ILogger<PlacesController> _logger;
 
-    public PlacesController(LocalListDbContext db)
+    public PlacesController(LocalListDbContext db, ILogger<PlacesController> logger)
     {
         _db = db;
+        _logger = logger;
     }
 
     [HttpGet]
@@ -32,6 +34,7 @@ public class PlacesController : ControllerBase
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
         if (isAnonymous && status != "published")
         {
+            _logger.LogWarning("Anonymous user attempted to access {Status} places", status);
             return Unauthorized(new { error = "Only authenticated curators can view non-published places." });
         }
 
