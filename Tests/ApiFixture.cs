@@ -1,6 +1,8 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -67,6 +69,24 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             if (timeDescriptor is not null) services.Remove(timeDescriptor);
 
             services.AddSingleton<TimeProvider>(FakeTime);
+
+            // Disable rate limiting in tests to avoid false failures.
+            // Remove existing rate limiter configure actions from Program.cs first
+            // to prevent "There already exists a policy with the name" ArgumentException.
+            var rateLimiterDescriptors = services
+                .Where(d => d.ServiceType == typeof(Microsoft.Extensions.Options.IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
+                .ToList();
+            foreach (var d in rateLimiterDescriptors) services.Remove(d);
+
+            services.AddRateLimiter(options =>
+            {
+                options.GlobalLimiter = PartitionedRateLimiter.Create<Microsoft.AspNetCore.Http.HttpContext, string>(
+                    _ => RateLimitPartition.GetNoLimiter("test"));
+                options.AddPolicy("AuthLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("BuilderLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+            });
         });
     }
 

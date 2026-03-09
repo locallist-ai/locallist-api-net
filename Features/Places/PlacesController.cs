@@ -38,7 +38,7 @@ public class PlacesController : ControllerBase
             return Unauthorized(new { error = "Only authenticated curators can view non-published places." });
         }
 
-        var query = _db.Places.AsQueryable();
+        var query = _db.Places.AsNoTracking().AsQueryable();
 
         query = query.Where(p => p.Status == status);
 
@@ -51,6 +51,8 @@ public class PlacesController : ControllerBase
         if (!string.IsNullOrEmpty(neighborhood))
             query = query.Where(p => p.Neighborhood == neighborhood);
 
+        var total = await query.CountAsync(ct);
+
         var places = await query
             .OrderBy(p => p.Name)
             .Skip(offset)
@@ -60,16 +62,23 @@ public class PlacesController : ControllerBase
         return Ok(new
         {
             places,
-            total = places.Count
+            total
         });
     }
 
     [HttpGet("{id}")]
     public async Task<IActionResult> GetPlace(Guid id, CancellationToken ct)
     {
-        var place = await _db.Places.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
+
+        var place = await _db.Places.AsNoTracking()
+            .FirstOrDefaultAsync(p => p.Id == id, ct);
 
         if (place == null)
+            return NotFound(new { error = "Place not found" });
+
+        // Anonymous users can only see published places
+        if (isAnonymous && place.Status != "published")
             return NotFound(new { error = "Place not found" });
 
         return Ok(place);
