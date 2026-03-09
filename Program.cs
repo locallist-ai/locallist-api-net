@@ -59,7 +59,7 @@ var jwtSettings = builder.Configuration.GetSection("Jwt");
 var secretKey = jwtSettings["Secret"] ?? throw new InvalidOperationException("JWT Secret is missing.");
 
 // M1: Validate JWT Secret length and weak placeholders at startup
-if (secretKey.Length < 32 || (secretKey == "REPLACE_WITH_SECURE_KEY_IN_PRODUCTION" && builder.Environment.IsProduction()))
+if (secretKey.Length < 32 || (secretKey == "REPLACE_WITH_SECURE_KEY_IN_PRODUCTION" && !builder.Environment.IsDevelopment()))
 {
     throw new InvalidOperationException("CRITICAL: JWT Secret must be at least 32 characters and safely set in Environment Variables.");
 }
