@@ -11,10 +11,12 @@ namespace LocalList.API.NET.Features.Plans;
 public class PlansController : ControllerBase
 {
     private readonly LocalListDbContext _db;
+    private readonly ILogger<PlansController> _logger;
 
-    public PlansController(LocalListDbContext db)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger)
     {
         _db = db;
+        _logger = logger;
     }
 
     [HttpGet]
@@ -71,7 +73,10 @@ public class PlansController : ControllerBase
         Guid? userId = string.IsNullOrEmpty(userIdString) ? null : Guid.Parse(userIdString);
 
         if (!plan.IsPublic && plan.CreatedById != userId)
+        {
+            _logger.LogWarning("User {UserId} attempted to access private plan {PlanId}", userId, id);
             return NotFound(new { error = "Plan not found" });
+        }
 
         // Group stops by day to match the legacy format
         var days = plan.Stops
