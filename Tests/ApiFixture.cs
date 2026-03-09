@@ -70,7 +70,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddSingleton<TimeProvider>(FakeTime);
 
-            // Disable rate limiting in tests to avoid false failures
+            // Disable rate limiting in tests to avoid false failures.
+            // Remove existing rate limiter configure actions from Program.cs first
+            // to prevent "There already exists a policy with the name" ArgumentException.
+            var rateLimiterDescriptors = services
+                .Where(d => d.ServiceType == typeof(Microsoft.Extensions.Options.IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
+                .ToList();
+            foreach (var d in rateLimiterDescriptors) services.Remove(d);
+
             services.AddRateLimiter(options =>
             {
                 options.GlobalLimiter = PartitionedRateLimiter.Create<Microsoft.AspNetCore.Http.HttpContext, string>(
