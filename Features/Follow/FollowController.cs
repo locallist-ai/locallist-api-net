@@ -67,14 +67,11 @@ public class FollowController : ControllerBase
         if (session == null)
             return Ok(new { session = (object?)null });
 
-        var stops = await _db.PlanStops
+        var currentDayStops = await _db.PlanStops.AsNoTracking()
             .Include(ps => ps.Place)
-            .Where(ps => ps.PlanId == session.PlanId)
-            .OrderBy(ps => ps.DayNumber)
-            .ThenBy(ps => ps.OrderIndex)
+            .Where(ps => ps.PlanId == session.PlanId && ps.DayNumber == session.CurrentDayIndex)
+            .OrderBy(ps => ps.OrderIndex)
             .ToListAsync(ct);
-
-        var currentDayStops = stops.Where(s => s.DayNumber == session.CurrentDayIndex).ToList();
 
         var currentStop = session.CurrentStopIndex < currentDayStops.Count ? currentDayStops[session.CurrentStopIndex] : null;
         var nextStop = session.CurrentStopIndex + 1 < currentDayStops.Count ? currentDayStops[session.CurrentStopIndex + 1] : null;
@@ -121,6 +118,9 @@ public class FollowController : ControllerBase
         var session = await GetSessionForUpdate(id, ct);
         if (session == null) return NotFound(new { error = "Session not found" });
 
+        if (session.Status != "active")
+            return BadRequest(new { error = $"Cannot pause a {session.Status} session" });
+
         session.Status = "paused";
         session.LastActiveAt = _clock.GetUtcNow();
 
@@ -136,6 +136,9 @@ public class FollowController : ControllerBase
         var session = await GetSessionForUpdate(id, ct);
         if (session == null) return NotFound(new { error = "Session not found" });
 
+        if (session.Status != "active" && session.Status != "paused")
+            return BadRequest(new { error = $"Cannot complete a {session.Status} session" });
+
         session.Status = "completed";
         session.CompletedAt = _clock.GetUtcNow();
         session.LastActiveAt = _clock.GetUtcNow();
@@ -148,7 +151,7 @@ public class FollowController : ControllerBase
     private Guid? GetUserId()
     {
         var idStr = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return string.IsNullOrEmpty(idStr) ? null : Guid.Parse(idStr);
+        return Guid.TryParse(idStr, out var id) ? id : null;
     }
 
     private async Task<FollowSession?> GetSessionForUpdate(Guid sessionId, CancellationToken ct)
@@ -181,6 +184,21 @@ public class FollowController : ControllerBase
 
         if (newStopIndex >= dayStopsCount)
         {
+            // Check if there are more days
+            var nextDayExists = await _db.PlanStops
+                .AnyAsync(ps => ps.PlanId == session.PlanId && ps.DayNumber == newDayIndex + 1, ct);
+
+            if (!nextDayExists)
+            {
+                // End of plan — auto-complete
+                session.Status = "completed";
+                session.CompletedAt = _clock.GetUtcNow();
+                session.LastActiveAt = _clock.GetUtcNow();
+                await _db.SaveChangesAsync(ct);
+                _logger.LogInformation("Follow session {SessionId}: auto-completed (end of plan)", sessionId);
+                return session;
+            }
+
             newDayIndex += 1;
             newStopIndex = 0;
         }

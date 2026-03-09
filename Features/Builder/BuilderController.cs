@@ -32,7 +32,7 @@ public class BuilderController : ControllerBase
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
 
         var userIdString = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        Guid? userId = string.IsNullOrEmpty(userIdString) ? null : Guid.Parse(userIdString);
+        Guid? userId = Guid.TryParse(userIdString, out var parsedId) ? parsedId : null;
 
         try
         {
@@ -184,8 +184,7 @@ public class BuilderController : ControllerBase
         var stops = new List<ScheduledStopDto>();
         var usedPlaceIds = new HashSet<Guid>();
 
-        var random = new Random();
-        var shuffled = filteredPlaces.OrderBy(x => random.Next()).ToList();
+        var shuffled = filteredPlaces.OrderBy(x => Random.Shared.Next()).ToList();
 
         var dayTemplate = new[]
         {

@@ -32,7 +32,7 @@ public class PlansController : ControllerBase
         limit = Math.Clamp(limit, 1, 100);
         var isAuthenticated = User.Identity?.IsAuthenticated ?? false;
 
-        var query = _db.Plans.Where(p => p.IsPublic);
+        var query = _db.Plans.AsNoTracking().Where(p => p.IsPublic);
 
         if (!string.IsNullOrEmpty(city))
             query = query.Where(p => p.City == city);
@@ -44,6 +44,8 @@ public class PlansController : ControllerBase
         if (!isAuthenticated || showcase)
             query = query.Where(p => p.IsShowcase);
 
+        var total = await query.CountAsync(ct);
+
         var plans = await query
             .OrderBy(p => p.CreatedAt)
             .Skip(offset)
@@ -53,7 +55,7 @@ public class PlansController : ControllerBase
         return Ok(new
         {
             plans,
-            total = plans.Count
+            total
         });
     }
 
@@ -61,7 +63,7 @@ public class PlansController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> GetPlan(Guid id, CancellationToken ct)
     {
-        var plan = await _db.Plans
+        var plan = await _db.Plans.AsNoTracking()
             .Include(p => p.Stops)
             .ThenInclude(s => s.Place)
             .FirstOrDefaultAsync(p => p.Id == id, ct);

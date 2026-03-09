@@ -86,17 +86,14 @@ public class Place
     [StringLength(20)]
     public string Status { get; set; } = "draft";
 
-    // --- New Curation Fields for the Data Ingestion Pipeline ---
+    // --- Curation Fields (not yet mapped — pending DB migration) ---
     [NotMapped]
-    [Column("rejection_reason")]
     public string? RejectionReason { get; set; }
 
     [NotMapped]
-    [Column("ai_vibe_score")]
     public int? AiVibeScore { get; set; }
 
     [NotMapped]
-    [Column("flags")]
     public List<string>? Flags { get; set; }
     // ------------------------------------------------------------
 

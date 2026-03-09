@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -10,6 +11,7 @@ namespace LocalList.API.NET.Features.Auth;
 
 [ApiController]
 [Route("auth")]
+[EnableRateLimiting("AuthLimit")]
 public class AuthController : ControllerBase
 {
     private readonly LocalListDbContext _db;
@@ -68,7 +70,7 @@ public class AuthController : ControllerBase
         _db.Users.Add(newUser);
         await _db.SaveChangesAsync(ct);
 
-        _logger.LogInformation("New user registered: {UserId} ({Email})", newUser.Id, newUser.Email);
+        _logger.LogInformation("New user registered: {UserId}", newUser.Id);
         return await GenerateTokensResponse(user: newUser, ct);
     }
 

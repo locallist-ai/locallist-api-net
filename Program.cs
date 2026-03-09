@@ -4,6 +4,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Features.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Threading.RateLimiting;
@@ -45,7 +46,6 @@ if (!string.IsNullOrEmpty(connectionUrl))
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<JwtTokenService>();
 builder.Services.AddHttpClient<AiProviderService>();
-builder.Services.AddScoped<AiProviderService>();
 
 // Configure JSON formatting
 builder.Services.AddControllers().AddJsonOptions(options =>
@@ -123,7 +123,19 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0,
                 Window = TimeSpan.FromHours(1)
             }));
-            
+
+    // Auth brute-force protection: 10 requests per 15 minutes per IP
+    options.AddPolicy("AuthLimit", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 10,
+                QueueLimit = 0,
+                Window = TimeSpan.FromMinutes(15)
+            }));
+
     options.RejectionStatusCode = 429;
 });
 
@@ -175,12 +187,19 @@ app.UseExceptionHandler(errorApp =>
     });
 });
 
+// Resolve client IP behind Railway's reverse proxy (required for rate limiting)
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
+
 // A1: Inject Security Headers to mitigate XSS, Clickjacking, and framing
 app.Use(async (context, next) =>
 {
     context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
     context.Response.Headers.Append("X-Frame-Options", "DENY");
     context.Response.Headers.Append("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    context.Response.Headers.Append("Content-Security-Policy", "default-src 'none'");
     await next();
 });
 
@@ -206,9 +225,10 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-app.MapGet("/health", (TimeProvider clock) =>
+app.MapGet("/health", async (TimeProvider clock, LocalListDbContext db, CancellationToken ct) =>
 {
-    return new { status = "ok", version = "0.1.0", timestamp = clock.GetUtcNow() };
+    var dbOk = await db.Database.CanConnectAsync(ct);
+    return new { status = dbOk ? "ok" : "degraded", version = "0.1.0", timestamp = clock.GetUtcNow() };
 })
 .WithName("HealthCheck")
 ;
