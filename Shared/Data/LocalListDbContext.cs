@@ -79,6 +79,13 @@ public class LocalListDbContext : DbContext
 
         modelBuilder.Entity<Place>().HasIndex(p => new { p.Status, p.City });
         modelBuilder.Entity<Place>().HasIndex(p => p.Category);
+        modelBuilder.Entity<Place>().HasIndex(p => p.GooglePlaceId).IsUnique();
+
+        // Explicit array column types for Npgsql
+        modelBuilder.Entity<Place>().Property(p => p.BestFor).HasColumnType("text[]");
+        modelBuilder.Entity<Place>().Property(p => p.SuitableFor).HasColumnType("text[]");
+        modelBuilder.Entity<Place>().Property(p => p.Photos).HasColumnType("text[]");
+        modelBuilder.Entity<Place>().Property(p => p.Flags).HasColumnType("text[]");
 
         modelBuilder.Entity<Plan>().HasIndex(p => p.CreatedById);
         modelBuilder.Entity<Plan>().HasIndex(p => new { p.City, p.IsPublic });

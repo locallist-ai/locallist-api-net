@@ -30,7 +30,7 @@ public class PlacesController : ControllerBase
         CancellationToken ct = default)
     {
         limit = Math.Clamp(limit, 1, 100);
-        // C3 Fix: Prevent anonymous users from bypassing draft/review filters
+        // Prevent anonymous users from bypassing draft/review filters
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
         if (isAnonymous && status != "published")
         {
@@ -57,6 +57,7 @@ public class PlacesController : ControllerBase
             .OrderBy(p => p.Name)
             .Skip(offset)
             .Take(limit)
+            .Select(p => PlaceDto.FromEntity(p))
             .ToListAsync(ct);
 
         return Ok(new
@@ -81,6 +82,6 @@ public class PlacesController : ControllerBase
         if (isAnonymous && place.Status != "published")
             return NotFound(new { error = "Place not found" });
 
-        return Ok(place);
+        return Ok(PlaceDto.FromEntity(place));
     }
 }

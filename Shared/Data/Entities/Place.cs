@@ -45,10 +45,10 @@ public class Place
     [Required]
     public string WhyThisPlace { get; set; } = string.Empty;
 
-    [Column("best_for")]
+    [Column("best_for", TypeName = "text[]")]
     public List<string>? BestFor { get; set; }
 
-    [Column("suitable_for")]
+    [Column("suitable_for", TypeName = "text[]")]
     public List<string>? SuitableFor { get; set; }
 
     [Column("best_time")]
@@ -59,7 +59,7 @@ public class Place
     [StringLength(10)]
     public string? PriceRange { get; set; }
 
-    [Column("photos")]
+    [Column("photos", TypeName = "text[]")]
     public List<string>? Photos { get; set; }
 
     [Column("opening_hours", TypeName = "jsonb")]
@@ -86,16 +86,16 @@ public class Place
     [StringLength(20)]
     public string Status { get; set; } = "draft";
 
-    // --- Curation Fields (not yet mapped — pending DB migration) ---
-    [NotMapped]
+    // --- Curation Fields ---
+    [Column("rejection_reason")]
+    [StringLength(1000)]
     public string? RejectionReason { get; set; }
 
-    [NotMapped]
+    [Column("ai_vibe_score")]
     public int? AiVibeScore { get; set; }
 
-    [NotMapped]
+    [Column("flags", TypeName = "text[]")]
     public List<string>? Flags { get; set; }
-    // ------------------------------------------------------------
 
     [Column("submitted_by")]
     public Guid? SubmittedById { get; set; }
