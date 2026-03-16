@@ -136,6 +136,18 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(15)
             }));
 
+    // Admin endpoints: generous limit for internal tooling (bulk imports)
+    options.AddPolicy("AdminLimit", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 60,
+                QueueLimit = 0,
+                Window = TimeSpan.FromMinutes(1)
+            }));
+
     options.RejectionStatusCode = 429;
 });
 

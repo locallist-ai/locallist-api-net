@@ -1,0 +1,112 @@
+[
+  {
+    "name": "Romantic Miami Weekend",
+    "city": "Miami",
+    "type": "curated",
+    "description": "Two days of the best date spots in Miami — intimate dinners, hidden speakeasies, sunset views, and a wellness escape.",
+    "durationDays": 2,
+    "isPublic": true,
+    "isShowcase": true,
+    "stops": [
+      { "placeName": "Panther Coffee", "dayNumber": 1, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "09:00:00", "suggestedDurationMin": 45 },
+      { "placeName": "South Pointe Park", "dayNumber": 1, "orderIndex": 1, "timeBlock": "morning", "suggestedArrival": "10:00:00", "suggestedDurationMin": 60 },
+      { "placeName": "Macchialina", "dayNumber": 1, "orderIndex": 2, "timeBlock": "lunch", "suggestedArrival": "12:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Vizcaya Museum & Gardens", "dayNumber": 1, "orderIndex": 3, "timeBlock": "afternoon", "suggestedArrival": "15:00:00", "suggestedDurationMin": 90 },
+      { "placeName": "Swizzle Rum Bar & Drinkery", "dayNumber": 1, "orderIndex": 4, "timeBlock": "evening", "suggestedArrival": "21:00:00", "suggestedDurationMin": 90 },
+      { "placeName": "Casa Bake", "dayNumber": 2, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "09:30:00", "suggestedDurationMin": 45 },
+      { "placeName": "Fairchild Tropical Botanic Garden", "dayNumber": 2, "orderIndex": 1, "timeBlock": "morning", "suggestedArrival": "11:00:00", "suggestedDurationMin": 90 },
+      { "placeName": "Casadonna", "dayNumber": 2, "orderIndex": 2, "timeBlock": "lunch", "suggestedArrival": "13:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Lagniappe", "dayNumber": 2, "orderIndex": 3, "timeBlock": "evening", "suggestedArrival": "20:00:00", "suggestedDurationMin": 120 }
+    ]
+  },
+  {
+    "name": "Miami Foodie Trail",
+    "city": "Miami",
+    "type": "curated",
+    "description": "Two days eating your way through Miami's best — from Cuban classics to hidden sushi gems, with coffee and dessert stops.",
+    "durationDays": 2,
+    "isPublic": true,
+    "isShowcase": true,
+    "stops": [
+      { "placeName": "El Bagel", "dayNumber": 1, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "08:30:00", "suggestedDurationMin": 45 },
+      { "placeName": "1-800-Lucky", "dayNumber": 1, "orderIndex": 1, "timeBlock": "lunch", "suggestedArrival": "12:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "Peel Soft Serve", "dayNumber": 1, "orderIndex": 2, "timeBlock": "afternoon", "suggestedArrival": "14:30:00", "suggestedDurationMin": 30 },
+      { "placeName": "Cantina La Veinte", "dayNumber": 1, "orderIndex": 3, "timeBlock": "dinner", "suggestedArrival": "19:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Dante's HiFi", "dayNumber": 1, "orderIndex": 4, "timeBlock": "evening", "suggestedArrival": "21:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Sky Coffee Buenos Aires", "dayNumber": 2, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "09:00:00", "suggestedDurationMin": 45 },
+      { "placeName": "Havana Harry's", "dayNumber": 2, "orderIndex": 1, "timeBlock": "lunch", "suggestedArrival": "12:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "True Loaf Bakery", "dayNumber": 2, "orderIndex": 2, "timeBlock": "afternoon", "suggestedArrival": "14:30:00", "suggestedDurationMin": 30 },
+      { "placeName": "Lung Yai Thai Tapas", "dayNumber": 2, "orderIndex": 3, "timeBlock": "dinner", "suggestedArrival": "19:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "Tea Room (EAST Miami)", "dayNumber": 2, "orderIndex": 4, "timeBlock": "evening", "suggestedArrival": "21:00:00", "suggestedDurationMin": 90 }
+    ]
+  },
+  {
+    "name": "One Perfect Day in Miami",
+    "city": "Miami",
+    "type": "curated",
+    "description": "Only one day? Here's the best of Miami condensed — beach, food, culture, and nightlife.",
+    "durationDays": 1,
+    "isPublic": true,
+    "isShowcase": true,
+    "stops": [
+      { "placeName": "Panther Coffee", "dayNumber": 1, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "08:30:00", "suggestedDurationMin": 40 },
+      { "placeName": "South Pointe Park", "dayNumber": 1, "orderIndex": 1, "timeBlock": "morning", "suggestedArrival": "09:30:00", "suggestedDurationMin": 60 },
+      { "placeName": "Garcia's Seafood Grille & Fish Market", "dayNumber": 1, "orderIndex": 2, "timeBlock": "lunch", "suggestedArrival": "12:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "Superblue Miami", "dayNumber": 1, "orderIndex": 3, "timeBlock": "afternoon", "suggestedArrival": "14:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Katana Japanese Restaurant", "dayNumber": 1, "orderIndex": 4, "timeBlock": "dinner", "suggestedArrival": "19:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "Swizzle Rum Bar & Drinkery", "dayNumber": 1, "orderIndex": 5, "timeBlock": "evening", "suggestedArrival": "21:00:00", "suggestedDurationMin": 90 }
+    ]
+  },
+  {
+    "name": "Miami Adventure & Nature",
+    "city": "Miami",
+    "type": "curated",
+    "description": "Two days exploring Miami's wild side — Everglades, kayaking, botanical gardens, and off-the-beaten-path culture.",
+    "durationDays": 2,
+    "isPublic": true,
+    "isShowcase": true,
+    "stops": [
+      { "placeName": "Everglades National Park", "dayNumber": 1, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "08:00:00", "suggestedDurationMin": 180 },
+      { "placeName": "Robert Is Here Fruit Stand", "dayNumber": 1, "orderIndex": 1, "timeBlock": "lunch", "suggestedArrival": "12:00:00", "suggestedDurationMin": 45 },
+      { "placeName": "Pinecrest Gardens", "dayNumber": 1, "orderIndex": 2, "timeBlock": "afternoon", "suggestedArrival": "14:00:00", "suggestedDurationMin": 90 },
+      { "placeName": "Havana Harry's", "dayNumber": 1, "orderIndex": 3, "timeBlock": "dinner", "suggestedArrival": "19:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "Oleta River State Park", "dayNumber": 2, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "08:30:00", "suggestedDurationMin": 150 },
+      { "placeName": "1-800-Lucky", "dayNumber": 2, "orderIndex": 1, "timeBlock": "lunch", "suggestedArrival": "12:30:00", "suggestedDurationMin": 60 },
+      { "placeName": "Unarthodox Miami", "dayNumber": 2, "orderIndex": 2, "timeBlock": "afternoon", "suggestedArrival": "15:00:00", "suggestedDurationMin": 120 },
+      { "placeName": "Lagniappe", "dayNumber": 2, "orderIndex": 3, "timeBlock": "evening", "suggestedArrival": "20:30:00", "suggestedDurationMin": 120 }
+    ]
+  },
+  {
+    "name": "Miami Nightlife & Vibes",
+    "city": "Miami",
+    "type": "curated",
+    "description": "A night out done right — sunset dinner, speakeasies, live music, and late-night bites.",
+    "durationDays": 1,
+    "isPublic": true,
+    "isShowcase": true,
+    "stops": [
+      { "placeName": "The Underline", "dayNumber": 1, "orderIndex": 0, "timeBlock": "afternoon", "suggestedArrival": "16:30:00", "suggestedDurationMin": 60 },
+      { "placeName": "Cantina La Veinte", "dayNumber": 1, "orderIndex": 1, "timeBlock": "dinner", "suggestedArrival": "19:00:00", "suggestedDurationMin": 90 },
+      { "placeName": "Tea Room (EAST Miami)", "dayNumber": 1, "orderIndex": 2, "timeBlock": "evening", "suggestedArrival": "21:00:00", "suggestedDurationMin": 75 },
+      { "placeName": "Dante's HiFi", "dayNumber": 1, "orderIndex": 3, "timeBlock": "evening", "suggestedArrival": "22:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Peel Soft Serve", "dayNumber": 1, "orderIndex": 4, "timeBlock": "evening", "suggestedArrival": "00:15:00", "suggestedDurationMin": 20 }
+    ]
+  },
+  {
+    "name": "Wellness & Beach Reset",
+    "city": "Miami",
+    "type": "curated",
+    "description": "A slow, restorative day — pilates, spa, beach, and gentle walks. For when you need to decompress.",
+    "durationDays": 1,
+    "isPublic": true,
+    "isShowcase": true,
+    "stops": [
+      { "placeName": "Tremble Fitness", "dayNumber": 1, "orderIndex": 0, "timeBlock": "morning", "suggestedArrival": "08:00:00", "suggestedDurationMin": 60 },
+      { "placeName": "El Bagel", "dayNumber": 1, "orderIndex": 1, "timeBlock": "morning", "suggestedArrival": "09:30:00", "suggestedDurationMin": 40 },
+      { "placeName": "Bill Baggs Cape Florida State Park", "dayNumber": 1, "orderIndex": 2, "timeBlock": "morning", "suggestedArrival": "10:30:00", "suggestedDurationMin": 120 },
+      { "placeName": "Crandon Park", "dayNumber": 1, "orderIndex": 3, "timeBlock": "afternoon", "suggestedArrival": "13:30:00", "suggestedDurationMin": 90 },
+      { "placeName": "Ritz-Carlton Spa, Key Biscayne", "dayNumber": 1, "orderIndex": 4, "timeBlock": "afternoon", "suggestedArrival": "16:00:00", "suggestedDurationMin": 120 },
+      { "placeName": "Bayshore Park", "dayNumber": 1, "orderIndex": 5, "timeBlock": "evening", "suggestedArrival": "19:00:00", "suggestedDurationMin": 45 }
+    ]
+  }
+]
