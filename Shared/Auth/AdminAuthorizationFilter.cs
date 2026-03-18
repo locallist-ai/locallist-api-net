@@ -1,4 +1,3 @@
-using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -7,12 +6,10 @@ namespace LocalList.API.NET.Shared.Auth;
 
 public class AdminAuthorizationFilter : IAsyncAuthorizationFilter
 {
-    private readonly IConfiguration _configuration;
     private readonly ILogger<AdminAuthorizationFilter> _logger;
 
-    public AdminAuthorizationFilter(IConfiguration configuration, ILogger<AdminAuthorizationFilter> logger)
+    public AdminAuthorizationFilter(ILogger<AdminAuthorizationFilter> logger)
     {
-        _configuration = configuration;
         _logger = logger;
     }
 
@@ -26,21 +23,12 @@ public class AdminAuthorizationFilter : IAsyncAuthorizationFilter
             return Task.CompletedTask;
         }
 
-        var email = user.FindFirstValue(JwtRegisteredClaimNames.Email)
-                    ?? user.FindFirstValue(ClaimTypes.Email);
+        var role = user.FindFirstValue("role");
 
-        if (string.IsNullOrEmpty(email))
+        if (role != "admin")
         {
-            _logger.LogWarning("Admin access denied: no email claim in token");
-            context.Result = new ForbidResult();
-            return Task.CompletedTask;
-        }
-
-        var adminEmails = _configuration.GetSection("Admin:Emails").Get<string[]>() ?? [];
-
-        if (!adminEmails.Contains(email, StringComparer.OrdinalIgnoreCase))
-        {
-            _logger.LogWarning("Admin access denied for {Email}", email);
+            _logger.LogWarning("Admin access denied for user {UserId} with role {Role}",
+                user.FindFirstValue("sub"), role ?? "none");
             context.Result = new ForbidResult();
             return Task.CompletedTask;
         }

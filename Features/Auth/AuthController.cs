@@ -14,6 +14,11 @@ namespace LocalList.API.NET.Features.Auth;
 [EnableRateLimiting("AuthLimit")]
 public class AuthController : ControllerBase
 {
+    private const string AdminDomain = "@locallist.ai";
+
+    private static string ResolveRole(string email) =>
+        email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase) ? "admin" : "user";
+
     private readonly LocalListDbContext _db;
     private readonly JwtTokenService _jwtTokenService;
     private readonly TimeProvider _clock;
@@ -45,6 +50,14 @@ public class AuthController : ControllerBase
             return Unauthorized(new { error = "Invalid credentials" });
         }
 
+        // Sync role on every login (handles users created before role system)
+        var expectedRole = ResolveRole(user.Email);
+        if (user.Role != expectedRole)
+        {
+            user.Role = expectedRole;
+            await _db.SaveChangesAsync(ct);
+        }
+
         _logger.LogInformation("User {UserId} logged in via {Method}", user.Id, "password");
         return await GenerateTokensResponse(user, ct);
     }
@@ -64,7 +77,8 @@ public class AuthController : ControllerBase
         {
             Email = request.Email,
             Name = request.Name,
-            PasswordHash = passwordHash
+            PasswordHash = passwordHash,
+            Role = ResolveRole(request.Email)
         };
 
         _db.Users.Add(newUser);
@@ -123,7 +137,8 @@ public class AuthController : ControllerBase
             {
                 Email = email,
                 Name = userName,
-                Image = image
+                Image = image,
+                Role = ResolveRole(email)
             };
 
             if (request.Provider == "apple") user.AppleUserId = providerUserId;
@@ -137,6 +152,8 @@ public class AuthController : ControllerBase
                 user.AppleUserId = providerUserId;
             else if (request.Provider == "google" && user.GoogleUserId == null)
                 user.GoogleUserId = providerUserId;
+            // Sync role on every login
+            user.Role = ResolveRole(user.Email);
             user.UpdatedAt = _clock.GetUtcNow();
         }
 
@@ -217,7 +234,8 @@ public class AuthController : ControllerBase
                 email = user.Email,
                 name = user.Name,
                 image = user.Image,
-                tier = user.Tier
+                tier = user.Tier,
+                role = user.Role
             }
         });
     }
