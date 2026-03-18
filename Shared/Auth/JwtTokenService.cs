@@ -35,7 +35,8 @@ public class JwtTokenService
         {
             new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new Claim(JwtRegisteredClaimNames.Email, user.Email),
-            new Claim("tier", user.Tier)
+            new Claim("tier", user.Tier),
+            new Claim("role", user.Role)
         };
 
         var tokenDescriptor = new SecurityTokenDescriptor

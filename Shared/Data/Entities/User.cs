@@ -28,6 +28,10 @@ public class User
     [StringLength(20)]
     public string Tier { get; set; } = "free";
 
+    [Column("role")]
+    [StringLength(20)]
+    public string Role { get; set; } = "user";
+
     [Column("password_hash")]
     [StringLength(255)]
     public string? PasswordHash { get; set; }

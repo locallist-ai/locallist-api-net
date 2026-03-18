@@ -37,6 +37,7 @@ public class AccountController : ControllerBase
                 name = u.Name,
                 image = u.Image,
                 tier = u.Tier,
+                role = u.Role,
                 city = u.City,
                 createdAt = u.CreatedAt
             })
