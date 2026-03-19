@@ -73,6 +73,25 @@ public class PlansController : ControllerBase
         });
     }
 
+    [HttpGet("mine")]
+    [Authorize]
+    public async Task<IActionResult> GetMyPlans(CancellationToken ct)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId))
+            return Unauthorized(new { error = "Invalid token" });
+
+        var userGuid = Guid.Parse(userId);
+
+        var plans = await _db.Plans.AsNoTracking()
+            .Where(p => p.CreatedById == userGuid)
+            .OrderByDescending(p => p.UpdatedAt)
+            .Take(50)
+            .ToListAsync(ct);
+
+        return Ok(new { plans, total = plans.Count });
+    }
+
     [HttpGet]
     [AllowAnonymous]
     public async Task<IActionResult> GetPlans(
