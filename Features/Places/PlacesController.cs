@@ -24,6 +24,7 @@ public class PlacesController : ControllerBase
         [FromQuery] string? city,
         [FromQuery] string? category,
         [FromQuery] string? neighborhood,
+        [FromQuery] string? search,
         [FromQuery] string? status = "published",
         [FromQuery] int limit = 50,
         [FromQuery] int offset = 0,
@@ -50,6 +51,9 @@ public class PlacesController : ControllerBase
 
         if (!string.IsNullOrEmpty(neighborhood))
             query = query.Where(p => p.Neighborhood == neighborhood);
+
+        if (!string.IsNullOrEmpty(search))
+            query = query.Where(p => EF.Functions.ILike(p.Name, $"%{search}%"));
 
         var total = await query.CountAsync(ct);
 
