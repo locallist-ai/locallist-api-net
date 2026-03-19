@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -17,6 +18,59 @@ public class PlansController : ControllerBase
     {
         _db = db;
         _logger = logger;
+    }
+
+    [HttpPost]
+    [Authorize]
+    public async Task<IActionResult> CreatePlan([FromBody] CreateUserPlanRequest request, CancellationToken ct)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId))
+            return Unauthorized(new { error = "Invalid token" });
+
+        var userGuid = Guid.Parse(userId);
+        var now = DateTimeOffset.UtcNow;
+
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = request.Name.Trim(),
+            City = request.City.Trim(),
+            Type = request.Type?.Trim() ?? "custom",
+            DurationDays = request.DurationDays,
+            IsPublic = false,
+            IsShowcase = false,
+            CreatedById = userGuid,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        _db.Plans.Add(plan);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("User {UserId} created plan {PlanId} ({Name})", userId, plan.Id, plan.Name);
+
+        return Created($"/plans/{plan.Id}", new
+        {
+            plan.Id,
+            plan.Name,
+            plan.City,
+            plan.Type,
+            plan.Description,
+            plan.ImageUrl,
+            plan.DurationDays,
+            plan.TripContext,
+            plan.IsPublic,
+            plan.IsShowcase,
+            plan.CreatedById,
+            plan.CreatedAt,
+            plan.UpdatedAt,
+            days = Enumerable.Range(1, plan.DurationDays).Select(d => new
+            {
+                dayNumber = d,
+                stops = Array.Empty<object>()
+            })
+        });
     }
 
     [HttpGet]
