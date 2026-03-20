@@ -59,17 +59,26 @@ var firebaseProjectId = Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID"
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.Authority = $"https://securetoken.google.com/{firebaseProjectId}";
+        // Use explicit JWKS URI instead of Authority/OIDC discovery to avoid
+        // Kerberos/GSS-API issues in Alpine containers
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
             ValidIssuer = $"https://securetoken.google.com/{firebaseProjectId}",
             ValidateAudience = true,
             ValidAudience = firebaseProjectId,
-            ValidateLifetime = true
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKeyResolver = (token, securityToken, kid, parameters) =>
+            {
+                using var httpClient = new HttpClient();
+                var jwks = httpClient.GetStringAsync(
+                    "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
+                ).Result;
+                var keys = new Microsoft.IdentityModel.Tokens.JsonWebKeySet(jwks);
+                return keys.GetSigningKeys();
+            }
         };
-        // Disable Negotiate/Kerberos on the OIDC backchannel (not available in Alpine containers)
-        options.BackchannelHttpHandler = new HttpClientHandler();
     });
 
 builder.Services.AddAuthorization();
