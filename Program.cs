@@ -68,6 +68,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAudience = firebaseProjectId,
             ValidateLifetime = true
         };
+        // Disable Negotiate/Kerberos on the OIDC backchannel (not available in Alpine containers)
+        options.BackchannelHttpHandler = new HttpClientHandler();
     });
 
 builder.Services.AddAuthorization();
