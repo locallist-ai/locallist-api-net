@@ -52,9 +52,9 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 });
 
 // Configure Authentication & Authorization — Firebase Auth
-var firebaseProjectId = builder.Configuration["Firebase:ProjectId"]
-    ?? Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID")
-    ?? throw new InvalidOperationException("Firebase ProjectId is not configured. Set Firebase:ProjectId or FIREBASE_PROJECT_ID env var.");
+var firebaseProjectId = Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID")
+    ?? builder.Configuration["Firebase:ProjectId"]
+    ?? throw new InvalidOperationException("Firebase ProjectId is not configured. Set FIREBASE_PROJECT_ID env var.");
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
