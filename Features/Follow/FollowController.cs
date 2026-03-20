@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -27,7 +27,7 @@ public class FollowController : ControllerBase
     [HttpPost("start")]
     public async Task<IActionResult> StartSession([FromBody] FollowStartRequest request, CancellationToken ct)
     {
-        var userId = GetUserId();
+        var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
         var existing = await _db.FollowSessions
@@ -57,7 +57,7 @@ public class FollowController : ControllerBase
     [HttpGet("active")]
     public async Task<IActionResult> GetActiveSession(CancellationToken ct)
     {
-        var userId = GetUserId();
+        var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
         var session = await _db.FollowSessions
@@ -148,15 +148,14 @@ public class FollowController : ControllerBase
         return Ok(session);
     }
 
-    private Guid? GetUserId()
+    private async Task<Guid?> GetUserIdAsync(CancellationToken ct)
     {
-        var idStr = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return Guid.TryParse(idStr, out var id) ? id : null;
+        return await User.GetUserIdAsync(_db, ct);
     }
 
     private async Task<FollowSession?> GetSessionForUpdate(Guid sessionId, CancellationToken ct)
     {
-        var userId = GetUserId();
+        var userId = await GetUserIdAsync(ct);
         if (userId == null) return null;
 
         return await _db.FollowSessions
@@ -166,7 +165,7 @@ public class FollowController : ControllerBase
 
     private async Task<FollowSession?> AdvanceSessionInternal(Guid sessionId, CancellationToken ct)
     {
-        var userId = GetUserId();
+        var userId = await GetUserIdAsync(ct);
         if (userId == null) return null;
 
         var session = await _db.FollowSessions

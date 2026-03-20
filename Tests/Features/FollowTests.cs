@@ -8,8 +8,8 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     [Fact]
     public async Task Start_CreatesSession()
     {
-        var (userId, planId) = await SeedUserAndPlan();
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var (userId, firebaseUid, planId) = await SeedUserAndPlan();
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
 
         var response = await client.PostAsJsonAsync("/follow/start", new { planId });
 
@@ -21,8 +21,8 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     [Fact]
     public async Task Start_DuplicateActive_ReturnsConflict()
     {
-        var (userId, planId) = await SeedUserAndPlan();
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var (userId, firebaseUid, planId) = await SeedUserAndPlan();
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
 
         await client.PostAsJsonAsync("/follow/start", new { planId });
         var response = await client.PostAsJsonAsync("/follow/start", new { planId });
@@ -33,8 +33,8 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     [Fact]
     public async Task Pause_PausesSession()
     {
-        var (userId, planId) = await SeedUserAndPlan();
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var (userId, firebaseUid, planId) = await SeedUserAndPlan();
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
         var startRes = await client.PostAsJsonAsync("/follow/start", new { planId });
         var sessionId = (await startRes.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("id").GetGuid();
@@ -49,8 +49,8 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     [Fact]
     public async Task Complete_CompletesSession()
     {
-        var (userId, planId) = await SeedUserAndPlan();
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var (userId, firebaseUid, planId) = await SeedUserAndPlan();
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
         var startRes = await client.PostAsJsonAsync("/follow/start", new { planId });
         var sessionId = (await startRes.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("id").GetGuid();
@@ -66,19 +66,20 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task Next_AdvancesStop()
     {
         var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-next-{userId:N}";
         var planId = Guid.NewGuid();
         var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = userId, Email = $"follow-next-{userId:N}@test.com" });
+        db.Users.Add(new User { Id = userId, Email = $"follow-next-{userId:N}@test.com", FirebaseUid = firebaseUid });
         db.Plans.Add(new Plan { Id = planId, Name = "Multi Stop", City = "Miami", Type = "curated" });
-        db.Places.Add(new Place { Id = Guid.NewGuid(), Name = "A", Category = "Food", WhyThisPlace = "x", Status = "published" });
-        var placeA = db.Places.Local.Last();
+        var placeA = new Place { Id = Guid.NewGuid(), Name = "A", Category = "Food", WhyThisPlace = "x", Status = "published" };
         var placeB = new Place { Id = Guid.NewGuid(), Name = "B", Category = "Food", WhyThisPlace = "y", Status = "published" };
+        db.Places.Add(placeA);
         db.Places.Add(placeB);
         db.PlanStops.Add(new PlanStop { Id = Guid.NewGuid(), PlanId = planId, PlaceId = placeA.Id, DayNumber = 1, OrderIndex = 0 });
         db.PlanStops.Add(new PlanStop { Id = Guid.NewGuid(), PlanId = planId, PlaceId = placeB.Id, DayNumber = 1, OrderIndex = 1 });
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
         var startRes = await client.PostAsJsonAsync("/follow/start", new { planId });
         var sessionId = (await startRes.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("id").GetGuid();
@@ -100,14 +101,15 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
-    private async Task<(Guid userId, Guid planId)> SeedUserAndPlan()
+    private async Task<(Guid userId, string firebaseUid, Guid planId)> SeedUserAndPlan()
     {
         var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-follow-{userId:N}";
         var planId = Guid.NewGuid();
         var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = userId, Email = $"follow-{userId:N}@test.com" });
+        db.Users.Add(new User { Id = userId, Email = $"follow-{userId:N}@test.com", FirebaseUid = firebaseUid });
         db.Plans.Add(new Plan { Id = planId, Name = "Follow Plan", City = "Miami", Type = "curated" });
         await db.SaveChangesAsync();
-        return (userId, planId);
+        return (userId, firebaseUid, planId);
     }
 }

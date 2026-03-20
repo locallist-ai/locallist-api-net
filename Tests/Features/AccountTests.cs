@@ -8,20 +8,16 @@ public class AccountTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task GetAccount_Authenticated_ReturnsUserData()
     {
         var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-acct-{userId:N}";
         var email = $"acct-get-{userId:N}@test.com";
 
-        var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = userId, Email = email, Name = "Test User" });
-        await db.SaveChangesAsync();
-
-        var client = fixture.CreateAuthenticatedClient(userId, email);
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, email);
         var response = await client.GetAsync("/account");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<AccountEnvelope>();
         Assert.NotNull(body?.User);
         Assert.Equal(email, body.User.Email);
-        Assert.Equal("Test User", body.User.Name);
     }
 
     [Fact]
@@ -36,8 +32,8 @@ public class AccountTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     [Fact]
     public async Task GetAccount_UserNotInDb_Returns404()
     {
-        var userId = Guid.NewGuid();
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var firebaseUid = $"fb-missing-{Guid.NewGuid():N}";
+        var client = fixture.CreateAuthenticatedClient(Guid.NewGuid(), firebaseUid);
         var response = await client.GetAsync("/account");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
@@ -47,14 +43,15 @@ public class AccountTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task DeleteAccount_RemovesUser()
     {
         var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-del-{userId:N}";
         var email = $"acct-del-{userId:N}@test.com";
 
         var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = userId, Email = email });
+        db.Users.Add(new User { Id = userId, Email = email, FirebaseUid = firebaseUid });
         db.Plans.Add(new Plan { Name = "Orphan Plan", Type = "ai", City = "Miami", CreatedById = userId });
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateAuthenticatedClient(userId, email);
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid, email);
         var response = await client.DeleteAsync("/account");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);

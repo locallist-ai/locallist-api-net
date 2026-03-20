@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 
@@ -6,6 +5,7 @@ namespace LocalList.API.NET.Shared.Auth;
 
 public class AdminAuthorizationFilter : IAsyncAuthorizationFilter
 {
+    private const string AdminDomain = "@locallist.ai";
     private readonly ILogger<AdminAuthorizationFilter> _logger;
 
     public AdminAuthorizationFilter(ILogger<AdminAuthorizationFilter> logger)
@@ -23,12 +23,12 @@ public class AdminAuthorizationFilter : IAsyncAuthorizationFilter
             return Task.CompletedTask;
         }
 
-        var role = user.FindFirstValue("role");
+        var email = user.GetEmail();
 
-        if (role != "admin")
+        if (string.IsNullOrEmpty(email) || !email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogWarning("Admin access denied for user {UserId} with role {Role}",
-                user.FindFirstValue("sub"), role ?? "none");
+            _logger.LogWarning("Admin access denied for user {FirebaseUid}",
+                user.GetFirebaseUid() ?? "unknown");
             context.Result = new ForbidResult();
             return Task.CompletedTask;
         }

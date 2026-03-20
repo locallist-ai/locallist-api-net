@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -24,11 +24,10 @@ public class PlansController : ControllerBase
     [Authorize]
     public async Task<IActionResult> CreatePlan([FromBody] CreateUserPlanRequest request, CancellationToken ct)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId))
+        var userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
 
-        var userGuid = Guid.Parse(userId);
         var now = DateTimeOffset.UtcNow;
 
         var plan = new Plan
@@ -40,7 +39,7 @@ public class PlansController : ControllerBase
             DurationDays = request.DurationDays,
             IsPublic = false,
             IsShowcase = false,
-            CreatedById = userGuid,
+            CreatedById = userId.Value,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -77,14 +76,12 @@ public class PlansController : ControllerBase
     [Authorize]
     public async Task<IActionResult> GetMyPlans(CancellationToken ct)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId))
+        var userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
 
-        var userGuid = Guid.Parse(userId);
-
         var plans = await _db.Plans.AsNoTracking()
-            .Where(p => p.CreatedById == userGuid)
+            .Where(p => p.CreatedById == userId.Value)
             .OrderByDescending(p => p.UpdatedAt)
             .Take(50)
             .ToListAsync(ct);
@@ -144,8 +141,7 @@ public class PlansController : ControllerBase
         if (plan == null)
             return NotFound(new { error = "Plan not found" });
 
-        var userIdString = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        Guid? userId = string.IsNullOrEmpty(userIdString) ? null : Guid.Parse(userIdString);
+        Guid? userId = await User.GetUserIdAsync(_db, ct);
 
         if (!plan.IsPublic && plan.CreatedById != userId)
         {
