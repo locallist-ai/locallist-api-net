@@ -1,13 +1,15 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text;
+using System.Security.Cryptography;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Testcontainers.PostgreSql;
@@ -17,9 +19,8 @@ namespace LocalList.API.Tests;
 
 public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 {
-    private const string TestJwtSecret = "ThisIsATestSecretKeyThatIsAtLeast32Chars!!";
-    private const string TestIssuer = "test-issuer";
-    private const string TestAudience = "test-audience";
+    private const string TestFirebaseProjectId = "test-firebase-project";
+    private static readonly RSA _testRsa = RSA.Create(2048);
 
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17-alpine")
         .Build();
@@ -31,16 +32,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     static ApiFixture()
     {
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", "");
-        Environment.SetEnvironmentVariable("Jwt__Secret", TestJwtSecret);
-        Environment.SetEnvironmentVariable("Jwt__Issuer", TestIssuer);
-        Environment.SetEnvironmentVariable("Jwt__Audience", TestAudience);
+        Environment.SetEnvironmentVariable("FIREBASE_PROJECT_ID", TestFirebaseProjectId);
     }
 
     public async ValueTask InitializeAsync()
     {
         await _postgres.StartAsync();
-        // Update the env var with the real Testcontainers connection string.
-        // Program.cs skips AddDbContext when empty, so ConfigureTestServices handles it.
     }
 
     public new async ValueTask DisposeAsync()
@@ -70,11 +67,25 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddSingleton<TimeProvider>(FakeTime);
 
-            // Disable rate limiting in tests to avoid false failures.
-            // Remove existing rate limiter configure actions from Program.cs first
-            // to prevent "There already exists a policy with the name" ArgumentException.
+            // Override JWT Bearer to use test RSA key instead of Firebase JWKS
+            services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
+            {
+                options.Authority = null;
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = $"https://securetoken.google.com/{TestFirebaseProjectId}",
+                    ValidateAudience = true,
+                    ValidAudience = TestFirebaseProjectId,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new RsaSecurityKey(_testRsa)
+                };
+            });
+
+            // Disable rate limiting in tests
             var rateLimiterDescriptors = services
-                .Where(d => d.ServiceType == typeof(Microsoft.Extensions.Options.IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
+                .Where(d => d.ServiceType == typeof(IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
                 .ToList();
             foreach (var d in rateLimiterDescriptors) services.Remove(d);
 
@@ -85,6 +96,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 options.AddPolicy("AuthLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("BuilderLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("AdminLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
@@ -106,24 +119,28 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         return client;
     }
 
-    public string CreateToken(Guid userId, string email = "test@test.com", string tier = "free")
+    /// <summary>
+    /// Creates a Firebase-style RS256 JWT for testing.
+    /// </summary>
+    public string CreateToken(string firebaseUid, string email = "test@test.com")
     {
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TestJwtSecret));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var key = new RsaSecurityKey(_testRsa);
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.RsaSha256);
 
         var claims = new[]
         {
-            new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
+            new Claim(JwtRegisteredClaimNames.Sub, firebaseUid),
             new Claim(JwtRegisteredClaimNames.Email, email),
-            new Claim("tier", tier)
+            new Claim("email_verified", "true"),
+            new Claim("user_id", firebaseUid)
         };
 
         var tokenDescriptor = new SecurityTokenDescriptor
         {
             Subject = new ClaimsIdentity(claims),
             Expires = FakeTime.GetUtcNow().AddHours(1).UtcDateTime,
-            Issuer = TestIssuer,
-            Audience = TestAudience,
+            Issuer = $"https://securetoken.google.com/{TestFirebaseProjectId}",
+            Audience = TestFirebaseProjectId,
             SigningCredentials = credentials
         };
 
@@ -132,13 +149,35 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         return handler.WriteToken(token);
     }
 
-    public HttpClient CreateAuthenticatedClient(Guid userId, string email = "test@test.com")
+    public HttpClient CreateAuthenticatedClient(Guid userId, string firebaseUid, string email = "test@test.com")
     {
         var client = CreateClient();
-        var token = CreateToken(userId, email);
+        var token = CreateToken(firebaseUid, email);
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
         return client;
+    }
+
+    /// <summary>
+    /// Convenience overload: seeds a user with the given ID and firebase_uid, returns an authenticated client.
+    /// </summary>
+    public async Task<HttpClient> CreateAuthenticatedClientWithUser(
+        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user")
+    {
+        var db = GetDbContext();
+        var existing = await db.Users.FindAsync(userId);
+        if (existing == null)
+        {
+            db.Users.Add(new LocalList.API.NET.Shared.Data.Entities.User
+            {
+                Id = userId,
+                Email = email,
+                FirebaseUid = firebaseUid,
+                Role = role
+            });
+            await db.SaveChangesAsync();
+        }
+        return CreateAuthenticatedClient(userId, firebaseUid, email);
     }
 
     public LocalListDbContext GetDbContext()

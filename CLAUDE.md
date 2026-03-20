@@ -9,7 +9,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Neon PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
-| **Auth** | Custom JWT (HS256) — Apple Sign In + Google + email/password. Password hashing with BCrypt. |
+| **Auth** | Firebase Auth (RS256 JWKS) — Apple Sign In + Google + email/password. Single `/auth/sync` endpoint. |
 | **AI** | Gemini 2.5 Flash via `Features/Builder/AiProviderService.cs`. |
 | **Rate Limit** | 100 req/min global. Builder limited to 5/hr. |
 
@@ -22,7 +22,7 @@ dotnet run
 ```
 
 Required User Secrets / Environment Variables:
-`ConnectionStrings__DefaultConnection`, `Jwt__Secret`, `Gemini__ApiKey`
+`ConnectionStrings__DefaultConnection`, `FIREBASE_PROJECT_ID`, `Gemini__ApiKey`
 
 ## Project Structure (VSA)
 
@@ -33,8 +33,8 @@ LocalList.API.NET/
 │   ├── Account/
 │   │   └── AccountController.cs        # GET /account, DELETE /account
 │   ├── Auth/
-│   │   ├── AuthController.cs           # POST /auth/login, /register, /signin, /refresh
-│   │   └── AuthDtos.cs                 # LoginRequest, RegisterRequest, OAuthRequest, RefreshRequest
+│   │   ├── AuthController.cs           # POST /auth/sync (Firebase token → user sync)
+│   │   └── AuthDtos.cs                 # SyncUserDto, SyncResponse
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
 │   │   ├── BuilderDtos.cs             # BuilderChatRequest, ExtractedPreferences, TripContextDto
@@ -48,12 +48,13 @@ LocalList.API.NET/
 │       └── PlansController.cs          # GET /plans, GET /plans/:id
 └── Shared/
     ├── Auth/
-    │   └── JwtTokenService.cs          # JWT generation, refresh token management
+    │   ├── AdminAuthorizeAttribute.cs   # Admin authorization attribute
+    │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain
+    │   └── FirebaseUserExtensions.cs    # GetFirebaseUid(), GetEmail(), GetUserIdAsync()
     └── Data/
         ├── LocalListDbContext.cs        # EF Core DbContext, entity configs, indices
         └── Entities/                    # EF Core entities
-            ├── User.cs
-            ├── RefreshToken.cs
+            ├── User.cs                  # Includes firebase_uid column
             ├── Plan.cs
             ├── PlanStop.cs
             ├── Place.cs
@@ -65,7 +66,7 @@ LocalList.API.NET/
 | Feature | Endpoints |
 |---|---|
 | Account | `GET /account`, `DELETE /account` |
-| Auth | `POST /auth/login`, `/auth/register`, `/auth/signin`, `/auth/refresh` |
+| Auth | `POST /auth/sync` (Firebase token required) |
 | Places | `GET /places/`, `GET /places/:id` |
 | Plans | `GET /plans/`, `GET /plans/:id` |
 | Builder | `POST /builder/chat` |

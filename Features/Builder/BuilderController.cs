@@ -2,8 +2,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
 using System.Text.Json;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -31,8 +31,7 @@ public class BuilderController : ControllerBase
     {
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
 
-        var userIdString = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        Guid? userId = Guid.TryParse(userIdString, out var parsedId) ? parsedId : null;
+        Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
 
         try
         {

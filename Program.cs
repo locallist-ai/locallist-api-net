@@ -1,12 +1,10 @@
 using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Data;
-using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Features.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.IdentityModel.Tokens;
-using System.Text;
 using System.Threading.RateLimiting;
 using Serilog;
 
@@ -44,7 +42,6 @@ if (!string.IsNullOrEmpty(connectionUrl))
 
 // Add DI Services
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddScoped<JwtTokenService>();
 builder.Services.AddHttpClient<AiProviderService>();
 
 // Configure JSON formatting
@@ -54,28 +51,22 @@ builder.Services.AddControllers().AddJsonOptions(options =>
     options.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 
-// Configure Authentication & Authorization
-var jwtSettings = builder.Configuration.GetSection("Jwt");
-var secretKey = jwtSettings["Secret"] ?? throw new InvalidOperationException("JWT Secret is missing.");
-
-// M1: Validate JWT Secret length and weak placeholders at startup
-if (secretKey.Length < 32 || (secretKey == "REPLACE_WITH_SECURE_KEY_IN_PRODUCTION" && !builder.Environment.IsDevelopment()))
-{
-    throw new InvalidOperationException("CRITICAL: JWT Secret must be at least 32 characters and safely set in Environment Variables.");
-}
+// Configure Authentication & Authorization — Firebase Auth
+var firebaseProjectId = builder.Configuration["Firebase:ProjectId"]
+    ?? Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID")
+    ?? throw new InvalidOperationException("Firebase ProjectId is not configured. Set Firebase:ProjectId or FIREBASE_PROJECT_ID env var.");
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        options.Authority = $"https://securetoken.google.com/{firebaseProjectId}";
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
+            ValidIssuer = $"https://securetoken.google.com/{firebaseProjectId}",
             ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = jwtSettings["Issuer"],
-            ValidAudience = jwtSettings["Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey))
+            ValidAudience = firebaseProjectId,
+            ValidateLifetime = true
         };
     });
 

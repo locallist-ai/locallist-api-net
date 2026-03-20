@@ -1,127 +1,111 @@
 using System.Text.Json;
+using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.Tests.Features;
 
 public class AuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
     [Fact]
-    public async Task Register_NewUser_ReturnsTokens()
+    public async Task Sync_NewUser_CreatesUser()
     {
-        var client = fixture.CreateClient();
-        var email = $"reg-new-{Guid.NewGuid():N}@test.com";
+        var firebaseUid = $"fb-new-{Guid.NewGuid():N}";
+        var email = $"sync-new-{Guid.NewGuid():N}@test.com";
 
-        var response = await client.PostAsJsonAsync("/auth/register", new
-        {
-            email,
-            password = "Password123!",
-            name = "New User"
-        });
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.PostAsync("/auth/sync", null);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.True(body.TryGetProperty("accessToken", out _));
-        Assert.True(body.TryGetProperty("refreshToken", out _));
-        Assert.Equal(email, body.GetProperty("user").GetProperty("email").GetString());
+        var user = body.GetProperty("user");
+        Assert.Equal(email, user.GetProperty("email").GetString());
+        Assert.Equal("user", user.GetProperty("role").GetString());
+
+        // Verify user was created in DB
+        var db = fixture.GetDbContext();
+        var dbUser = await db.Users.FindAsync(Guid.Parse(user.GetProperty("id").GetString()!));
+        Assert.NotNull(dbUser);
+        Assert.Equal(firebaseUid, dbUser.FirebaseUid);
     }
 
     [Fact]
-    public async Task Register_DuplicateEmail_Returns400()
+    public async Task Sync_ExistingUserByEmail_LinksFirebaseUid()
     {
+        var firebaseUid = $"fb-link-{Guid.NewGuid():N}";
+        var email = $"sync-link-{Guid.NewGuid():N}@test.com";
+        var userId = Guid.NewGuid();
+
+        // Pre-create user without firebase_uid (simulating migration)
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = email, Name = "Existing User" });
+        await db.SaveChangesAsync();
+
         var client = fixture.CreateClient();
-        var email = $"reg-dup-{Guid.NewGuid():N}@test.com";
+        var token = fixture.CreateToken(firebaseUid, email);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
-        await client.PostAsJsonAsync("/auth/register", new { email, password = "Password123!" });
-
-        var response = await client.PostAsJsonAsync("/auth/register", new
-        {
-            email,
-            password = "Password456!"
-        });
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Login_ValidCredentials_ReturnsTokens()
-    {
-        var client = fixture.CreateClient();
-        var email = $"login-ok-{Guid.NewGuid():N}@test.com";
-
-        await client.PostAsJsonAsync("/auth/register", new { email, password = "Password123!" });
-
-        var response = await client.PostAsJsonAsync("/auth/login", new
-        {
-            email,
-            password = "Password123!"
-        });
+        var response = await client.PostAsync("/auth/sync", null);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.True(body.TryGetProperty("accessToken", out _));
+        Assert.Equal(userId.ToString(), body.GetProperty("user").GetProperty("id").GetString());
+
+        // Verify firebase_uid was linked
+        var db2 = fixture.GetDbContext();
+        var dbUser = await db2.Users.FindAsync(userId);
+        Assert.Equal(firebaseUid, dbUser!.FirebaseUid);
     }
 
     [Fact]
-    public async Task Login_WrongPassword_Returns401()
+    public async Task Sync_ExistingFirebaseUser_ReturnsUser()
     {
+        var firebaseUid = $"fb-exist-{Guid.NewGuid():N}";
+        var email = $"sync-exist-{Guid.NewGuid():N}@test.com";
+        var userId = Guid.NewGuid();
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = email, FirebaseUid = firebaseUid });
+        await db.SaveChangesAsync();
+
         var client = fixture.CreateClient();
-        var email = $"login-bad-{Guid.NewGuid():N}@test.com";
+        var token = fixture.CreateToken(firebaseUid, email);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
-        await client.PostAsJsonAsync("/auth/register", new { email, password = "Password123!" });
-
-        var response = await client.PostAsJsonAsync("/auth/login", new
-        {
-            email,
-            password = "WrongPassword99!"
-        });
-
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Login_NonExistentUser_Returns401()
-    {
-        var client = fixture.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/auth/login", new
-        {
-            email = $"nobody-{Guid.NewGuid():N}@test.com",
-            password = "Password123!"
-        });
-
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Refresh_ValidToken_ReturnsNewTokens()
-    {
-        var client = fixture.CreateClient();
-        var email = $"refresh-ok-{Guid.NewGuid():N}@test.com";
-
-        var regResponse = await client.PostAsJsonAsync("/auth/register", new
-        {
-            email,
-            password = "Password123!"
-        });
-        var regBody = await regResponse.Content.ReadFromJsonAsync<JsonElement>();
-        var refreshToken = regBody.GetProperty("refreshToken").GetString()!;
-
-        var response = await client.PostAsJsonAsync("/auth/refresh", new { refreshToken });
+        var response = await client.PostAsync("/auth/sync", null);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.True(body.TryGetProperty("accessToken", out _));
-        Assert.True(body.TryGetProperty("refreshToken", out _));
+        Assert.Equal(userId.ToString(), body.GetProperty("user").GetProperty("id").GetString());
     }
 
     [Fact]
-    public async Task Refresh_InvalidToken_Returns401()
+    public async Task Sync_AdminEmail_GetsAdminRole()
+    {
+        var firebaseUid = $"fb-admin-{Guid.NewGuid():N}";
+        var email = $"admin-{Guid.NewGuid():N}@locallist.ai";
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.PostAsync("/auth/sync", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("admin", body.GetProperty("user").GetProperty("role").GetString());
+    }
+
+    [Fact]
+    public async Task Sync_Unauthenticated_Returns401()
     {
         var client = fixture.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/auth/refresh", new
-        {
-            refreshToken = "0123456789ABCDEF_this_is_totally_invalid"
-        });
+        var response = await client.PostAsync("/auth/sync", null);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }

@@ -44,6 +44,10 @@ public class User
     [StringLength(255)]
     public string? GoogleUserId { get; set; }
 
+    [Column("firebase_uid")]
+    [StringLength(128)]
+    public string? FirebaseUid { get; set; }
+
     [Column("rc_customer_id")]
     [StringLength(255)]
     public string? RcCustomerId { get; set; }
@@ -59,7 +63,6 @@ public class User
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     // Navigation properties
-    public ICollection<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
     public ICollection<Plan> CreatedPlans { get; set; } = new List<Plan>();
     public ICollection<Place> SubmittedPlaces { get; set; } = new List<Place>();
     public ICollection<Place> ReviewedPlaces { get; set; } = new List<Place>();

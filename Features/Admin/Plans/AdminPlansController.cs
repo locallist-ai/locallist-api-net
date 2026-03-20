@@ -1,5 +1,3 @@
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -55,7 +53,7 @@ public class AdminPlansController : ControllerBase
     public async Task<IActionResult> CreatePlan([FromBody] CreatePlanRequest request, CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
-        var userId = GetUserId();
+        var userId = await GetUserIdAsync(ct);
 
         // Resolve place names to IDs
         var placeNames = request.Stops
@@ -133,7 +131,7 @@ public class AdminPlansController : ControllerBase
             return BadRequest(new { error = "Empty request list." });
 
         var now = _clock.GetUtcNow();
-        var userId = GetUserId();
+        var userId = await GetUserIdAsync(ct);
 
         // Collect all place names to resolve in one query
         var allPlaceNames = requests
@@ -227,10 +225,8 @@ public class AdminPlansController : ControllerBase
         return NoContent();
     }
 
-    private Guid? GetUserId()
+    private async Task<Guid?> GetUserIdAsync(CancellationToken ct = default)
     {
-        var sub = User.FindFirstValue(JwtRegisteredClaimNames.Sub)
-                  ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return Guid.TryParse(sub, out var id) ? id : null;
+        return await User.GetUserIdAsync(_db, ct);
     }
 }

@@ -26,13 +26,14 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task GetPlans_Authenticated_ReturnsAllPublic()
     {
         var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-plans-{userId:N}";
         var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = userId, Email = $"plans-auth-{userId:N}@test.com" });
+        db.Users.Add(new User { Id = userId, Email = $"plans-auth-{userId:N}@test.com", FirebaseUid = firebaseUid });
         var nonShowcase = MakePlan("Auth Visible", isShowcase: false);
         db.Plans.Add(nonShowcase);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateAuthenticatedClient(userId);
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
         var response = await client.GetAsync("/plans");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -74,15 +75,17 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task GetPlan_PrivatePlan_OtherUser_Returns404()
     {
         var ownerId = Guid.NewGuid();
+        var ownerFbUid = $"fb-owner-{ownerId:N}";
         var otherId = Guid.NewGuid();
+        var otherFbUid = $"fb-other-{otherId:N}";
         var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = ownerId, Email = $"owner-{ownerId:N}@test.com" });
-        db.Users.Add(new User { Id = otherId, Email = $"other-{otherId:N}@test.com" });
+        db.Users.Add(new User { Id = ownerId, Email = $"owner-{ownerId:N}@test.com", FirebaseUid = ownerFbUid });
+        db.Users.Add(new User { Id = otherId, Email = $"other-{otherId:N}@test.com", FirebaseUid = otherFbUid });
         var privatePlan = MakePlan("Private Plan", isPublic: false, createdById: ownerId);
         db.Plans.Add(privatePlan);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateAuthenticatedClient(otherId);
+        var client = fixture.CreateAuthenticatedClient(otherId, otherFbUid);
         var response = await client.GetAsync($"/plans/{privatePlan.Id}");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
@@ -92,13 +95,14 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task GetPlan_PrivatePlan_Owner_ReturnsOk()
     {
         var ownerId = Guid.NewGuid();
+        var ownerFbUid = $"fb-privown-{ownerId:N}";
         var db = fixture.GetDbContext();
-        db.Users.Add(new User { Id = ownerId, Email = $"priv-owner-{ownerId:N}@test.com" });
+        db.Users.Add(new User { Id = ownerId, Email = $"priv-owner-{ownerId:N}@test.com", FirebaseUid = ownerFbUid });
         var privatePlan = MakePlan("Owner Private", isPublic: false, createdById: ownerId);
         db.Plans.Add(privatePlan);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateAuthenticatedClient(ownerId);
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
         var response = await client.GetAsync($"/plans/{privatePlan.Id}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
