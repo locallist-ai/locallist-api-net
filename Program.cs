@@ -59,8 +59,7 @@ var firebaseProjectId = Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID"
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        // Use explicit JWKS URI instead of Authority/OIDC discovery to avoid
-        // Kerberos/GSS-API issues in Alpine containers
+        options.IncludeErrorDetails = true;
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -77,6 +76,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 ).Result;
                 var keys = new Microsoft.IdentityModel.Tokens.JsonWebKeySet(jwks);
                 return keys.GetSigningKeys();
+            }
+        };
+        options.Events = new Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerEvents
+        {
+            OnAuthenticationFailed = context =>
+            {
+                var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                logger.LogError(context.Exception, "JWT validation failed for Firebase token");
+                return Task.CompletedTask;
             }
         };
     });
@@ -238,6 +246,22 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+
+// TEMPORARY: debug endpoint to test Firebase token validation
+app.MapGet("/debug/token", (HttpContext ctx) =>
+{
+    var authHeader = ctx.Request.Headers["Authorization"].FirstOrDefault();
+    if (string.IsNullOrEmpty(authHeader))
+        return Results.Ok(new { error = "No Authorization header", firebaseProjectId });
+
+    return Results.Ok(new
+    {
+        firebaseProjectId,
+        authHeaderPrefix = authHeader[..Math.Min(50, authHeader.Length)],
+        isAuthenticated = ctx.User.Identity?.IsAuthenticated ?? false,
+        claims = ctx.User.Claims.Select(c => new { c.Type, c.Value }).ToArray()
+    });
+});
 
 app.MapGet("/health", async (TimeProvider clock, LocalListDbContext db, CancellationToken ct) =>
 {
