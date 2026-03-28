@@ -28,8 +28,10 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
     var databaseUri = new Uri(connectionUrl);
     var userInfo = databaseUri.UserInfo.Split(':');
     var port = databaseUri.Port > 0 ? databaseUri.Port : 5432;
-    var trustCert = builder.Environment.IsDevelopment() ? "Trust Server Certificate=true;" : ""; // M4: Strict SSL in Prod
-    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode=Require;{trustCert}";
+    var isInternalNetwork = databaseUri.Host.EndsWith(".railway.internal");
+    var sslMode = isInternalNetwork ? "Prefer" : "Require";
+    var trustCert = (builder.Environment.IsDevelopment() || isInternalNetwork) ? "Trust Server Certificate=true;" : "";
+    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode={sslMode};{trustCert}";
 }
 
 // Only register Npgsql when a real connection string is available.
