@@ -45,6 +45,10 @@ public class Plan
     [Column("is_showcase")]
     public bool IsShowcase { get; set; } = false;
 
+    [Column("source")]
+    [StringLength(50)]
+    public string Source { get; set; } = "user";
+
     [Column("created_by")]
     public Guid? CreatedById { get; set; }
 

@@ -270,6 +270,13 @@ app.MapGet("/health", async (TimeProvider clock, LocalListDbContext db, Cancella
 .WithName("HealthCheck")
 ;
 
+// Apply pending EF Core migrations on startup (safe for production — idempotent)
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<LocalListDbContext>();
+    await db.Database.MigrateAsync();
+}
+
 app.Run();
 
 // Make the implicit Program class accessible for WebApplicationFactory<Program> in tests
