@@ -30,6 +30,13 @@ appsettings.*.json
 ## Claude Code
 .claude/
 
+## Script output files (may contain API keys or sensitive data)
+Scripts/candidates-*.json
+Scripts/*-result.json
+Scripts/*-with-photos.json
+Scripts/r2-photo-urls.json
+Scripts/update-photos.sql
+
 ## VS Code
 .vscode/*
 !.vscode/settings.json
