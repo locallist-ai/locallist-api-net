@@ -92,13 +92,14 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowSpecificOrigins", corsBuilder =>
     {
         var env = builder.Environment;
-        var allowedOrigins = env.IsProduction() 
-            ? new[] { "https://locallist.ai" }
+        // localhost:8081 included in production for Admin ERP (internal tool, runs locally against prod API)
+        var allowedOrigins = env.IsProduction()
+            ? new[] { "https://locallist.ai", "http://localhost:8081" }
             : new[] { "http://localhost:8081", "http://localhost:19006" };
 
         corsBuilder.WithOrigins(allowedOrigins)
             .WithMethods("GET", "POST", "PATCH", "DELETE", "OPTIONS")
-            .WithHeaders("Content-Type", "Authorization")
+            .WithHeaders("Content-Type", "Authorization", "X-Admin-Key")
             .AllowCredentials();
     });
 });
