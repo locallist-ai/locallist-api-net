@@ -34,6 +34,19 @@ public class AdminPlacesController : ControllerBase
         _clock = clock;
     }
 
+    [HttpGet("cities")]
+    public async Task<IActionResult> GetCities(CancellationToken ct)
+    {
+        var cities = await _db.Places
+            .Where(p => p.City != null)
+            .Select(p => p.City)
+            .Distinct()
+            .OrderBy(c => c)
+            .ToListAsync(ct);
+
+        return Ok(new { cities });
+    }
+
     [HttpGet]
     public async Task<IActionResult> GetPlaces(
         [FromQuery] string? status,
