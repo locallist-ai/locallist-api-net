@@ -63,6 +63,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
         options.IncludeErrorDetails = true;
+        options.Authority = $"https://securetoken.google.com/{firebaseProjectId}";
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -71,15 +72,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAudience = firebaseProjectId,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            IssuerSigningKeyResolver = (token, securityToken, kid, parameters) =>
-            {
-                using var httpClient = new HttpClient();
-                var jwks = httpClient.GetStringAsync(
-                    "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
-                ).Result;
-                var keys = new Microsoft.IdentityModel.Tokens.JsonWebKeySet(jwks);
-                return keys.GetSigningKeys();
-            }
         };
         options.Events = new Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerEvents
         {
@@ -250,21 +242,24 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-// TEMPORARY: debug endpoint to test Firebase token validation
-app.MapGet("/debug/token", (HttpContext ctx) =>
+// Debug endpoint to test Firebase token validation (Development only)
+if (app.Environment.IsDevelopment())
 {
-    var authHeader = ctx.Request.Headers["Authorization"].FirstOrDefault();
-    if (string.IsNullOrEmpty(authHeader))
-        return Results.Ok(new { error = "No Authorization header", firebaseProjectId });
-
-    return Results.Ok(new
+    app.MapGet("/debug/token", (HttpContext ctx) =>
     {
-        firebaseProjectId,
-        authHeaderPrefix = authHeader[..Math.Min(50, authHeader.Length)],
-        isAuthenticated = ctx.User.Identity?.IsAuthenticated ?? false,
-        claims = ctx.User.Claims.Select(c => new { c.Type, c.Value }).ToArray()
+        var authHeader = ctx.Request.Headers["Authorization"].FirstOrDefault();
+        if (string.IsNullOrEmpty(authHeader))
+            return Results.Ok(new { error = "No Authorization header", firebaseProjectId });
+
+        return Results.Ok(new
+        {
+            firebaseProjectId,
+            authHeaderPrefix = authHeader[..Math.Min(50, authHeader.Length)],
+            isAuthenticated = ctx.User.Identity?.IsAuthenticated ?? false,
+            claims = ctx.User.Claims.Select(c => new { c.Type, c.Value }).ToArray()
+        });
     });
-});
+}
 
 app.MapGet("/health", async (TimeProvider clock, LocalListDbContext db, CancellationToken ct) =>
 {

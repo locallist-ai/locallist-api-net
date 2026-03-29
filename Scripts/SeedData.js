@@ -1,141 +1,283 @@
 // Data Ingestion Script for LocalList
-// Usage: node SeedData.js
+// Fetches places from Google Places API, filters by quality, analyzes with Gemini AI,
+// and outputs a JSON file for human review before importing via the admin bulk endpoint.
+//
+// Usage:
+//   node SeedData.js
+//
+// Required env vars (in .env file):
+//   GEMINI_API_KEY          - Google Gemini API key
+//   GOOGLE_MAPS_API_KEY     - Google Maps / Places API key
+//     (fallback: EXPO_PUBLIC_GOOGLE_MAPS_IOS_API_KEY)
 
-const { neon } = require('@neondatabase/serverless');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const crypto = require('crypto');
-require('dotenv').config({ path: '../../LocalList.API/.env' });
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../../LocalList.API/.env') });
 
-// 1. Initialize Clients
-const sql = neon(process.env.DATABASE_URL);
+// --- Initialize Gemini AI ---
 const gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY).getGenerativeModel({
     model: 'gemini-2.5-flash',
     systemInstruction:
-        'Eres un curador de "LocalList", una app de viajes estilo "Only The Best. Nothing Else." para viajeros modernos (Local Explorers). Dado un lugar, evalúa si merece estar en nuestra app, clasifícalo y escribe un breve "Why This Place" justificativo. Rechaza trampas para turistas o restaurantes mediocres de cadena.',
+        'You are a curator for "LocalList", a travel curation app with the motto "Only The Best. Nothing Else." for modern travelers (Local Explorers). Given a place, evaluate if it deserves to be in our app, classify it, and write a brief "Why This Place" justification. Reject tourist traps and mediocre chain restaurants.',
 });
-const GOOGLE_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_IOS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 
-// 2. Constants & Settings
+const GOOGLE_API_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.EXPO_PUBLIC_GOOGLE_MAPS_IOS_API_KEY;
+
+// --- Constants & Settings ---
 const TARGET_CITY = 'Miami';
 const PLACE_TYPES = ['restaurant', 'cafe', 'bar', 'tourist_attraction', 'park', 'museum'];
-const MIN_RATING = 4.3; // Quality Gate Level 1
-const MIN_REVIEWS = 150; // Quality Gate Level 1
+const MIN_RATING = 4.3;       // Quality Gate Level 1
+const MIN_REVIEWS = 150;      // Quality Gate Level 1
 const BATCH_SIZE = 50;
+const MAX_PAGES_PER_TYPE = 3; // Google returns max 20 per page, 3 pages = 60 results
+const PAGE_TOKEN_DELAY_MS = 2000; // Required delay between paginated requests
 
+// Anti-chain filter: well-known chains that should never appear
+const CHAIN_NAMES = [
+    "McDonald's", 'Starbucks', 'Subway', 'Burger King', "Wendy's",
+    "Dunkin'", 'Taco Bell', "Chili's", "Applebee's", 'IHOP',
+    "Denny's", 'Olive Garden', 'Cheesecake Factory',
+];
+
+// --- Stats tracking ---
+const stats = {
+    byCategory: {},
+    totalFetched: 0,
+    passedQualityGate: 0,
+    aiApproved: 0,
+    aiRejected: 0,
+    aiErrors: 0,
+};
+
+/**
+ * Fetch places from Google Places Nearby Search API with pagination.
+ * Returns up to 60 results per type (3 pages of 20).
+ */
 async function fetchFromGoogle(type) {
-    console.log(`\n🔍 Buscando [${type}] locales en ${TARGET_CITY} vía Google...`);
+    console.log(`\n--- Searching [${type}] in ${TARGET_CITY} via Google Places API...`);
 
-    // Miami Coordinates (approx)
     const lat = 25.7617;
     const lng = -80.1918;
     const radius = 15000; // 15km
 
-    const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=${type}&key=${GOOGLE_API_KEY}`;
+    let allResults = [];
+    let nextPageToken = null;
 
-    const response = await fetch(url);
-    const data = await response.json();
+    for (let page = 0; page < MAX_PAGES_PER_TYPE; page++) {
+        let url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=${type}&key=${GOOGLE_API_KEY}`;
 
-    if (data.status !== 'OK') {
-        console.warn(`[Google API Error] ${data.status} - ${data.error_message || ''}`);
-        return [];
+        if (nextPageToken) {
+            url += `&pagetoken=${nextPageToken}`;
+        }
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+            console.warn(`  [Google API Error] ${data.status} - ${data.error_message || ''}`);
+            break;
+        }
+
+        if (data.results) {
+            allResults = allResults.concat(data.results);
+        }
+
+        console.log(`  Page ${page + 1}: ${data.results?.length || 0} results`);
+
+        // Check if there's another page
+        nextPageToken = data.next_page_token || null;
+        if (!nextPageToken) break;
+
+        // Google requires a short delay before the next_page_token becomes valid
+        await new Promise(r => setTimeout(r, PAGE_TOKEN_DELAY_MS));
     }
 
-    // Quality Gate Level 1 (Integrity & Baseline Quality)
-    const filtered = data.results.filter(p => {
+    stats.totalFetched += allResults.length;
+
+    // Quality Gate Level 1: rating, reviews, anti-chain
+    const filtered = allResults.filter(p => {
         if (!p.rating || !p.user_ratings_total) return false;
         if (p.rating < MIN_RATING) return false;
         if (p.user_ratings_total < MIN_REVIEWS) return false;
-        // Basic anti-chain filter based on name length/common words (simplified for script)
-        if (p.name.includes("McDonald's") || p.name.includes('Starbucks') || p.name.includes('Subway')) return false;
+        if (CHAIN_NAMES.some(chain => p.name.includes(chain))) return false;
         return true;
     });
 
-    console.log(`✅ [Quality Gate 1] Encontrados ${data.results.length}, pasaron el fitro: ${filtered.length}`);
+    stats.passedQualityGate += filtered.length;
+    console.log(`  [Quality Gate 1] Fetched ${allResults.length}, passed filter: ${filtered.length}`);
     return filtered;
 }
 
+/**
+ * Analyze a place with Gemini AI (Quality Gate Level 2: vibe check + metadata).
+ * Returns structured AI evaluation.
+ */
 async function analyzeWithGemini(place, type) {
-    // Quality Gate Level 2 (Vibe Check & Metadata Generation)
-    const prompt = `Analiza este lugar en ${TARGET_CITY}:\nNombre: ${place.name}\nTipo Google: ${type}\nRating: ${place.rating} (${place.user_ratings_total} reviews)\nDirección: ${place.vicinity}\n\n1. ¿Es auténtico, de alta calidad y merece estar en LocalList? (Sí/No)\n2. Categoría (Food, Nightlife, Coffee, Outdoors, Wellness, Culture): \n3. Best For (ej: Date Night, Groups, Solo): \n4. Rango de Precio ($ al $$$$): \n5. Escribe un 'whyThisPlace' de 1-2 frases vendiendo la vibra del lugar como si se lo recomendaras a un amigo (tono confiable, directo, local, en inglés).\n\nResponde estrictamente en este formato JSON: {"approved": boolean, "category": "String", "bestFor": "String", "priceRange": "String", "whyThisPlace": "String", "rejectionReason": "String"}`;
+    const prompt = `Analyze this place in ${TARGET_CITY}:
+Name: ${place.name}
+Google Type: ${type}
+Rating: ${place.rating} (${place.user_ratings_total} reviews)
+Address: ${place.vicinity}
+
+1. Is this authentic, high-quality, and worthy of LocalList? (Yes/No)
+2. Category (exactly one of: Food, Nightlife, Coffee, Outdoors, Wellness, Culture)
+3. Best For (array of tags, e.g. ["Date Night", "Groups", "Solo"])
+4. Best Time (e.g. "Evening", "Morning", "Weekend brunch", "Late night")
+5. Price Range (one of: $, $$, $$$, $$$$)
+6. Write a 'whyThisPlace' of 1-2 sentences selling the vibe as if recommending to a friend (trustworthy, direct, local tone, in English).
+
+Respond STRICTLY in this JSON format (no markdown, no extra text):
+{"approved": true, "category": "Food", "bestFor": ["Date Night", "Groups"], "bestTime": "Evening", "priceRange": "$$", "whyThisPlace": "A sentence here.", "rejectionReason": null}
+
+If rejected, set approved to false and provide rejectionReason.`;
 
     try {
         const result = await gemini.generateContent(prompt);
         const text = result.response.text();
-        // Parse JSON block
+        // Extract JSON block from response
         const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
-        return JSON.parse(jsonStr);
-    } catch (error) {
-        console.error(`❌ [Gemini Error] al analizar ${place.name}:`, error.message);
-        return { approved: false, rejectionReason: "Failed AI parsing" };
-    }
-}
+        const parsed = JSON.parse(jsonStr);
 
-async function insertToNeon(place, aiData, type) {
-    // Insert with 'in_review' status for the Admin ERP
-    const id = crypto.randomUUID();
-    const addressParts = (place.vicinity || '').split(',');
-    const neighborhood = addressParts.length > 1 ? addressParts[addressParts.length - 1].trim() : 'Miami';
+        // Validate AI output to mitigate prompt injection
+        const validCategories = ['Food', 'Nightlife', 'Coffee', 'Outdoors', 'Wellness', 'Culture'];
+        const validPriceRanges = ['$', '$$', '$$$', '$$$$'];
 
-    // Map Google Photo reference (placeholder logic for MVP, usually you build the full URL later)
-    const photos = place.photos ? [`https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photoreference=${place.photos[0].photo_reference}&key=API_KEY`] : [];
-
-    try {
-        await sql`
-      INSERT INTO places (
-        id, name, category, city, neighborhood, "coordsLat", "coordsLng", 
-        "whyThisPlace", "bestFor", "priceRange", photos, source, status, 
-        "created_at", "updated_at", "rejectionReason"
-      ) VALUES (
-        ${id}, ${place.name}, ${aiData.category || 'Food'}, ${TARGET_CITY}, ${neighborhood}, 
-        ${place.geometry?.location?.lat || 0}, ${place.geometry?.location?.lng || 0},
-        ${aiData.whyThisPlace || 'A great spot.'}, ${aiData.bestFor || 'Everyone'}, 
-        ${aiData.priceRange || '$$'}, ${JSON.stringify(photos)}, 'Google Places / Gemini API', 
-        'in_review', NOW(), NOW(), ${aiData.rejectionReason || null}
-      )
-    `;
-        console.log(`💾 [Guardado] ${place.name} -> Listo para revisión humana`);
-        return true;
-    } catch (err) {
-        if (err.message.includes('unique constraint')) {
-            console.log(`⏭️ [Skip] ${place.name} ya existe en BD.`);
-        } else {
-            console.error(`❌ [DB Error] Guardando ${place.name}: ${err.message}`);
+        if (parsed.approved) {
+            if (!validCategories.includes(parsed.category)) {
+                console.warn(`  [Validation] Invalid category "${parsed.category}" for ${place.name}, defaulting to Food`);
+                parsed.category = 'Food';
+            }
+            if (!validPriceRanges.includes(parsed.priceRange)) {
+                parsed.priceRange = '$$';
+            }
+            if (typeof parsed.whyThisPlace !== 'string' || parsed.whyThisPlace.length > 500) {
+                parsed.whyThisPlace = parsed.whyThisPlace?.substring(0, 500) || 'A great spot.';
+            }
         }
-        return false;
+
+        // Ensure bestFor is always an array
+        if (parsed.bestFor && !Array.isArray(parsed.bestFor)) {
+            parsed.bestFor = [String(parsed.bestFor)];
+        }
+
+        return parsed;
+    } catch (error) {
+        console.error(`  [Gemini Error] analyzing ${place.name}: ${error.message}`);
+        stats.aiErrors++;
+        return { approved: false, rejectionReason: 'Failed AI parsing' };
     }
 }
 
+/**
+ * Build a candidate object matching the backend's CreatePlaceRequest schema.
+ */
+function buildCandidate(place, aiData) {
+    const addressParts = (place.vicinity || '').split(',');
+    const neighborhood = addressParts.length > 1
+        ? addressParts[addressParts.length - 1].trim()
+        : 'Miami';
+
+    // Store photo references for later processing by process-candidate-photos.js
+    // NEVER embed API keys in output files — only store the reference ID
+    const photoReference = place.photos?.[0]?.photo_reference || null;
+
+    return {
+        name: place.name,
+        category: aiData.category || 'Food',
+        whyThisPlace: aiData.whyThisPlace || 'A great spot.',
+        neighborhood: neighborhood,
+        city: TARGET_CITY,
+        latitude: place.geometry?.location?.lat || null,
+        longitude: place.geometry?.location?.lng || null,
+        bestFor: Array.isArray(aiData.bestFor) ? aiData.bestFor : ['Everyone'],
+        bestTime: aiData.bestTime || null,
+        priceRange: aiData.priceRange || '$$',
+        googlePlaceId: place.place_id || null,
+        googleRating: place.rating || null,
+        googleReviewCount: place.user_ratings_total || null,
+        source: 'google_places_gemini',
+        status: 'in_review',
+        photos: [],
+        // Temporary field consumed by process-candidate-photos.js, stripped before import
+        googlePhotoReference: photoReference,
+    };
+}
+
+/**
+ * Main pipeline: fetch -> filter -> AI analyze -> collect -> write JSON.
+ */
 async function run() {
-    console.log("🚀 Iniciando LocalList Data Ingestion Pipeline (Modo: in_review)");
-    let totalSaved = 0;
+    console.log('=== LocalList Data Ingestion Pipeline ===');
+    console.log(`Target: ${TARGET_CITY} | Quality gates: rating >= ${MIN_RATING}, reviews >= ${MIN_REVIEWS}`);
+    console.log(`Max batch: ${BATCH_SIZE} candidates\n`);
+
+    if (!GOOGLE_API_KEY) {
+        console.error('ERROR: No Google Maps API key found. Set GOOGLE_MAPS_API_KEY or EXPO_PUBLIC_GOOGLE_MAPS_IOS_API_KEY in .env');
+        process.exit(1);
+    }
+    if (!process.env.GEMINI_API_KEY) {
+        console.error('ERROR: No Gemini API key found. Set GEMINI_API_KEY in .env');
+        process.exit(1);
+    }
+
+    const candidates = [];
 
     for (const type of PLACE_TYPES) {
-        if (totalSaved >= BATCH_SIZE) break;
+        if (candidates.length >= BATCH_SIZE) break;
 
         const places = await fetchFromGoogle(type);
 
         for (const place of places) {
-            if (totalSaved >= BATCH_SIZE) break;
+            if (candidates.length >= BATCH_SIZE) break;
 
-            console.log(`\n🤖 Consultando AI sobre: ${place.name}`);
+            console.log(`  [AI] Analyzing: ${place.name}`);
             const aiData = await analyzeWithGemini(place, type);
 
             if (aiData.approved) {
-                console.log(`⭐ [AI Aprobado] ${place.name} - ${aiData.whyThisPlace}`);
-                const success = await insertToNeon(place, aiData, type);
-                if (success) totalSaved++;
+                const candidate = buildCandidate(place, aiData);
+                candidates.push(candidate);
+
+                // Track per-category stats
+                const cat = candidate.category;
+                stats.byCategory[cat] = (stats.byCategory[cat] || 0) + 1;
+                stats.aiApproved++;
+
+                console.log(`    APPROVED -> ${candidate.category} | ${candidate.whyThisPlace.substring(0, 60)}...`);
             } else {
-                console.log(`🛑 [AI Rechazado] ${place.name} - Motivo: ${aiData.rejectionReason}`);
-                // Optionally save rejected places for analytics, but skipping for now to save DB space
+                stats.aiRejected++;
+                console.log(`    REJECTED -> ${aiData.rejectionReason || 'No reason given'}`);
             }
 
-            // Rate link breaker
+            // Rate limiter: avoid hitting API quotas
             await new Promise(r => setTimeout(r, 1500));
         }
     }
 
-    console.log(`\n🎉 Ingestion finalizada. Guardados ${totalSaved} lugares nuevos 'in_review'.`);
-    process.exit(0);
+    // --- Write output JSON ---
+    const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const outputFile = path.resolve(__dirname, `candidates-${dateStr}.json`);
+    fs.writeFileSync(outputFile, JSON.stringify(candidates, null, 2), 'utf-8');
+
+    // --- Summary stats ---
+    console.log('\n=== Ingestion Summary ===');
+    console.log(`Total fetched from Google:    ${stats.totalFetched}`);
+    console.log(`Passed Quality Gate 1:        ${stats.passedQualityGate}`);
+    console.log(`AI Approved (candidates):     ${stats.aiApproved}`);
+    console.log(`AI Rejected:                  ${stats.aiRejected}`);
+    console.log(`AI Errors:                    ${stats.aiErrors}`);
+    console.log('');
+    console.log('Candidates per category:');
+    for (const [cat, count] of Object.entries(stats.byCategory).sort((a, b) => b[1] - a[1])) {
+        console.log(`  ${cat}: ${count}`);
+    }
+    console.log('');
+    console.log(`Output written to: ${outputFile}`);
+    console.log(`\nNext step: review the JSON, then import with:`);
+    console.log(`  ./import-candidates.sh ${outputFile} <API_URL> <API_KEY_OR_JWT>`);
 }
 
-run();
+run().catch(err => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+});

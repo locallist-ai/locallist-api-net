@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -24,11 +24,9 @@ public class PlanEditController : ControllerBase
     [HttpPut("{id}/stops")]
     public async Task<IActionResult> UpdateStops(Guid id, [FromBody] UpdateStopsRequest request, CancellationToken ct)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId))
+        var userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
-
-        var userGuid = Guid.Parse(userId);
 
         var plan = await _db.Plans
             .Include(p => p.Stops)
@@ -37,7 +35,7 @@ public class PlanEditController : ControllerBase
         if (plan == null)
             return NotFound(new { error = "Plan not found" });
 
-        if (plan.CreatedById != userGuid)
+        if (plan.CreatedById != userId.Value)
         {
             _logger.LogWarning("User {UserId} attempted to edit plan {PlanId} owned by {OwnerId}", userId, id, plan.CreatedById);
             return Forbid();
