@@ -44,3 +44,30 @@ public class CreatePlanStopRequest
     public TimeSpan? SuggestedArrival { get; set; }
     public int? SuggestedDurationMin { get; set; }
 }
+
+public class UpdatePlanRequest
+{
+    [StringLength(255)]
+    public string? Name { get; set; }
+
+    [StringLength(100)]
+    public string? City { get; set; }
+
+    [StringLength(20)]
+    public string? Type { get; set; }
+
+    public string? Description { get; set; }
+    public string? ImageUrl { get; set; }
+
+    [Range(1, 7)]
+    public int? DurationDays { get; set; }
+
+    public bool? IsPublic { get; set; }
+    public bool? IsShowcase { get; set; }
+}
+
+public class UpdatePlanStopsRequest
+{
+    [Required, MinLength(1)]
+    public List<CreatePlanStopRequest> Stops { get; set; } = [];
+}
