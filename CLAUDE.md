@@ -6,12 +6,12 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 
 | | Details |
 |---|---|
-| **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Neon PostgreSQL |
+| **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Firebase Auth (RS256 JWKS) — Apple Sign In + Google + email/password. Single `/auth/sync` endpoint. |
 | **AI** | Gemini 2.5 Flash via `Features/Builder/AiProviderService.cs`. |
-| **Rate Limit** | 100 req/min global. Builder limited to 5/hr. |
+| **Rate Limit** | 100 req/min global. Builder 5/hr. Waitlist 5/60s. |
 
 ## Running Locally
 
@@ -44,8 +44,11 @@ LocalList.API.NET/
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Places/
 │   │   └── PlacesController.cs         # GET /places, GET /places/:id
-│   └── Plans/
+│   ├── Plans/
 │       └── PlansController.cs          # GET /plans, GET /plans/:id
+│   └── Waitlist/
+│       ├── WaitlistController.cs       # POST /waitlist, GET /waitlist/count (anonymous, Landing proxy)
+│       └── WaitlistDtos.cs             # JoinWaitlistRequest, JoinWaitlistResponse, WaitlistCountResponse
 └── Shared/
     ├── Auth/
     │   ├── AdminAuthorizeAttribute.cs   # Admin authorization attribute
@@ -58,7 +61,8 @@ LocalList.API.NET/
             ├── Plan.cs
             ├── PlanStop.cs
             ├── Place.cs
-            └── FollowSession.cs
+            ├── FollowSession.cs
+            └── WaitlistEntry.cs
 ```
 
 ## Endpoints
@@ -71,3 +75,4 @@ LocalList.API.NET/
 | Plans | `GET /plans/`, `GET /plans/:id` |
 | Builder | `POST /builder/chat` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
+| Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |

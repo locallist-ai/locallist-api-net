@@ -443,6 +443,33 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("users");
                 });
 
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.WaitlistEntry", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("email");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Email")
+                        .IsUnique();
+
+                    b.ToTable("waitlist_entries");
+                });
+
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.FollowSession", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.Plan", "Plan")

@@ -142,6 +142,18 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(15)
             }));
 
+    // Waitlist: 5 requests per 60 seconds per IP (matches Landing edge rate limit)
+    options.AddPolicy("WaitlistLimit", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 5,
+                QueueLimit = 0,
+                Window = TimeSpan.FromSeconds(60)
+            }));
+
     // Admin endpoints: generous limit for internal tooling (bulk imports)
     options.AddPolicy("AdminLimit", context =>
         RateLimitPartition.GetFixedWindowLimiter(

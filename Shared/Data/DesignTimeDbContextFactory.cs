@@ -13,7 +13,6 @@ public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<LocalListD
             ?? "Host=localhost;Database=locallist_dev;Username=postgres;Password=postgres";
 
         optionsBuilder.UseNpgsql(connectionString);
-
         return new LocalListDbContext(optionsBuilder.Options);
     }
 }

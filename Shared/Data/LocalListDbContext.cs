@@ -12,6 +12,7 @@ public class LocalListDbContext : DbContext
     public DbSet<Plan> Plans { get; set; } = null!;
     public DbSet<PlanStop> PlanStops { get; set; } = null!;
     public DbSet<FollowSession> FollowSessions { get; set; } = null!;
+    public DbSet<WaitlistEntry> WaitlistEntries { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -84,5 +85,7 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<PlanStop>().HasIndex(ps => new { ps.PlanId, ps.DayNumber });
 
         modelBuilder.Entity<FollowSession>().HasIndex(fs => new { fs.UserId, fs.Status });
+
+        modelBuilder.Entity<WaitlistEntry>().HasIndex(w => w.Email).IsUnique();
     }
 }

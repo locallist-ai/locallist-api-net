@@ -99,6 +99,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("AdminLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("WaitlistLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
     }
@@ -109,7 +111,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         _dbCreated = true;
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LocalListDbContext>();
-        db.Database.EnsureCreated();
+        db.Database.Migrate();
     }
 
     public new HttpClient CreateClient()
