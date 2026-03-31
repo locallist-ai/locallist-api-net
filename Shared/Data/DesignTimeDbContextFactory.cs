@@ -8,7 +8,11 @@ public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<LocalListD
     public LocalListDbContext CreateDbContext(string[] args)
     {
         var optionsBuilder = new DbContextOptionsBuilder<LocalListDbContext>();
-        optionsBuilder.UseNpgsql("Host=localhost;Database=locallist_dev;Username=postgres;Password=postgres");
+
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection")
+            ?? "Host=localhost;Database=locallist_dev;Username=postgres;Password=postgres";
+
+        optionsBuilder.UseNpgsql(connectionString);
         return new LocalListDbContext(optionsBuilder.Options);
     }
 }

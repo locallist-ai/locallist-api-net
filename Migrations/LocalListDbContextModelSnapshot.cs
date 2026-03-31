@@ -269,6 +269,12 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("name");
 
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("source");
+
                     b.Property<JsonDocument>("TripContext")
                         .HasColumnType("jsonb")
                         .HasColumnName("trip_context");
