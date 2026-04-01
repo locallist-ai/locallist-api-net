@@ -282,7 +282,7 @@ app.MapGet("/health", async (TimeProvider clock, LocalListDbContext db, Cancella
 .WithName("HealthCheck")
 ;
 
-// Apply pending EF Core migrations on startup (safe for production — idempotent)
+// Apply pending EF Core migrations on startup (all migrations use idempotent raw SQL)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<LocalListDbContext>();
