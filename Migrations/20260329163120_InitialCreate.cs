@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -9,196 +6,150 @@ namespace LocalList.API.NET.Migrations
 {
     /// <inheritdoc />
     /// <summary>
-    /// Creates the full baseline schema. In production, this migration is marked as
-    /// already applied (tables pre-exist). In CI/test, it creates all tables from scratch.
+    /// Creates the full baseline schema using idempotent raw SQL (IF NOT EXISTS).
+    /// Safe for both production (tables pre-exist) and CI/test (blank DB).
     /// </summary>
     public partial class InitialCreate : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.CreateTable(
-                name: "users",
-                columns: table => new
-                {
-                    id = table.Column<Guid>(type: "uuid", nullable: false),
-                    email = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
-                    name = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    image = table.Column<string>(type: "text", nullable: true),
-                    tier = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
-                    role = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
-                    password_hash = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    apple_user_id = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    google_user_id = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    firebase_uid = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: true),
-                    rc_customer_id = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    city = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
-                    created_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_users", x => x.id);
-                });
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id uuid NOT NULL,
+                    email character varying(255) NOT NULL,
+                    name character varying(255),
+                    image text,
+                    tier character varying(20) NOT NULL,
+                    role character varying(20) NOT NULL,
+                    password_hash character varying(255),
+                    apple_user_id character varying(255),
+                    google_user_id character varying(255),
+                    firebase_uid character varying(128),
+                    rc_customer_id character varying(255),
+                    city character varying(100),
+                    created_at timestamp with time zone NOT NULL,
+                    updated_at timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_users" PRIMARY KEY (id)
+                );
+                """);
 
-            migrationBuilder.CreateTable(
-                name: "places",
-                columns: table => new
-                {
-                    id = table.Column<Guid>(type: "uuid", nullable: false),
-                    name = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
-                    category = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
-                    subcategory = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
-                    neighborhood = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
-                    city = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
-                    latitude = table.Column<decimal>(type: "numeric(10,7)", nullable: true),
-                    longitude = table.Column<decimal>(type: "numeric(10,7)", nullable: true),
-                    why_this_place = table.Column<string>(type: "text", nullable: false),
-                    best_for = table.Column<List<string>>(type: "text[]", nullable: true),
-                    suitable_for = table.Column<List<string>>(type: "text[]", nullable: true),
-                    best_time = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
-                    price_range = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: true),
-                    photos = table.Column<List<string>>(type: "text[]", nullable: true),
-                    opening_hours = table.Column<JsonDocument>(type: "jsonb", nullable: true),
-                    google_place_id = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    google_rating = table.Column<decimal>(type: "numeric(2,1)", nullable: true),
-                    google_review_count = table.Column<int>(type: "integer", nullable: true),
-                    source = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),
-                    source_url = table.Column<string>(type: "text", nullable: true),
-                    status = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
-                    rejection_reason = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true),
-                    ai_vibe_score = table.Column<int>(type: "integer", nullable: true),
-                    flags = table.Column<List<string>>(type: "text[]", nullable: true),
-                    submitted_by = table.Column<Guid>(type: "uuid", nullable: true),
-                    reviewed_by = table.Column<Guid>(type: "uuid", nullable: true),
-                    created_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_places", x => x.id);
-                    table.ForeignKey(
-                        name: "FK_places_users_reviewed_by",
-                        column: x => x.reviewed_by,
-                        principalTable: "users",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.SetNull);
-                    table.ForeignKey(
-                        name: "FK_places_users_submitted_by",
-                        column: x => x.submitted_by,
-                        principalTable: "users",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.SetNull);
-                });
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS places (
+                    id uuid NOT NULL,
+                    name character varying(255) NOT NULL,
+                    category character varying(50) NOT NULL,
+                    subcategory character varying(100),
+                    neighborhood character varying(100),
+                    city character varying(100) NOT NULL,
+                    latitude numeric(10,7),
+                    longitude numeric(10,7),
+                    why_this_place text NOT NULL,
+                    best_for text[],
+                    suitable_for text[],
+                    best_time character varying(50),
+                    price_range character varying(10),
+                    photos text[],
+                    opening_hours jsonb,
+                    google_place_id character varying(255),
+                    google_rating numeric(2,1),
+                    google_review_count integer,
+                    source character varying(50) NOT NULL,
+                    source_url text,
+                    status character varying(20) NOT NULL,
+                    rejection_reason character varying(1000),
+                    ai_vibe_score integer,
+                    flags text[],
+                    submitted_by uuid,
+                    reviewed_by uuid,
+                    created_at timestamp with time zone NOT NULL,
+                    updated_at timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_places" PRIMARY KEY (id),
+                    CONSTRAINT "FK_places_users_reviewed_by" FOREIGN KEY (reviewed_by)
+                        REFERENCES users (id) ON DELETE SET NULL,
+                    CONSTRAINT "FK_places_users_submitted_by" FOREIGN KEY (submitted_by)
+                        REFERENCES users (id) ON DELETE SET NULL
+                );
+                """);
 
-            migrationBuilder.CreateTable(
-                name: "plans",
-                columns: table => new
-                {
-                    id = table.Column<Guid>(type: "uuid", nullable: false),
-                    name = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
-                    city = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
-                    type = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
-                    description = table.Column<string>(type: "text", nullable: true),
-                    image_url = table.Column<string>(type: "text", nullable: true),
-                    duration_days = table.Column<int>(type: "integer", nullable: false),
-                    trip_context = table.Column<JsonDocument>(type: "jsonb", nullable: true),
-                    is_public = table.Column<bool>(type: "boolean", nullable: false),
-                    is_showcase = table.Column<bool>(type: "boolean", nullable: false),
-                    created_by = table.Column<Guid>(type: "uuid", nullable: true),
-                    created_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    updated_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_plans", x => x.id);
-                    table.ForeignKey(
-                        name: "FK_plans_users_created_by",
-                        column: x => x.created_by,
-                        principalTable: "users",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.SetNull);
-                });
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS plans (
+                    id uuid NOT NULL,
+                    name character varying(255) NOT NULL,
+                    city character varying(100) NOT NULL,
+                    type character varying(20) NOT NULL,
+                    description text,
+                    image_url text,
+                    duration_days integer NOT NULL,
+                    trip_context jsonb,
+                    is_public boolean NOT NULL,
+                    is_showcase boolean NOT NULL,
+                    created_by uuid,
+                    created_at timestamp with time zone NOT NULL,
+                    updated_at timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_plans" PRIMARY KEY (id),
+                    CONSTRAINT "FK_plans_users_created_by" FOREIGN KEY (created_by)
+                        REFERENCES users (id) ON DELETE SET NULL
+                );
+                """);
 
-            migrationBuilder.CreateTable(
-                name: "follow_sessions",
-                columns: table => new
-                {
-                    id = table.Column<Guid>(type: "uuid", nullable: false),
-                    user_id = table.Column<Guid>(type: "uuid", nullable: false),
-                    plan_id = table.Column<Guid>(type: "uuid", nullable: false),
-                    status = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
-                    current_day_index = table.Column<int>(type: "integer", nullable: false),
-                    current_stop_index = table.Column<int>(type: "integer", nullable: false),
-                    started_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    completed_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    last_active_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_follow_sessions", x => x.id);
-                    table.ForeignKey(
-                        name: "FK_follow_sessions_plans_plan_id",
-                        column: x => x.plan_id,
-                        principalTable: "plans",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_follow_sessions_users_user_id",
-                        column: x => x.user_id,
-                        principalTable: "users",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.Cascade);
-                });
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS follow_sessions (
+                    id uuid NOT NULL,
+                    user_id uuid NOT NULL,
+                    plan_id uuid NOT NULL,
+                    status character varying(20) NOT NULL,
+                    current_day_index integer NOT NULL,
+                    current_stop_index integer NOT NULL,
+                    started_at timestamp with time zone NOT NULL,
+                    completed_at timestamp with time zone,
+                    last_active_at timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_follow_sessions" PRIMARY KEY (id),
+                    CONSTRAINT "FK_follow_sessions_plans_plan_id" FOREIGN KEY (plan_id)
+                        REFERENCES plans (id) ON DELETE CASCADE,
+                    CONSTRAINT "FK_follow_sessions_users_user_id" FOREIGN KEY (user_id)
+                        REFERENCES users (id) ON DELETE CASCADE
+                );
+                """);
 
-            migrationBuilder.CreateTable(
-                name: "plan_stops",
-                columns: table => new
-                {
-                    id = table.Column<Guid>(type: "uuid", nullable: false),
-                    plan_id = table.Column<Guid>(type: "uuid", nullable: false),
-                    place_id = table.Column<Guid>(type: "uuid", nullable: false),
-                    day_number = table.Column<int>(type: "integer", nullable: false),
-                    order_index = table.Column<int>(type: "integer", nullable: false),
-                    time_block = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
-                    suggested_arrival = table.Column<TimeSpan>(type: "interval", nullable: true),
-                    suggested_duration_min = table.Column<int>(type: "integer", nullable: true),
-                    travel_from_previous = table.Column<JsonDocument>(type: "jsonb", nullable: true),
-                    created_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_plan_stops", x => x.id);
-                    table.ForeignKey(
-                        name: "FK_plan_stops_places_place_id",
-                        column: x => x.place_id,
-                        principalTable: "places",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.Restrict);
-                    table.ForeignKey(
-                        name: "FK_plan_stops_plans_plan_id",
-                        column: x => x.plan_id,
-                        principalTable: "plans",
-                        principalColumn: "id",
-                        onDelete: ReferentialAction.Cascade);
-                });
+            migrationBuilder.Sql("""
+                CREATE TABLE IF NOT EXISTS plan_stops (
+                    id uuid NOT NULL,
+                    plan_id uuid NOT NULL,
+                    place_id uuid NOT NULL,
+                    day_number integer NOT NULL,
+                    order_index integer NOT NULL,
+                    time_block character varying(20),
+                    suggested_arrival interval,
+                    suggested_duration_min integer,
+                    travel_from_previous jsonb,
+                    created_at timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_plan_stops" PRIMARY KEY (id),
+                    CONSTRAINT "FK_plan_stops_places_place_id" FOREIGN KEY (place_id)
+                        REFERENCES places (id) ON DELETE RESTRICT,
+                    CONSTRAINT "FK_plan_stops_plans_plan_id" FOREIGN KEY (plan_id)
+                        REFERENCES plans (id) ON DELETE CASCADE
+                );
+                """);
 
-            migrationBuilder.CreateIndex(name: "IX_follow_sessions_plan_id", table: "follow_sessions", column: "plan_id");
-            migrationBuilder.CreateIndex(name: "IX_follow_sessions_user_id_status", table: "follow_sessions", columns: new[] { "user_id", "status" });
-            migrationBuilder.CreateIndex(name: "IX_places_category", table: "places", column: "category");
-            migrationBuilder.CreateIndex(name: "IX_places_google_place_id", table: "places", column: "google_place_id", unique: true);
-            migrationBuilder.CreateIndex(name: "IX_places_reviewed_by", table: "places", column: "reviewed_by");
-            migrationBuilder.CreateIndex(name: "IX_places_status_city", table: "places", columns: new[] { "status", "city" });
-            migrationBuilder.CreateIndex(name: "IX_places_submitted_by", table: "places", column: "submitted_by");
-            migrationBuilder.CreateIndex(name: "IX_plan_stops_place_id", table: "plan_stops", column: "place_id");
-            migrationBuilder.CreateIndex(name: "IX_plan_stops_plan_id_day_number", table: "plan_stops", columns: new[] { "plan_id", "day_number" });
-            migrationBuilder.CreateIndex(name: "IX_plans_city_is_public", table: "plans", columns: new[] { "city", "is_public" });
-            migrationBuilder.CreateIndex(name: "IX_plans_created_by", table: "plans", column: "created_by");
-            migrationBuilder.CreateIndex(name: "IX_users_apple_user_id", table: "users", column: "apple_user_id", unique: true);
-            migrationBuilder.CreateIndex(name: "IX_users_email", table: "users", column: "email", unique: true);
-            migrationBuilder.CreateIndex(name: "IX_users_firebase_uid", table: "users", column: "firebase_uid", unique: true);
-            migrationBuilder.CreateIndex(name: "IX_users_google_user_id", table: "users", column: "google_user_id", unique: true);
-            migrationBuilder.CreateIndex(name: "IX_users_rc_customer_id", table: "users", column: "rc_customer_id", unique: true);
+            migrationBuilder.Sql("""
+                CREATE INDEX IF NOT EXISTS "IX_follow_sessions_plan_id" ON follow_sessions (plan_id);
+                CREATE INDEX IF NOT EXISTS "IX_follow_sessions_user_id_status" ON follow_sessions (user_id, status);
+                CREATE INDEX IF NOT EXISTS "IX_places_category" ON places (category);
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_places_google_place_id" ON places (google_place_id);
+                CREATE INDEX IF NOT EXISTS "IX_places_reviewed_by" ON places (reviewed_by);
+                CREATE INDEX IF NOT EXISTS "IX_places_status_city" ON places (status, city);
+                CREATE INDEX IF NOT EXISTS "IX_places_submitted_by" ON places (submitted_by);
+                CREATE INDEX IF NOT EXISTS "IX_plan_stops_place_id" ON plan_stops (place_id);
+                CREATE INDEX IF NOT EXISTS "IX_plan_stops_plan_id_day_number" ON plan_stops (plan_id, day_number);
+                CREATE INDEX IF NOT EXISTS "IX_plans_city_is_public" ON plans (city, is_public);
+                CREATE INDEX IF NOT EXISTS "IX_plans_created_by" ON plans (created_by);
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_users_apple_user_id" ON users (apple_user_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_users_email" ON users (email);
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_users_firebase_uid" ON users (firebase_uid);
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_users_google_user_id" ON users (google_user_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_users_rc_customer_id" ON users (rc_customer_id);
+                """);
         }
 
         /// <inheritdoc />

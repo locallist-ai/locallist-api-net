@@ -10,13 +10,17 @@ namespace LocalList.API.NET.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.AddColumn<string>(
-                name: "source",
-                table: "plans",
-                type: "character varying(50)",
-                maxLength: 50,
-                nullable: false,
-                defaultValue: "user");
+            migrationBuilder.Sql("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'plans' AND column_name = 'source'
+                    ) THEN
+                        ALTER TABLE plans ADD COLUMN source character varying(50) NOT NULL DEFAULT 'user';
+                    END IF;
+                END $$;
+                """);
         }
 
         /// <inheritdoc />
