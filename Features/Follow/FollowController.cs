@@ -30,7 +30,7 @@ public class FollowController : ControllerBase
         var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
-        var existing = await _db.FollowSessions
+        var existing = await _db.FollowSessions.AsNoTracking()
             .Where(fs => fs.UserId == userId.Value && fs.Status == "active")
             .FirstOrDefaultAsync(ct);
 
@@ -60,7 +60,7 @@ public class FollowController : ControllerBase
         var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
-        var session = await _db.FollowSessions
+        var session = await _db.FollowSessions.AsNoTracking()
             .Where(fs => fs.UserId == userId.Value && fs.Status == "active")
             .FirstOrDefaultAsync(ct);
 

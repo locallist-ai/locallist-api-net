@@ -40,7 +40,7 @@ public class BuilderController : ControllerBase
 
             // 2. Query Curated Places matching the City
             var city = request.TripContext?.City ?? "Miami"; // Default fallback
-            var matchingPlaces = await _db.Places
+            var matchingPlaces = await _db.Places.AsNoTracking()
                 .Where(p => p.Status == "published" && p.City == city)
                 .ToListAsync(ct);
 
@@ -131,33 +131,25 @@ public class BuilderController : ControllerBase
             _logger.LogError(ex, "Gemini API call failed during plan generation");
             return StatusCode(502, new { error = "AI service temporarily unavailable" });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
         {
             _logger.LogError(ex, "Plan generation failed");
             return StatusCode(500, new { error = "Failed to generate plan" });
         }
     }
 
+    private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
+        { "food", "nightlife", "coffee", "outdoors", "wellness", "culture" };
+
     private List<Place> FilterPlaces(List<Place> allPlaces, ExtractedPreferences prefs)
     {
         if (!prefs.Categories.Any()) return allPlaces;
 
-        var catMap = new Dictionary<string, string>
-        {
-            { "food", "food" },
-            { "nightlife", "nightlife" } ,
-            { "coffee", "coffee" } ,
-            { "outdoors", "outdoors" },
-            { "wellness", "wellness" },
-            { "culture", "culture" }
-        };
-
         return allPlaces.Where(p =>
-        {
-            var pCat = p.Category.ToLower();
-            return prefs.Categories.Any(c =>
-                (catMap.ContainsKey(c) && catMap[c] == pCat) || pCat.Contains(c));
-        }).ToList();
+            prefs.Categories.Any(c =>
+                string.Equals(p.Category, c, StringComparison.OrdinalIgnoreCase)
+                || p.Category.Contains(c, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
     }
 
     private class ScheduledStopDto

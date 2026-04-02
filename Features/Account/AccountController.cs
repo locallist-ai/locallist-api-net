@@ -62,15 +62,13 @@ public class AccountController : ControllerBase
 
         var userId = user.Id;
 
-        // Nullify references in plans and places (no cascade on these FKs)
-        var plans = await _db.Plans.Where(p => p.CreatedById == userId).ToListAsync(ct);
-        foreach (var plan in plans) { plan.CreatedById = null; }
-
-        var submittedPlaces = await _db.Places.Where(p => p.SubmittedById == userId).ToListAsync(ct);
-        foreach (var place in submittedPlaces) { place.SubmittedById = null; }
-
-        var reviewedPlaces = await _db.Places.Where(p => p.ReviewedById == userId).ToListAsync(ct);
-        foreach (var place in reviewedPlaces) { place.ReviewedById = null; }
+        // Nullify references in plans and places via bulk update (no N+1, no race conditions)
+        await _db.Plans.Where(p => p.CreatedById == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.CreatedById, (Guid?)null), ct);
+        await _db.Places.Where(p => p.SubmittedById == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.SubmittedById, (Guid?)null), ct);
+        await _db.Places.Where(p => p.ReviewedById == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.ReviewedById, (Guid?)null), ct);
 
         // Delete user (FollowSessions will cascade automatically via DB constraints)
         _db.Users.Remove(user);
