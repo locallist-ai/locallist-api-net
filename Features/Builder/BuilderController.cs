@@ -86,7 +86,7 @@ public class BuilderController : ControllerBase
                 Type = "ai",
                 Description = $"AI-generated plan: {sanitizedMessage}",
                 DurationDays = prefs.Days,
-                TripContext = request.TripContext != null ? JsonDocument.Parse(JsonSerializer.Serialize(request.TripContext)) : JsonDocument.Parse("{}"),
+                TripContext = request.TripContext != null ? JsonSerializer.SerializeToDocument(request.TripContext) : JsonSerializer.SerializeToDocument(new {}),
                 IsPublic = false,
                 CreatedById = userId
             };
@@ -103,7 +103,7 @@ public class BuilderController : ControllerBase
                 TimeBlock = sd.TimeBlock,
                 SuggestedArrival = string.IsNullOrEmpty(sd.SuggestedArrival) ? null : TimeSpan.Parse(sd.SuggestedArrival),
                 SuggestedDurationMin = sd.SuggestedDurationMin,
-                TravelFromPrevious = sd.TravelFromPrevious != null ? JsonDocument.Parse(JsonSerializer.Serialize(sd.TravelFromPrevious)) : null
+                TravelFromPrevious = sd.TravelFromPrevious != null ? JsonSerializer.SerializeToDocument(sd.TravelFromPrevious) : null
             }).ToList();
 
             if (stopsToInsert.Any())

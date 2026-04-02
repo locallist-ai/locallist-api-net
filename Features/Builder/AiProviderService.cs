@@ -57,7 +57,7 @@ public class AiProviderService
             response.EnsureSuccessStatusCode();
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
-            var doc = JsonDocument.Parse(responseJson);
+            using var doc = JsonDocument.Parse(responseJson);
 
             var textResult = doc.RootElement
                 .GetProperty("candidates")[0]

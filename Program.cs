@@ -31,7 +31,7 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
     var isInternalNetwork = databaseUri.Host.EndsWith(".railway.internal");
     var sslMode = isInternalNetwork ? "Prefer" : "Require";
     var trustCert = (builder.Environment.IsDevelopment() || isInternalNetwork) ? "Trust Server Certificate=true;" : "";
-    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode={sslMode};{trustCert}";
+    connectionUrl = $"Host={databaseUri.Host};Port={port};Database={databaseUri.LocalPath.TrimStart('/')};Username={userInfo[0]};Password={(userInfo.Length > 1 ? userInfo[1] : "")};SslMode={sslMode};{trustCert}Maximum Pool Size=50;Minimum Pool Size=5;Connection Idle Lifetime=60;";
 }
 
 // Only register Npgsql when a real connection string is available.
