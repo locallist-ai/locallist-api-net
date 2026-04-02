@@ -46,11 +46,11 @@ public partial class WaitlistController : ControllerBase
             // Same response for new or duplicate — prevents email enumeration
             var count = await _db.WaitlistEntries.CountAsync(ct);
 
-            _logger.LogInformation("Waitlist signup processed for email hash {EmailHash}", email.GetHashCode());
+            _logger.LogInformation("Waitlist signup processed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
 
             return StatusCode(201, new JoinWaitlistResponse("Successfully joined the waitlist", count));
         }
-        catch (Exception ex)
+        catch (DbUpdateException ex)
         {
             _logger.LogError(ex, "Waitlist signup failed");
             return StatusCode(500, new { error = "Internal server error" });
