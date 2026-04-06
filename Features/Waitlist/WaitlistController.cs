@@ -19,11 +19,13 @@ public partial class WaitlistController : ControllerBase
 
     private readonly LocalListDbContext _db;
     private readonly ILogger<WaitlistController> _logger;
+    private readonly IEmailMarketingService _emailMarketing;
 
-    public WaitlistController(LocalListDbContext db, ILogger<WaitlistController> logger)
+    public WaitlistController(LocalListDbContext db, ILogger<WaitlistController> logger, IEmailMarketingService emailMarketing)
     {
         _db = db;
         _logger = logger;
+        _emailMarketing = emailMarketing;
     }
 
     [HttpPost]
@@ -47,6 +49,25 @@ public partial class WaitlistController : ControllerBase
             var count = await _db.WaitlistEntries.CountAsync(ct);
 
             _logger.LogInformation("Waitlist signup processed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
+
+            // Fire-and-forget: send to Klaviyo (failure must not block signup)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var utmData = new Dictionary<string, string>();
+                    if (!string.IsNullOrEmpty(request.UtmSource)) utmData["source"] = request.UtmSource;
+                    if (!string.IsNullOrEmpty(request.UtmMedium)) utmData["medium"] = request.UtmMedium;
+                    if (!string.IsNullOrEmpty(request.UtmCampaign)) utmData["campaign"] = request.UtmCampaign;
+                    if (!string.IsNullOrEmpty(request.UtmContent)) utmData["content"] = request.UtmContent;
+
+                    await _emailMarketing.AddToWaitlistAsync(email, utmData.Count > 0 ? utmData : null);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Klaviyo background task failed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
+                }
+            }, CancellationToken.None);
 
             return StatusCode(201, new JoinWaitlistResponse("Successfully joined the waitlist", count));
         }

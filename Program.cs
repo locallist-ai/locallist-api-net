@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Waitlist;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -45,6 +46,8 @@ if (!string.IsNullOrEmpty(connectionUrl))
 // Add DI Services
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<AiProviderService>();
+builder.Services.AddHttpClient<KlaviyoService>();
+builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
 // Configure JSON formatting
 builder.Services.AddControllers().AddJsonOptions(options =>
