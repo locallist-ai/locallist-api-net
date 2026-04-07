@@ -50,24 +50,21 @@ public partial class WaitlistController : ControllerBase
 
             _logger.LogInformation("Waitlist signup processed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
 
-            // Fire-and-forget: send to Klaviyo (failure must not block signup)
-            _ = Task.Run(async () =>
+            // Send to Klaviyo (failure must not block signup)
+            try
             {
-                try
-                {
-                    var utmData = new Dictionary<string, string>();
-                    if (!string.IsNullOrEmpty(request.UtmSource)) utmData["source"] = request.UtmSource;
-                    if (!string.IsNullOrEmpty(request.UtmMedium)) utmData["medium"] = request.UtmMedium;
-                    if (!string.IsNullOrEmpty(request.UtmCampaign)) utmData["campaign"] = request.UtmCampaign;
-                    if (!string.IsNullOrEmpty(request.UtmContent)) utmData["content"] = request.UtmContent;
+                var utmData = new Dictionary<string, string>();
+                if (!string.IsNullOrEmpty(request.UtmSource)) utmData["source"] = request.UtmSource;
+                if (!string.IsNullOrEmpty(request.UtmMedium)) utmData["medium"] = request.UtmMedium;
+                if (!string.IsNullOrEmpty(request.UtmCampaign)) utmData["campaign"] = request.UtmCampaign;
+                if (!string.IsNullOrEmpty(request.UtmContent)) utmData["content"] = request.UtmContent;
 
-                    await _emailMarketing.AddToWaitlistAsync(email, utmData.Count > 0 ? utmData : null);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Klaviyo background task failed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
-                }
-            }, CancellationToken.None);
+                await _emailMarketing.AddToWaitlistAsync(email, utmData.Count > 0 ? utmData : null, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Klaviyo failed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
+            }
 
             return StatusCode(201, new JoinWaitlistResponse("Successfully joined the waitlist", count));
         }
