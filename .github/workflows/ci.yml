@@ -26,3 +26,9 @@ jobs:
 
       - name: Test
         run: dotnet test LocalList.API.slnx --no-build --verbosity normal
+
+      - name: Audit dependencies (vulnerable packages)
+        run: |
+          OUTPUT=$(dotnet list LocalList.API.slnx package --vulnerable --include-transitive 2>&1)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "has the following vulnerable packages" && exit 1 || exit 0

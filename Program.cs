@@ -95,9 +95,8 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowSpecificOrigins", corsBuilder =>
     {
         var env = builder.Environment;
-        // localhost:8081 included in production for Admin ERP (internal tool, runs locally against prod API)
         var allowedOrigins = env.IsProduction()
-            ? new[] { "https://locallist.ai", "http://localhost:8081" }
+            ? new[] { "https://locallist.ai" }
             : new[] { "http://localhost:8081", "http://localhost:19006" };
 
         corsBuilder.WithOrigins(allowedOrigins)
@@ -257,25 +256,6 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-
-// Debug endpoint to test Firebase token validation (Development only)
-if (app.Environment.IsDevelopment())
-{
-    app.MapGet("/debug/token", (HttpContext ctx) =>
-    {
-        var authHeader = ctx.Request.Headers["Authorization"].FirstOrDefault();
-        if (string.IsNullOrEmpty(authHeader))
-            return Results.Ok(new { error = "No Authorization header", firebaseProjectId });
-
-        return Results.Ok(new
-        {
-            firebaseProjectId,
-            authHeaderPrefix = authHeader[..Math.Min(50, authHeader.Length)],
-            isAuthenticated = ctx.User.Identity?.IsAuthenticated ?? false,
-            claims = ctx.User.Claims.Select(c => new { c.Type, c.Value }).ToArray()
-        });
-    });
-}
 
 app.MapGet("/health", async (TimeProvider clock, LocalListDbContext db, CancellationToken ct) =>
 {
