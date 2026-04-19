@@ -1,5 +1,8 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
 using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Waitlist;
 using Microsoft.EntityFrameworkCore;
@@ -56,14 +59,21 @@ builder.Services.AddControllers().AddJsonOptions(options =>
     options.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 
-// Configure Authentication & Authorization — Firebase Auth
+// Configure Authentication & Authorization — multi-scheme JWT.
+// Two parallel schemes coexist: "Firebase" (RS256, used by /auth/sync + admin),
+// "App" (HS256, used by the mobile app via /auth/signin|login|register|refresh).
+// "Multi" is the policy scheme that picks one based on the token's `iss` claim.
 var firebaseProjectId =
     Environment.GetEnvironmentVariable("FIREBASE_PROJECT_ID") is { Length: > 0 } envVar ? envVar
     : builder.Configuration["Firebase:ProjectId"] is { Length: > 0 } cfgVar ? cfgVar
     : throw new InvalidOperationException("Firebase ProjectId is not configured. Set FIREBASE_PROJECT_ID env var.");
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+const string FirebaseScheme = "Firebase";
+const string AppScheme = "App";
+const string MultiScheme = "Multi";
+
+builder.Services.AddAuthentication(MultiScheme)
+    .AddJwtBearer(FirebaseScheme, options =>
     {
         options.IncludeErrorDetails = true;
         options.Authority = $"https://securetoken.google.com/{firebaseProjectId}";
@@ -76,7 +86,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
         };
-        options.Events = new Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerEvents
+        options.Events = new JwtBearerEvents
         {
             OnAuthenticationFailed = context =>
             {
@@ -85,9 +95,55 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 return Task.CompletedTask;
             }
         };
+    })
+    .AddJwtBearer(AppScheme, options =>
+    {
+        var jwtSecret = Environment.GetEnvironmentVariable("JWT_SECRET")
+                        ?? builder.Configuration["Jwt:Secret"]
+                        ?? throw new InvalidOperationException(
+                            "JWT_SECRET is not configured. Set the JWT_SECRET env var (>=32 bytes).");
+        if (Encoding.UTF8.GetByteCount(jwtSecret) < 32)
+            throw new InvalidOperationException("JWT_SECRET must be at least 32 bytes for HS256.");
+
+        options.IncludeErrorDetails = true;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = JwtTokenService.Issuer,
+            ValidateAudience = false,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret))
+        };
+    })
+    .AddPolicyScheme(MultiScheme, "Firebase or App JWT", options =>
+    {
+        options.ForwardDefaultSelector = context =>
+        {
+            var auth = context.Request.Headers["Authorization"].FirstOrDefault();
+            if (auth is null || !auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                return FirebaseScheme;
+            var token = auth["Bearer ".Length..].Trim();
+            try
+            {
+                var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+                return jwt.Issuer == JwtTokenService.Issuer ? AppScheme : FirebaseScheme;
+            }
+            catch
+            {
+                return FirebaseScheme;
+            }
+        };
     });
 
 builder.Services.AddAuthorization();
+
+// App auth services (HS256 JWT issuance, password hashing, OAuth ID token validation)
+builder.Services.AddSingleton<IPasswordHasher, BcryptPasswordHasher>();
+builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
+builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
+builder.Services.AddSingleton<IAppleIdTokenValidator, AppleIdTokenValidator>();
+builder.Services.AddSingleton<IGoogleIdTokenValidator, GoogleIdTokenValidator>();
 
 // Configure CORS
 builder.Services.AddCors(options =>

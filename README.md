@@ -7,11 +7,14 @@ For detailed technical context, architecture decisions, and endpoint reference, 
 ## Tech Stack
 - **Framework**: .NET 10 (Web API)
 - **Architecture**: Vertical Slice Architecture — feature folders under `Features/`
-- **Database**: PostgreSQL (Neon Serverless)
-- **ORM**: Entity Framework Core (`Npgsql.EntityFrameworkCore.PostgreSQL`)
-- **Authentication**: Custom JWT Bearer Auth (HS256) + `Google.Apis.Auth` + `BCrypt.Net-Next`
+- **Database**: PostgreSQL on Railway (private network)
+- **ORM**: Entity Framework Core (`Npgsql.EntityFrameworkCore.PostgreSQL`), idempotent raw-SQL migrations
+- **Authentication**: **two parallel JWT schemes**
+  - **Firebase RS256** (issued by Firebase, validated via JWKS): used by the internal admin tool (`locallist-admin`) via `POST /auth/sync`
+  - **App HS256** (issued by this backend with `BCrypt.Net-Next` for passwords): used by the mobile app (`locallist-app`) via `POST /auth/signin|login|register|refresh`
+  - Multi-scheme is wired in `Program.cs` and dispatched by the JWT's `iss` claim
 - **AI**: Gemini 2.5 Flash via `Features/Builder/AiProviderService.cs`
-- **Rate Limiting**: 100 req/min global, Builder limited to 5/hr
+- **Rate Limiting**: 100 req/min global, Builder 5/hr, Auth 10/15min, Waitlist 5/60s, Admin 60/min
 - **Deploy**: Railway (Dockerfile)
 
 ## Getting Started
@@ -21,21 +24,38 @@ For detailed technical context, architecture decisions, and endpoint reference, 
 2. Install the EF Core CLI tools: `dotnet tool install --global dotnet-ef`
 
 ### Environment Setup
-Required User Secrets or Environment Variables:
-- `ConnectionStrings__DefaultConnection` — Neon PostgreSQL connection string
-- `Jwt__Secret` — JWT signing key
-- `Gemini__ApiKey` — Gemini Flash API key
+Required environment variables (live in Railway dashboard for production; for local dev use `dotnet user-secrets` or `appsettings.Development.json`):
 
-For local development, configure via `dotnet user-secrets` or `appsettings.Development.json`.
+| Variable | Used by | Purpose |
+|---|---|---|
+| `ConnectionStrings__DefaultConnection` | EF Core / Npgsql | PostgreSQL connection string |
+| `FIREBASE_PROJECT_ID` | `Program.cs` (Firebase scheme) | Validates Firebase RS256 tokens (admin) |
+| `JWT_SECRET` | `JwtTokenService` + `Program.cs` (App scheme) | Signs/validates app HS256 tokens (≥32 bytes) |
+| `APPLE_BUNDLE_ID` | `AppleIdTokenValidator` | Audience expected on Apple Sign-In ID tokens (`app.locallist.ios`) |
+| `GOOGLE_CLIENT_ID` | `GoogleIdTokenValidator` | Audience expected on Google Sign-In ID tokens |
+| `Gemini__ApiKey` | `AiProviderService` | Gemini 2.5 Flash API key |
+| `Klaviyo__ApiKey` | `KlaviyoService` | Klaviyo email-marketing API key (waitlist sync) |
 
 ### Running the API
-1. Open a terminal in this directory (`LocalList.API.NET`).
-2. Run `dotnet restore` to fetch NuGet packages.
-3. Run `dotnet run` (or press F5 in Visual Studio / VS Code).
-4. Swagger UI available at `https://localhost:<port>/swagger`.
+1. `dotnet restore`
+2. `dotnet run`
+3. Swagger UI at `https://localhost:<port>/swagger` (Development only).
+
+## Auth endpoints reference
+
+| Endpoint | Scheme | Notes |
+|---|---|---|
+| `POST /auth/sync` | Firebase RS256 (admin) | First-login user sync; called by `locallist-admin` after Firebase SDK login |
+| `POST /auth/signin` | (anonymous → emits App HS256) | Apple/Google ID-token sign-in/up. Body: `{provider:"apple"\|"google", idToken, name?}` |
+| `POST /auth/register` | (anonymous → emits App HS256) | Email + password registration. Body: `{email, password, name?}` (password ≥8 chars per NIST SP 800-63B) |
+| `POST /auth/login` | (anonymous → emits App HS256) | Email + password login. Body: `{email, password}` |
+| `POST /auth/refresh` | (anonymous → emits App HS256) | Rotates refresh tokens (single-use). Body: `{refreshToken}` |
+
+App-issued tokens carry the user's id (Guid) directly in `sub`. `User.GetUserIdAsync` (in `Shared/Auth/`) detects HS256 vs RS256 by parsing `sub` as a Guid (HS256) or falling back to `firebase_uid` lookup (RS256).
 
 ## Debugging Guide
 
 1. **"The database query is failing"**: Check `Shared/Data/LocalListDbContext.cs`. Ensure entity properties match PostgreSQL column names via `[Column("name")]` attributes.
-2. **"Login isn't working"**: Open `Features/Auth/AuthController.cs`, set a breakpoint on `[HttpPost("login")]`, and step through BCrypt validation.
-3. **"Token is always invalid"**: Check `Shared/Auth/JwtTokenService.cs`. Verify `Issuer` and `Audience` match what the frontend expects, and ensure `Jwt:Secret` is configured.
+2. **"App login returns 401"**: Set a breakpoint in `Features/Auth/AppAuthController.cs` (`Login`) and verify bcrypt hash + `JWT_SECRET` configured.
+3. **"Apple/Google signin returns 401"**: The fake validator returns null for unknown idTokens — check `Features/Auth/Services/AppleIdTokenValidator.cs` (or Google) and verify `APPLE_BUNDLE_ID`/`GOOGLE_CLIENT_ID` match the audience in the incoming idToken.
+4. **"Admin token rejected"**: Check `Program.cs` Firebase scheme — `FIREBASE_PROJECT_ID` must match the Firebase project that issued the token. The multi-scheme dispatch uses the `iss` claim.

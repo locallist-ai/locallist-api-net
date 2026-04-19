@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
@@ -13,6 +14,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Testcontainers.PostgreSql;
+using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Shared.Data;
 
 namespace LocalList.API.Tests;
@@ -20,12 +22,17 @@ namespace LocalList.API.Tests;
 public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 {
     private const string TestFirebaseProjectId = "test-firebase-project";
+    public const string TestJwtSecret = "test-jwt-secret-must-be-at-least-32-bytes-long-aaaaaaaaaaaa";
+    private const string TestAppleBundleId = "test.bundle.id";
+    private const string TestGoogleClientId = "test-google-client-id.apps.googleusercontent.com";
     private static readonly RSA _testRsa = RSA.Create(2048);
 
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17-alpine")
         .Build();
 
     public FakeTimeProvider FakeTime { get; } = new(DateTimeOffset.UtcNow);
+    public FakeAppleIdTokenValidator FakeApple { get; } = new();
+    public FakeGoogleIdTokenValidator FakeGoogle { get; } = new();
 
     private bool _dbCreated;
 
@@ -33,6 +40,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     {
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", "");
         Environment.SetEnvironmentVariable("FIREBASE_PROJECT_ID", TestFirebaseProjectId);
+        Environment.SetEnvironmentVariable("JWT_SECRET", TestJwtSecret);
+        Environment.SetEnvironmentVariable("APPLE_BUNDLE_ID", TestAppleBundleId);
+        Environment.SetEnvironmentVariable("GOOGLE_CLIENT_ID", TestGoogleClientId);
     }
 
     public async ValueTask InitializeAsync()
@@ -67,8 +77,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddSingleton<TimeProvider>(FakeTime);
 
-            // Override JWT Bearer to use test RSA key instead of Firebase JWKS
-            services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
+            // Override Firebase scheme to use test RSA key instead of real Firebase JWKS
+            services.PostConfigure<JwtBearerOptions>("Firebase", options =>
             {
                 options.Authority = null;
                 options.TokenValidationParameters = new TokenValidationParameters
@@ -82,6 +92,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     IssuerSigningKey = new RsaSecurityKey(_testRsa)
                 };
             });
+
+            // Replace Apple/Google ID-token validators with in-process fakes
+            // (real ones hit Apple/Google JWKS endpoints — not viable in tests).
+            var appleDescriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IAppleIdTokenValidator));
+            if (appleDescriptor is not null) services.Remove(appleDescriptor);
+            services.AddSingleton<IAppleIdTokenValidator>(FakeApple);
+
+            var googleDescriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IGoogleIdTokenValidator));
+            if (googleDescriptor is not null) services.Remove(googleDescriptor);
+            services.AddSingleton<IGoogleIdTokenValidator>(FakeGoogle);
 
             // Disable rate limiting in tests
             var rateLimiterDescriptors = services
@@ -188,4 +208,44 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         var scope = Services.CreateScope();
         return scope.ServiceProvider.GetRequiredService<LocalListDbContext>();
     }
+
+    /// <summary>
+    /// Creates an HS256 JWT signed with the test JWT_SECRET — mirrors what
+    /// <see cref="JwtTokenService"/> emits for the real app flow.
+    /// </summary>
+    public string CreateAppToken(Guid userId, string email, string tier = "free")
+    {
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TestJwtSecret));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var now = FakeTime.GetUtcNow().UtcDateTime;
+        var token = new JwtSecurityToken(
+            issuer: JwtTokenService.Issuer,
+            audience: null,
+            claims: new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
+                new Claim(JwtRegisteredClaimNames.Email, email),
+                new Claim("tier", tier)
+            },
+            notBefore: now,
+            expires: now.AddMinutes(15),
+            signingCredentials: credentials);
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+}
+
+public class FakeAppleIdTokenValidator : IAppleIdTokenValidator
+{
+    public Dictionary<string, OAuthClaims> Tokens { get; } = new();
+
+    public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
+        Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
+}
+
+public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
+{
+    public Dictionary<string, OAuthClaims> Tokens { get; } = new();
+
+    public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
+        Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
 }
