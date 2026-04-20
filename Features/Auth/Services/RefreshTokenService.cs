@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -21,18 +22,15 @@ public class RefreshTokenService : IRefreshTokenService
     private const int PrefixLength = 16;
 
     private readonly LocalListDbContext _db;
-    private readonly IPasswordHasher _hasher;
     private readonly IJwtTokenService _jwt;
     private readonly TimeProvider _clock;
 
     public RefreshTokenService(
         LocalListDbContext db,
-        IPasswordHasher hasher,
         IJwtTokenService jwt,
         TimeProvider clock)
     {
         _db = db;
-        _hasher = hasher;
         _jwt = jwt;
         _clock = clock;
     }
@@ -43,7 +41,7 @@ public class RefreshTokenService : IRefreshTokenService
         var entity = new RefreshToken
         {
             UserId = userId,
-            TokenHash = _hasher.Hash(plain),
+            TokenHash = HashToken(plain),
             TokenPrefix = plain[..PrefixLength],
             ExpiresAt = _clock.GetUtcNow().Add(RefreshLifetime),
             CreatedAt = _clock.GetUtcNow()
@@ -59,6 +57,8 @@ public class RefreshTokenService : IRefreshTokenService
             return null;
 
         var prefix = plainToken[..PrefixLength];
+        var incomingHash = HashToken(plainToken);
+
         var candidates = await _db.RefreshTokens
             .Include(rt => rt.User)
             .Where(rt => rt.TokenPrefix == prefix)
@@ -66,9 +66,9 @@ public class RefreshTokenService : IRefreshTokenService
 
         foreach (var candidate in candidates)
         {
-            if (!_hasher.Verify(plainToken, candidate.TokenHash)) continue;
+            if (!FixedTimeEquals(candidate.TokenHash, incomingHash)) continue;
 
-            // Always delete the candidate (whether expired or not — single-use)
+            // Single-use rotation: always remove the matched candidate
             _db.RefreshTokens.Remove(candidate);
 
             if (_clock.GetUtcNow() > candidate.ExpiresAt || candidate.User is null)
@@ -77,12 +77,11 @@ public class RefreshTokenService : IRefreshTokenService
                 return null;
             }
 
-            // Issue new pair atomically
             var newPlain = GenerateToken();
             _db.RefreshTokens.Add(new RefreshToken
             {
                 UserId = candidate.UserId,
-                TokenHash = _hasher.Hash(newPlain),
+                TokenHash = HashToken(newPlain),
                 TokenPrefix = newPlain[..PrefixLength],
                 ExpiresAt = _clock.GetUtcNow().Add(RefreshLifetime),
                 CreatedAt = _clock.GetUtcNow()
@@ -100,5 +99,24 @@ public class RefreshTokenService : IRefreshTokenService
         Span<byte> buffer = stackalloc byte[64];
         RandomNumberGenerator.Fill(buffer);
         return Convert.ToHexString(buffer).ToLowerInvariant();
+    }
+
+    // Refresh tokens use SHA-256, NOT bcrypt: bcrypt's 72-byte input limit
+    // would reject our 128-char hex tokens, and bcrypt's slowness is unwanted
+    // here (tokens are high-entropy random, no brute-force risk; only constant-
+    // time compare is needed).
+    private static string HashToken(string plainToken)
+    {
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(Encoding.UTF8.GetBytes(plainToken), hash);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static bool FixedTimeEquals(string storedHashHex, string incomingHashHex)
+    {
+        if (storedHashHex.Length != incomingHashHex.Length) return false;
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.ASCII.GetBytes(storedHashHex),
+            Encoding.ASCII.GetBytes(incomingHashHex));
     }
 }
