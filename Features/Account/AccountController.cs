@@ -23,12 +23,15 @@ public class AccountController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAccount(CancellationToken ct)
     {
-        var firebaseUid = User.GetFirebaseUid();
-        if (string.IsNullOrEmpty(firebaseUid))
+        var sub = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(sub))
             return Unauthorized(new { error = "Invalid token claims" });
 
-        var user = await _db.Users
-            .Where(u => u.FirebaseUid == firebaseUid)
+        var query = Guid.TryParse(sub, out var hsUserId)
+            ? _db.Users.Where(u => u.Id == hsUserId)
+            : _db.Users.Where(u => u.FirebaseUid == sub);
+
+        var user = await query
             .Select(u => new
             {
                 id = u.Id,
@@ -52,11 +55,14 @@ public class AccountController : ControllerBase
     [HttpDelete]
     public async Task<IActionResult> DeleteAccount(CancellationToken ct)
     {
-        var firebaseUid = User.GetFirebaseUid();
-        if (string.IsNullOrEmpty(firebaseUid))
+        var sub = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(sub))
             return Unauthorized(new { error = "Invalid token claims" });
 
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.FirebaseUid == firebaseUid, ct);
+        var user = Guid.TryParse(sub, out var hsUserId)
+            ? await _db.Users.FirstOrDefaultAsync(u => u.Id == hsUserId, ct)
+            : await _db.Users.FirstOrDefaultAsync(u => u.FirebaseUid == sub, ct);
+
         if (user == null)
             return NotFound(new { error = "User not found" });
 

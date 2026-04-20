@@ -13,18 +13,18 @@ public record AppAuthUser(Guid Id, string Email, string? Name, string? Image, st
 public record AppAuthResponse(string AccessToken, string RefreshToken, AppAuthUser User);
 
 public record SigninRequest(
-    [property: Required, RegularExpression("^(apple|google)$")] string Provider,
-    [property: Required, StringLength(8192, MinimumLength = 1)] string IdToken,
-    [property: StringLength(255)] string? Name);
+    [Required, RegularExpression("^(apple|google)$")] string Provider,
+    [Required, StringLength(8192, MinimumLength = 1)] string IdToken,
+    [StringLength(255)] string? Name);
 
 public record RegisterRequest(
-    [property: Required, EmailAddress, StringLength(254)] string Email,
-    [property: Required, StringLength(128, MinimumLength = 8)] string Password,
-    [property: StringLength(255, MinimumLength = 1)] string? Name);
+    [Required, EmailAddress, StringLength(254)] string Email,
+    [Required, StringLength(128, MinimumLength = 8)] string Password,
+    [StringLength(255, MinimumLength = 1)] string? Name);
 
 public record LoginRequest(
-    [property: Required, EmailAddress, StringLength(254)] string Email,
-    [property: Required, StringLength(128, MinimumLength = 1)] string Password);
+    [Required, EmailAddress, StringLength(254)] string Email,
+    [Required, StringLength(128, MinimumLength = 1)] string Password);
 
 public record RefreshRequest(
-    [property: Required, StringLength(256, MinimumLength = 16)] string RefreshToken);
+    [Required, StringLength(256, MinimumLength = 16)] string RefreshToken);
