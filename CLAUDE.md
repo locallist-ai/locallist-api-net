@@ -9,7 +9,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
-| **Auth** | Firebase Auth (RS256 JWKS) — Apple Sign In + Google + email/password. Single `/auth/sync` endpoint. |
+| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:123-131`. |
 | **AI** | Gemini 2.5 Flash via `Features/Builder/AiProviderService.cs`. |
 | **Rate Limit** | 100 req/min global. Builder 5/hr. Waitlist 5/60s. |
 
@@ -22,7 +22,7 @@ dotnet run
 ```
 
 Required User Secrets / Environment Variables:
-`ConnectionStrings__DefaultConnection`, `FIREBASE_PROJECT_ID`, `Gemini__ApiKey`
+`ConnectionStrings__DefaultConnection`, `FIREBASE_PROJECT_ID`, `Gemini__ApiKey`, `Jwt__Secret` (HS256 signing key para tokens de la app)
 
 ## Project Structure (VSA)
 
@@ -33,8 +33,16 @@ LocalList.API.NET/
 │   ├── Account/
 │   │   └── AccountController.cs        # GET /account, DELETE /account
 │   ├── Auth/
-│   │   ├── AuthController.cs           # POST /auth/sync (Firebase token → user sync)
-│   │   └── AuthDtos.cs                 # SyncUserDto, SyncResponse
+│   │   ├── AuthController.cs           # POST /auth/sync (Firebase token → user sync, admin)
+│   │   ├── AppAuthController.cs        # POST /auth/signin|register|login|refresh (app HS256)
+│   │   ├── AuthDtos.cs                 # Sync/Signin/Register/Login/Refresh DTOs
+│   │   └── Services/
+│   │       ├── JwtTokenService.cs          # HS256 access token issuer
+│   │       ├── RefreshTokenService.cs      # SHA-256 refresh rotation (30d lifetime)
+│   │       ├── PasswordHasher.cs           # bcrypt para email/password
+│   │       ├── GoogleIdTokenValidator.cs   # Valida ID token Google vs JWKS
+│   │       ├── AppleIdTokenValidator.cs    # Valida ID token Apple vs JWKS
+│   │       └── JwksRetriever.cs            # Caché JWKS para Apple
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
 │   │   ├── BuilderDtos.cs             # BuilderChatRequest, ExtractedPreferences, TripContextDto
@@ -57,7 +65,8 @@ LocalList.API.NET/
     └── Data/
         ├── LocalListDbContext.cs        # EF Core DbContext, entity configs, indices
         └── Entities/                    # EF Core entities
-            ├── User.cs                  # Includes firebase_uid column
+            ├── User.cs                  # firebase_uid (legado), google_user_id, apple_user_id, password_hash
+            ├── RefreshToken.cs          # Tokens de refresh rotados (SHA-256 hash)
             ├── Plan.cs
             ├── PlanStop.cs
             ├── Place.cs
@@ -70,9 +79,16 @@ LocalList.API.NET/
 | Feature | Endpoints |
 |---|---|
 | Account | `GET /account`, `DELETE /account` |
-| Auth | `POST /auth/sync` (Firebase token required) |
+| Auth (admin / Firebase) | `POST /auth/sync` (Firebase token required) |
+| Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
 | Places | `GET /places/`, `GET /places/:id` |
 | Plans | `GET /plans/`, `GET /plans/:id` |
 | Builder | `POST /builder/chat` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
+
+## Auth — notas migratorias
+
+- Usuarios con `firebase_uid` poblado son legado del periodo en que la app usó Firebase (PR #15). PR #29 portó los 4 endpoints HS256 desde `locallist-api-DEPRECATED`; la app ya no usa Firebase.
+- `AppAuthController.Signin` (L67-71) busca al usuario por `{apple,google}_user_id` **OR por email** → un usuario legado con solo `firebase_uid` se enlaza al volver a iniciar sesión (se le pobla `google_user_id`/`apple_user_id`). `User.Id` (Guid) persiste, así que sus `Plan`/`PlanStop`/`FollowSession` siguen conectados.
+- `firebase_uid` ya no se usa en el flujo nuevo (dead data en filas antiguas). No quitar la columna — sirve como trace de origen.
