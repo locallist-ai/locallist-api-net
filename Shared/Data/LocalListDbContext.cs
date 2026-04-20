@@ -13,6 +13,7 @@ public class LocalListDbContext : DbContext
     public DbSet<PlanStop> PlanStops { get; set; } = null!;
     public DbSet<FollowSession> FollowSessions { get; set; } = null!;
     public DbSet<WaitlistEntry> WaitlistEntries { get; set; } = null!;
+    public DbSet<RefreshToken> RefreshTokens { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -87,5 +88,13 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<FollowSession>().HasIndex(fs => new { fs.UserId, fs.Status });
 
         modelBuilder.Entity<WaitlistEntry>().HasIndex(w => w.Email).IsUnique();
+
+        modelBuilder.Entity<RefreshToken>()
+            .HasOne(rt => rt.User)
+            .WithMany()
+            .HasForeignKey(rt => rt.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<RefreshToken>().HasIndex(rt => rt.TokenPrefix);
+        modelBuilder.Entity<RefreshToken>().HasIndex(rt => rt.UserId);
     }
 }
