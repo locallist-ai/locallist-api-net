@@ -157,7 +157,7 @@ builder.Services.AddCors(options =>
 
         corsBuilder.WithOrigins(allowedOrigins)
             .WithMethods("GET", "POST", "PATCH", "DELETE", "OPTIONS")
-            .WithHeaders("Content-Type", "Authorization", "X-Admin-Key")
+            .WithHeaders("Content-Type", "Authorization")
             .AllowCredentials();
     });
 });
