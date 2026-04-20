@@ -15,6 +15,7 @@ using Microsoft.Extensions.Time.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Testcontainers.PostgreSql;
 using LocalList.API.NET.Features.Auth.Services;
+using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Shared.Data;
 
 namespace LocalList.API.Tests;
@@ -34,6 +35,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     public FakeAppleIdTokenValidator FakeApple { get; } = new();
     public FakeGoogleIdTokenValidator FakeGoogle { get; } = new();
 
+    /// <summary>
+    /// Handler compartido que intercepta las llamadas salientes de <see cref="AiProviderService"/>.
+    /// Los tests pueden sustituir <see cref="FakeGeminiHandler.Responder"/> para definir la respuesta
+    /// (OK con JSON válido, 502, texto malformado, etc.) sin levantar un servidor HTTP real.
+    /// </summary>
+    public FakeGeminiHandler FakeGemini { get; } = new();
+
     private bool _dbCreated;
 
     static ApiFixture()
@@ -43,6 +51,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("JWT_SECRET", TestJwtSecret);
         Environment.SetEnvironmentVariable("APPLE_BUNDLE_ID", TestAppleBundleId);
         Environment.SetEnvironmentVariable("GOOGLE_CLIENT_ID", TestGoogleClientId);
+        // Gemini key inyectada como variable de entorno para que AiProviderService no tire
+        // por "API Key missing" y siga el flujo HTTP (que atrapa nuestro FakeGeminiHandler).
+        Environment.SetEnvironmentVariable("Gemini__ApiKey", "test-gemini-key");
     }
 
     public async ValueTask InitializeAsync()
@@ -77,10 +88,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddSingleton<TimeProvider>(FakeTime);
 
-            // Override Firebase scheme to use test RSA key instead of real Firebase JWKS
+            // Override Firebase scheme to use test RSA key instead of real Firebase JWKS.
+            // Usamos IssuerSigningKeyResolver (en vez de IssuerSigningKey fijo) para
+            // evitar que algún IPostConfigureOptions posterior lo machaque durante la
+            // construcción del pipeline — visto en ejecuciones paralelas de múltiples
+            // WebApplicationFactory simultáneas. El resolver se evalúa por cada
+            // request y SIEMPRE devuelve nuestra RSA key.
             services.PostConfigure<JwtBearerOptions>("Firebase", options =>
             {
                 options.Authority = null;
+                options.ConfigurationManager = null;
                 options.TokenValidationParameters = new TokenValidationParameters
                 {
                     ValidateIssuer = true,
@@ -89,7 +106,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     ValidAudience = TestFirebaseProjectId,
                     ValidateLifetime = true,
                     ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new RsaSecurityKey(_testRsa)
+                    IssuerSigningKey = new RsaSecurityKey(_testRsa),
+                    IssuerSigningKeyResolver = (_, _, _, _) => new[] { new RsaSecurityKey(_testRsa) }
                 };
             });
 
@@ -102,6 +120,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             var googleDescriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IGoogleIdTokenValidator));
             if (googleDescriptor is not null) services.Remove(googleDescriptor);
             services.AddSingleton<IGoogleIdTokenValidator>(FakeGoogle);
+
+            // Sustituir el HttpMessageHandler primario del HttpClient inyectado en
+            // AiProviderService por nuestro fake. Los tests del Builder configuran
+            // FakeGemini.Responder en cada escenario.
+            services.AddHttpClient<AiProviderService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
 
             // Disable rate limiting in tests
             var rateLimiterDescriptors = services
@@ -248,4 +272,35 @@ public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
 
     public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
         Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
+}
+
+/// <summary>
+/// Handler HTTP fake que intercepta las llamadas a Gemini desde
+/// <c>AiProviderService</c>. Los tests ajustan <see cref="Responder"/> para
+/// devolver distintos cuerpos/estados (200 OK, 502, JSON malformado…).
+/// Si <see cref="Responder"/> es null, devuelve 200 con una respuesta Gemini vacía.
+/// </summary>
+public class FakeGeminiHandler : HttpMessageHandler
+{
+    public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
+
+    public List<HttpRequestMessage> Calls { get; } = new();
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Calls.Add(request);
+        var responder = Responder;
+        if (responder is null)
+        {
+            // Respuesta por defecto: 200 con un candidate vacío, fuerza fallback a keywords
+            // sólo si el test no ha configurado nada. Así los tests que no tocan Gemini
+            // no ven 500 del HttpClient.
+            var fallback = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{}\"}]}}]}", System.Text.Encoding.UTF8, "application/json")
+            };
+            return Task.FromResult(fallback);
+        }
+        return Task.FromResult(responder(request));
+    }
 }

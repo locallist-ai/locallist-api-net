@@ -21,4 +21,15 @@
     <ProjectReference Include="..\LocalList.API.NET.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      Deshabilita paralelización entre clases de test. Cada clase usa su propia
+      ApiFixture (que levanta un WebApplicationFactory + Testcontainer Postgres),
+      y en paralelo las configuraciones de JWT Bearer entran en una race visible
+      como 401 "signature key was not found". Forzar ejecución secuencial es
+      más barato que reescribir toda la fixture para ser multi-root.
+    -->
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
