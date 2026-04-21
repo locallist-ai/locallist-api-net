@@ -122,12 +122,13 @@ public class EmbeddingService
     }
 
     public static string BuildPlaceIndexText(
-        string name, string? category, string? neighborhood,
+        string name, string? category, string? neighborhood, string? city,
         string? whyThisPlace, IEnumerable<string>? bestFor, IEnumerable<string>? suitableFor)
     {
         var parts = new List<string> { name };
-        if (!string.IsNullOrWhiteSpace(category)) parts.Add(category);
+        if (!string.IsNullOrWhiteSpace(city)) parts.Add(city);
         if (!string.IsNullOrWhiteSpace(neighborhood)) parts.Add(neighborhood);
+        if (!string.IsNullOrWhiteSpace(category)) parts.Add(category);
         if (!string.IsNullOrWhiteSpace(whyThisPlace)) parts.Add(whyThisPlace);
         if (bestFor != null) parts.Add(string.Join(" ", bestFor));
         if (suitableFor != null) parts.Add(string.Join(" ", suitableFor));

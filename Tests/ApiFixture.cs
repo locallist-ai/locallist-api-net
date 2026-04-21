@@ -71,6 +71,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     public async ValueTask InitializeAsync()
     {
         await _postgres.StartAsync();
+
+        // Pre-create the `vector` extension BEFORE any NpgsqlDataSource is built.
+        // Npgsql populates its pg_type cache on the first connection of each DataSource;
+        // if the extension is created later (inside an EF migration), the cache stays
+        // stale and writes of Pgvector.Vector parameters fail with
+        // "Cannot resolve 'vector' to a fully qualified datatype name."
+        await using var conn = new NpgsqlConnection(_postgres.GetConnectionString());
+        await conn.OpenAsync();
+        await using var cmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector;", conn);
+        await cmd.ExecuteNonQueryAsync();
     }
 
     public new async ValueTask DisposeAsync()

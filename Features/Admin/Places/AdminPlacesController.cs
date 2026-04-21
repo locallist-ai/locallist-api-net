@@ -371,61 +371,58 @@ public class AdminPlacesController : ControllerBase
     [HttpPost("reindex-embeddings")]
     public async Task<IActionResult> ReindexEmbeddings(
         [FromQuery] bool onlyMissing = false,
+        [FromQuery] int limit = 1000,
         CancellationToken ct = default)
     {
+        limit = Math.Clamp(limit, 1, 5000);
+
         var query = _db.Places.AsQueryable();
         if (onlyMissing) query = query.Where(p => p.Embedding == null);
 
-        var places = await query
-            .Select(p => new
-            {
-                p.Id,
-                p.Name,
-                p.Category,
-                p.Neighborhood,
-                p.WhyThisPlace,
-                p.BestFor,
-                p.SuitableFor
-            })
+        var ids = await query
+            .OrderBy(p => p.CreatedAt)
+            .Take(limit)
+            .Select(p => p.Id)
             .ToListAsync(ct);
 
-        if (places.Count == 0)
+        if (ids.Count == 0)
         {
             return Ok(new { reindexed = 0, failed = 0, total = 0 });
         }
 
-        var texts = places
+        // Single tracked query — avoids N+1 y race conditions entre proyección y reload.
+        var tracked = await _db.Places
+            .Where(p => ids.Contains(p.Id))
+            .ToListAsync(ct);
+
+        var texts = tracked
             .Select(p => EmbeddingService.BuildPlaceIndexText(
-                p.Name, p.Category, p.Neighborhood, p.WhyThisPlace, p.BestFor, p.SuitableFor))
+                p.Name, p.Category, p.Neighborhood, p.City, p.WhyThisPlace, p.BestFor, p.SuitableFor))
             .ToList();
 
         var vectors = await _embeddings.EmbedBatchAsync(texts, ct);
 
-        if (vectors.Count != places.Count)
+        if (vectors.Count != tracked.Count)
         {
             _logger.LogError(
                 "Embedding batch size mismatch — expected {Expected} got {Got}",
-                places.Count, vectors.Count);
+                tracked.Count, vectors.Count);
             return StatusCode(502, new { error = "embedding_provider_failure" });
         }
 
-        var reindexed = 0;
-        for (var i = 0; i < places.Count; i++)
+        var now = _clock.GetUtcNow();
+        for (var i = 0; i < tracked.Count; i++)
         {
-            var placeId = places[i].Id;
-            var tracked = await _db.Places.FirstOrDefaultAsync(p => p.Id == placeId, ct);
-            if (tracked == null) continue;
-            tracked.Embedding = vectors[i];
-            tracked.UpdatedAt = _clock.GetUtcNow();
-            reindexed++;
+            tracked[i].Embedding = vectors[i];
+            tracked[i].UpdatedAt = now;
         }
 
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "Reindexed embeddings: {Reindexed}/{Total} (onlyMissing={OnlyMissing})",
-            reindexed, places.Count, onlyMissing);
+            "Reindexed embeddings: {Reindexed}/{Total} (onlyMissing={OnlyMissing}, limit={Limit})",
+            tracked.Count, tracked.Count, onlyMissing, limit);
 
-        return Ok(new { reindexed, failed = places.Count - reindexed, total = places.Count });
+        return Ok(new { reindexed = tracked.Count, failed = 0, total = tracked.Count });
     }
 }

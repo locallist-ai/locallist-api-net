@@ -45,6 +45,24 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
 // Integration tests leave this empty and inject Postgres (Testcontainers) via ConfigureTestServices.
 if (!string.IsNullOrEmpty(connectionUrl))
 {
+    // Bootstrap pgvector BEFORE building the pooled DataSource.
+    // Npgsql caches pg_type on the first connection of each DataSource; if
+    // `CREATE EXTENSION vector` runs later (inside an EF migration), the cache
+    // stays stale and writes of Pgvector.Vector parameters fail with
+    // "Cannot resolve 'vector' to a fully qualified datatype name."
+    // Idempotent — extension already exists in prod; this covers fresh DBs.
+    try
+    {
+        using var bootstrapConn = new NpgsqlConnection(connectionUrl);
+        bootstrapConn.Open();
+        using var bootstrapCmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector;", bootstrapConn);
+        bootstrapCmd.ExecuteNonQuery();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[startup] pgvector bootstrap failed ({ex.GetType().Name}): {ex.Message}. Assuming extension is present and continuing.");
+    }
+
     var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionUrl);
     dataSourceBuilder.UseVector();
     var dataSource = dataSourceBuilder.Build();
