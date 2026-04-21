@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
@@ -10,12 +11,15 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
+using Pgvector.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Testcontainers.PostgreSql;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Data;
 
 namespace LocalList.API.Tests;
@@ -28,7 +32,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     private const string TestGoogleClientId = "test-google-client-id.apps.googleusercontent.com";
     private static readonly RSA _testRsa = RSA.Create(2048);
 
-    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17-alpine")
+    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
         .Build();
 
     public FakeTimeProvider FakeTime { get; } = new(DateTimeOffset.UtcNow);
@@ -41,6 +45,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// (OK con JSON válido, 502, texto malformado, etc.) sin levantar un servidor HTTP real.
     /// </summary>
     public FakeGeminiHandler FakeGemini { get; } = new();
+
+    /// <summary>
+    /// Handler que intercepta llamadas de <see cref="EmbeddingService"/>
+    /// a <c>:batchEmbedContents</c>. Por defecto devuelve embeddings
+    /// deterministas (hash-based) de 768 dims, lo que permite a los tests
+    /// verificar flujo end-to-end sin tocar la API real de Gemini.
+    /// </summary>
+    public FakeEmbeddingHandler FakeEmbeddings { get; } = new();
 
     private bool _dbCreated;
 
@@ -59,6 +71,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     public async ValueTask InitializeAsync()
     {
         await _postgres.StartAsync();
+
+        // Pre-create the `vector` extension BEFORE any NpgsqlDataSource is built.
+        // Npgsql populates its pg_type cache on the first connection of each DataSource;
+        // if the extension is created later (inside an EF migration), the cache stays
+        // stale and writes of Pgvector.Vector parameters fail with
+        // "Cannot resolve 'vector' to a fully qualified datatype name."
+        await using var conn = new NpgsqlConnection(_postgres.GetConnectionString());
+        await conn.OpenAsync();
+        await using var cmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector;", conn);
+        await cmd.ExecuteNonQueryAsync();
     }
 
     public new async ValueTask DisposeAsync()
@@ -78,8 +100,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 d => d.ServiceType == typeof(DbContextOptions<LocalListDbContext>));
             if (descriptor is not null) services.Remove(descriptor);
 
+            var dataSourceBuilder = new NpgsqlDataSourceBuilder(_postgres.GetConnectionString());
+            dataSourceBuilder.UseVector();
+            var dataSource = dataSourceBuilder.Build();
+
             services.AddDbContext<LocalListDbContext>(options =>
-                options.UseNpgsql(_postgres.GetConnectionString()));
+                options.UseNpgsql(dataSource, npg => npg.UseVector()));
 
             // Replace TimeProvider.System with FakeTimeProvider
             var timeDescriptor = services.SingleOrDefault(
@@ -126,6 +152,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             // FakeGemini.Responder en cada escenario.
             services.AddHttpClient<AiProviderService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
+
+            services.AddHttpClient<EmbeddingService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeEmbeddings);
 
             // Disable rate limiting in tests
             var rateLimiterDescriptors = services
@@ -272,6 +301,46 @@ public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
 
     public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
         Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
+}
+
+/// <summary>
+/// Handler HTTP fake para <c>EmbeddingService</c>. Por defecto responde a
+/// <c>:batchEmbedContents</c> con embeddings deterministas de 768 dims
+/// derivados del hash del texto, suficiente para assertions de flujo.
+/// Los tests pueden sobreescribir <see cref="Responder"/> para forzar
+/// errores o formatos específicos.
+/// </summary>
+public class FakeEmbeddingHandler : HttpMessageHandler
+{
+    public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
+    public List<HttpRequestMessage> Calls { get; } = new();
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Calls.Add(request);
+        if (Responder is not null) return Responder(request);
+
+        var body = await (request.Content?.ReadAsStringAsync(cancellationToken) ?? Task.FromResult("{}"));
+        using var doc = JsonDocument.Parse(body);
+        var count = doc.RootElement.TryGetProperty("requests", out var reqs) ? reqs.GetArrayLength() : 0;
+
+        var embeddings = new List<object>(count);
+        foreach (var req in reqs.EnumerateArray())
+        {
+            var text = req.GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString() ?? "";
+            var seed = text.Aggregate(0, (acc, c) => unchecked(acc * 31 + c));
+            var rng = new Random(seed);
+            var values = new float[EmbeddingService.Dimensions];
+            for (var i = 0; i < values.Length; i++) values[i] = (float)(rng.NextDouble() * 2 - 1);
+            embeddings.Add(new { values });
+        }
+
+        var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new { embeddings }), Encoding.UTF8, "application/json")
+        };
+        return response;
+    }
 }
 
 /// <summary>

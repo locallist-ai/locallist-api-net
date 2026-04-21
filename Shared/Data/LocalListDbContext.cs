@@ -19,6 +19,8 @@ public class LocalListDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
 
+        modelBuilder.HasPostgresExtension("vector");
+
         // Constraints and Cascade deletes matching the PostgreSQL drizzle schema
 
         modelBuilder.Entity<PlanStop>()
@@ -79,6 +81,9 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<Place>().Property(p => p.SuitableFor).HasColumnType("text[]");
         modelBuilder.Entity<Place>().Property(p => p.Photos).HasColumnType("text[]");
         modelBuilder.Entity<Place>().Property(p => p.Flags).HasColumnType("text[]");
+
+        // pgvector — 768-dim embeddings (Gemini text-embedding-004)
+        modelBuilder.Entity<Place>().Property(p => p.Embedding).HasColumnType("vector(768)");
 
         modelBuilder.Entity<Plan>().HasIndex(p => p.CreatedById);
         modelBuilder.Entity<Plan>().HasIndex(p => new { p.City, p.IsPublic });

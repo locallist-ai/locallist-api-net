@@ -4,8 +4,11 @@ using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Waitlist;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using Pgvector.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.IdentityModel.Tokens;
@@ -39,16 +42,39 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
 }
 
 // Only register Npgsql when a real connection string is available.
-// Integration tests leave this empty and inject SQLite via ConfigureTestServices.
+// Integration tests leave this empty and inject Postgres (Testcontainers) via ConfigureTestServices.
 if (!string.IsNullOrEmpty(connectionUrl))
 {
+    // Bootstrap pgvector BEFORE building the pooled DataSource.
+    // Npgsql caches pg_type on the first connection of each DataSource; if
+    // `CREATE EXTENSION vector` runs later (inside an EF migration), the cache
+    // stays stale and writes of Pgvector.Vector parameters fail with
+    // "Cannot resolve 'vector' to a fully qualified datatype name."
+    // Idempotent — extension already exists in prod; this covers fresh DBs.
+    try
+    {
+        using var bootstrapConn = new NpgsqlConnection(connectionUrl);
+        bootstrapConn.Open();
+        using var bootstrapCmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector;", bootstrapConn);
+        bootstrapCmd.ExecuteNonQuery();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[startup] pgvector bootstrap failed ({ex.GetType().Name}): {ex.Message}. Assuming extension is present and continuing.");
+    }
+
+    var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionUrl);
+    dataSourceBuilder.UseVector();
+    var dataSource = dataSourceBuilder.Build();
+
     builder.Services.AddDbContext<LocalListDbContext>(options =>
-        options.UseNpgsql(connectionUrl));
+        options.UseNpgsql(dataSource, npg => npg.UseVector()));
 }
 
 // Add DI Services
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<AiProviderService>();
+builder.Services.AddHttpClient<EmbeddingService>();
 builder.Services.AddHttpClient<KlaviyoService>();
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 

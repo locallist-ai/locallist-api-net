@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Pgvector;
 
 namespace LocalList.API.NET.Shared.Data.Entities;
 
@@ -93,6 +95,12 @@ public class Place
 
     [Column("ai_vibe_score")]
     public int? AiVibeScore { get; set; }
+
+    // Internal only — never returned by public/admin endpoints (DTOs excluyen el campo).
+    // Defense-in-depth: JsonIgnore previene leaks accidentales si algún controller serializa Place directo.
+    [Column("embedding")]
+    [JsonIgnore]
+    public Vector? Embedding { get; set; }
 
     [Column("flags", TypeName = "text[]")]
     public List<string>? Flags { get; set; }

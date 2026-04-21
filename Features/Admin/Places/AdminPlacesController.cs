@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Builder.Services;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -16,6 +17,7 @@ public class AdminPlacesController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<AdminPlacesController> _logger;
     private readonly TimeProvider _clock;
+    private readonly EmbeddingService _embeddings;
 
     private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -27,11 +29,16 @@ public class AdminPlacesController : ControllerBase
         "draft", "in_review", "published", "rejected"
     };
 
-    public AdminPlacesController(LocalListDbContext db, ILogger<AdminPlacesController> logger, TimeProvider clock)
+    public AdminPlacesController(
+        LocalListDbContext db,
+        ILogger<AdminPlacesController> logger,
+        TimeProvider clock,
+        EmbeddingService embeddings)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
+        _embeddings = embeddings;
     }
 
     [HttpGet("cities")]
@@ -359,5 +366,63 @@ public class AdminPlacesController : ControllerBase
     private async Task<Guid?> GetUserIdAsync(CancellationToken ct = default)
     {
         return await User.GetUserIdAsync(_db, ct);
+    }
+
+    [HttpPost("reindex-embeddings")]
+    public async Task<IActionResult> ReindexEmbeddings(
+        [FromQuery] bool onlyMissing = false,
+        [FromQuery] int limit = 1000,
+        CancellationToken ct = default)
+    {
+        limit = Math.Clamp(limit, 1, 5000);
+
+        var query = _db.Places.AsQueryable();
+        if (onlyMissing) query = query.Where(p => p.Embedding == null);
+
+        var ids = await query
+            .OrderBy(p => p.CreatedAt)
+            .Take(limit)
+            .Select(p => p.Id)
+            .ToListAsync(ct);
+
+        if (ids.Count == 0)
+        {
+            return Ok(new { reindexed = 0, failed = 0, total = 0 });
+        }
+
+        // Single tracked query — avoids N+1 y race conditions entre proyección y reload.
+        var tracked = await _db.Places
+            .Where(p => ids.Contains(p.Id))
+            .ToListAsync(ct);
+
+        var texts = tracked
+            .Select(p => EmbeddingService.BuildPlaceIndexText(
+                p.Name, p.Category, p.Neighborhood, p.City, p.WhyThisPlace, p.BestFor, p.SuitableFor))
+            .ToList();
+
+        var vectors = await _embeddings.EmbedBatchAsync(texts, ct);
+
+        if (vectors.Count != tracked.Count)
+        {
+            _logger.LogError(
+                "Embedding batch size mismatch — expected {Expected} got {Got}",
+                tracked.Count, vectors.Count);
+            return StatusCode(502, new { error = "embedding_provider_failure" });
+        }
+
+        var now = _clock.GetUtcNow();
+        for (var i = 0; i < tracked.Count; i++)
+        {
+            tracked[i].Embedding = vectors[i];
+            tracked[i].UpdatedAt = now;
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Reindexed embeddings: {Reindexed}/{Total} (onlyMissing={OnlyMissing}, limit={Limit})",
+            tracked.Count, tracked.Count, onlyMissing, limit);
+
+        return Ok(new { reindexed = tracked.Count, failed = 0, total = tracked.Count });
     }
 }
