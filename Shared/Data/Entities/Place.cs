@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json;
+using Pgvector;
 
 namespace LocalList.API.NET.Shared.Data.Entities;
 
@@ -93,6 +94,9 @@ public class Place
 
     [Column("ai_vibe_score")]
     public int? AiVibeScore { get; set; }
+
+    [Column("embedding")]
+    public Vector? Embedding { get; set; }
 
     [Column("flags", TypeName = "text[]")]
     public List<string>? Flags { get; set; }

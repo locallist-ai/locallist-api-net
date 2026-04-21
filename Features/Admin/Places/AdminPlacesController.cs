@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Builder.Services;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -16,6 +17,7 @@ public class AdminPlacesController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<AdminPlacesController> _logger;
     private readonly TimeProvider _clock;
+    private readonly EmbeddingService _embeddings;
 
     private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -27,11 +29,16 @@ public class AdminPlacesController : ControllerBase
         "draft", "in_review", "published", "rejected"
     };
 
-    public AdminPlacesController(LocalListDbContext db, ILogger<AdminPlacesController> logger, TimeProvider clock)
+    public AdminPlacesController(
+        LocalListDbContext db,
+        ILogger<AdminPlacesController> logger,
+        TimeProvider clock,
+        EmbeddingService embeddings)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
+        _embeddings = embeddings;
     }
 
     [HttpGet("cities")]
@@ -359,5 +366,66 @@ public class AdminPlacesController : ControllerBase
     private async Task<Guid?> GetUserIdAsync(CancellationToken ct = default)
     {
         return await User.GetUserIdAsync(_db, ct);
+    }
+
+    [HttpPost("reindex-embeddings")]
+    public async Task<IActionResult> ReindexEmbeddings(
+        [FromQuery] bool onlyMissing = false,
+        CancellationToken ct = default)
+    {
+        var query = _db.Places.AsQueryable();
+        if (onlyMissing) query = query.Where(p => p.Embedding == null);
+
+        var places = await query
+            .Select(p => new
+            {
+                p.Id,
+                p.Name,
+                p.Category,
+                p.Neighborhood,
+                p.WhyThisPlace,
+                p.BestFor,
+                p.SuitableFor
+            })
+            .ToListAsync(ct);
+
+        if (places.Count == 0)
+        {
+            return Ok(new { reindexed = 0, failed = 0, total = 0 });
+        }
+
+        var texts = places
+            .Select(p => EmbeddingService.BuildPlaceIndexText(
+                p.Name, p.Category, p.Neighborhood, p.WhyThisPlace, p.BestFor, p.SuitableFor))
+            .ToList();
+
+        var vectors = await _embeddings.EmbedBatchAsync(texts, ct);
+
+        if (vectors.Count != places.Count)
+        {
+            _logger.LogError(
+                "Embedding batch size mismatch — expected {Expected} got {Got}",
+                places.Count, vectors.Count);
+            return StatusCode(502, new { error = "embedding_provider_failure" });
+        }
+
+        var reindexed = 0;
+        for (var i = 0; i < places.Count; i++)
+        {
+            var placeId = places[i].Id;
+            var tracked = await _db.Places.FirstOrDefaultAsync(p => p.Id == placeId, ct);
+            if (tracked == null) continue;
+            tracked.Embedding = vectors[i];
+            tracked.UpdatedAt = _clock.GetUtcNow();
+            reindexed++;
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Reindexed embeddings: {Reindexed}/{Total} (onlyMissing={OnlyMissing})",
+            reindexed, places.Count, onlyMissing);
+
+        return Ok(new { reindexed, failed = places.Count - reindexed, total = places.Count });
     }
 }

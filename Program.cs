@@ -4,8 +4,10 @@ using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Waitlist;
 using Microsoft.EntityFrameworkCore;
+using Pgvector.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.IdentityModel.Tokens;
@@ -39,16 +41,17 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
 }
 
 // Only register Npgsql when a real connection string is available.
-// Integration tests leave this empty and inject SQLite via ConfigureTestServices.
+// Integration tests leave this empty and inject Postgres (Testcontainers) via ConfigureTestServices.
 if (!string.IsNullOrEmpty(connectionUrl))
 {
     builder.Services.AddDbContext<LocalListDbContext>(options =>
-        options.UseNpgsql(connectionUrl));
+        options.UseNpgsql(connectionUrl, npg => npg.UseVector()));
 }
 
 // Add DI Services
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<AiProviderService>();
+builder.Services.AddHttpClient<EmbeddingService>();
 builder.Services.AddHttpClient<KlaviyoService>();
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 

@@ -84,6 +84,80 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ReindexEmbeddings_PopulatesVectorColumn()
+    {
+        var db = fixture.GetDbContext();
+        var seededId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = seededId,
+            Name = $"Reindex Target {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            Neighborhood = "Wynwood",
+            WhyThisPlace = "italian bakery with tiki cocktails",
+            BestFor = new List<string> { "romantic", "date-night" },
+            SuitableFor = new List<string> { "couple" },
+            Status = "published",
+            GooglePlaceId = $"gpid-reindex-{Guid.NewGuid():N}",
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.PostAsync("/admin/places/reindex-embeddings", content: null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("reindexed").GetInt32() >= 1);
+        Assert.Equal(0, body.GetProperty("failed").GetInt32());
+
+        // Verify the seeded place got a non-null embedding of the right shape
+        var freshDb = fixture.GetDbContext();
+        var reindexed = await freshDb.Places.FirstAsync(p => p.Id == seededId);
+        Assert.NotNull(reindexed.Embedding);
+        Assert.Equal(768, reindexed.Embedding!.ToArray().Length);
+    }
+
+    [Fact]
+    public async Task ReindexEmbeddings_OnlyMissing_SkipsAlreadyIndexed()
+    {
+        var db = fixture.GetDbContext();
+        var untouchedId = Guid.NewGuid();
+        var existingVector = new Pgvector.Vector(new float[768]);
+        db.Places.Add(new Place
+        {
+            Id = untouchedId,
+            Name = $"Already Indexed {Guid.NewGuid():N}",
+            Category = "Coffee",
+            City = "Miami",
+            WhyThisPlace = "already has embedding",
+            Status = "published",
+            GooglePlaceId = $"gpid-onlymissing-{Guid.NewGuid():N}",
+            Embedding = existingVector,
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.PostAsync("/admin/places/reindex-embeddings?onlyMissing=true", content: null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // El place existente no debe haber sido reindexado (vector sin cambios — todo ceros)
+        var freshDb = fixture.GetDbContext();
+        var untouched = await freshDb.Places.FirstAsync(p => p.Id == untouchedId);
+        var arr = untouched.Embedding!.ToArray();
+        Assert.Equal(768, arr.Length);
+        Assert.All(arr, v => Assert.Equal(0f, v));
+    }
+
+    [Fact]
+    public async Task ReindexEmbeddings_WithoutAuth_Returns401()
+    {
+        var client = fixture.CreateClient();
+        var response = await client.PostAsync("/admin/places/reindex-embeddings", content: null);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private HttpClient CreateAdminClient()
