@@ -7,6 +7,7 @@ using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Waitlist;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Pgvector.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -44,8 +45,12 @@ if (!string.IsNullOrEmpty(connectionUrl) && connectionUrl.StartsWith("postgres")
 // Integration tests leave this empty and inject Postgres (Testcontainers) via ConfigureTestServices.
 if (!string.IsNullOrEmpty(connectionUrl))
 {
+    var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionUrl);
+    dataSourceBuilder.UseVector();
+    var dataSource = dataSourceBuilder.Build();
+
     builder.Services.AddDbContext<LocalListDbContext>(options =>
-        options.UseNpgsql(connectionUrl, npg => npg.UseVector()));
+        options.UseNpgsql(dataSource, npg => npg.UseVector()));
 }
 
 // Add DI Services

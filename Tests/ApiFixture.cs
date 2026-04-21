@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Pgvector.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -89,8 +90,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 d => d.ServiceType == typeof(DbContextOptions<LocalListDbContext>));
             if (descriptor is not null) services.Remove(descriptor);
 
+            var dataSourceBuilder = new NpgsqlDataSourceBuilder(_postgres.GetConnectionString());
+            dataSourceBuilder.UseVector();
+            var dataSource = dataSourceBuilder.Build();
+
             services.AddDbContext<LocalListDbContext>(options =>
-                options.UseNpgsql(_postgres.GetConnectionString(), npg => npg.UseVector()));
+                options.UseNpgsql(dataSource, npg => npg.UseVector()));
 
             // Replace TimeProvider.System with FakeTimeProvider
             var timeDescriptor = services.SingleOrDefault(
