@@ -22,7 +22,20 @@ dotnet run
 ```
 
 Required User Secrets / Environment Variables:
-`ConnectionStrings__DefaultConnection`, `FIREBASE_PROJECT_ID`, `Gemini__ApiKey`, `Jwt__Secret` (HS256 signing key para tokens de la app)
+
+**Core**
+- `ConnectionStrings__DefaultConnection` — Postgres URL (Railway privada; nunca exponer públicamente)
+- `FIREBASE_PROJECT_ID`
+- `Jwt__Secret` — HS256 signing key para tokens de la app (≥32 bytes)
+
+**Gemini (Builder + RAG embeddings)**
+- `Gemini__ApiKey`
+- `Gemini__EmbeddingModel` — por defecto `text-embedding-004` (768 dims). Se usa en `EmbeddingService` (RAG Fase 1) y en el pipeline de import reels (Fase 3).
+
+**Apify (import reels/TikTok — Fase 3)**
+- `Apify__Token` — API token de Apify. Pendiente de alta.
+- `Apify__InstagramActor` — slug del actor (p.ej. `apify/instagram-scraper`).
+- `Apify__TikTokActor` — slug del actor (p.ej. `clockworks/tiktok-scraper`).
 
 ## Project Structure (VSA)
 
