@@ -153,9 +153,6 @@ public class BuilderController : ControllerBase
         }
     }
 
-    private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
-        { "food", "nightlife", "coffee", "outdoors", "wellness", "culture" };
-
     /// <summary>
     /// RAG retrieval con fallback: embeddea el query del usuario, saca top-K del catálogo
     /// por cosine distance contra el índice HNSW, y rerank con señales determinísticas.
@@ -178,9 +175,15 @@ public class BuilderController : ControllerBase
         }
 
         // Componer query text combinando mensaje + preferencias extraídas.
-        var categoriesJoined = string.Join(" ", prefs.Categories ?? new List<string>());
-        var vibesJoined = string.Join(" ", prefs.Vibes ?? new List<string>());
-        var queryText = $"{rawMessage}. {categoriesJoined}. {vibesJoined}. {prefs.GroupType}".Trim();
+        // Filtramos partes vacías para no ensuciar el embedding con ". . . ".
+        var parts = new List<string> { rawMessage };
+        if (prefs.Categories != null && prefs.Categories.Count > 0)
+            parts.Add(string.Join(" ", prefs.Categories));
+        if (prefs.Vibes != null && prefs.Vibes.Count > 0)
+            parts.Add(string.Join(" ", prefs.Vibes));
+        if (!string.IsNullOrWhiteSpace(prefs.GroupType))
+            parts.Add(prefs.GroupType);
+        var queryText = string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
 
         Vector? qvec;
         try

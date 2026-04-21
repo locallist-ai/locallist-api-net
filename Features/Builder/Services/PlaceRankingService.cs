@@ -47,34 +47,49 @@ public class PlaceRankingService
         IReadOnlyList<(Place place, float distance)> candidates,
         ExtractedPreferences prefs)
     {
-        if (candidates.Count == 0) return new List<Place>();
+        return RankInternal(candidates, prefs).Select(s => s.Place).ToList();
+    }
 
-        var scored = new List<ScoredCandidate>(candidates.Count);
-        var seenNeighborhoods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Exposes scoring for tests/debug — same order as <see cref="Rank"/>.</summary>
+    public List<ScoredCandidate> RankWithScores(
+        IReadOnlyList<(Place place, float distance)> candidates,
+        ExtractedPreferences prefs)
+    {
+        return RankInternal(candidates, prefs);
+    }
 
-        // Primera pasada: calcular similarity + matches sin penalty
-        var initial = new List<(Place place, ScoreBreakdown bd)>(candidates.Count);
-        foreach (var (place, distance) in candidates)
+    /// <summary>
+    /// Core del rerank. Dos pasadas:
+    ///   1) Score preliminar sin penalty, ordenado desc.
+    ///      Con tie-breaker determinista por `Place.Id` para evitar orden no-estable
+    ///      cuando dos candidatos tienen mismo score.
+    ///   2) Penalty por neighborhood: el primer candidato de cada neighborhood no
+    ///      penaliza; los siguientes sí. Reordenamos por score final.
+    /// </summary>
+    private List<ScoredCandidate> RankInternal(
+        IReadOnlyList<(Place place, float distance)> candidates,
+        ExtractedPreferences prefs)
+    {
+        if (candidates.Count == 0) return new List<ScoredCandidate>();
+
+        var preliminary = candidates.Select(c =>
         {
-            var similarity = 1f - distance;
-            if (similarity < 0) similarity = 0; // guard para distance > 1
-            if (similarity > 1) similarity = 1;
+            var similarity = Math.Clamp(1f - c.distance, 0f, 1f);
+            var bd = new ScoreBreakdown(
+                similarity,
+                ScoreCategoryMatch(c.place, prefs),
+                ScoreBestForMatch(c.place, prefs),
+                ScoreAiVibe(c.place),
+                0f);
+            return (c.place, bd);
+        })
+        .OrderByDescending(t => t.bd.Total)
+        .ThenBy(t => t.place.Id) // deterministic tie-breaker
+        .ToList();
 
-            var categoryMatch = ScoreCategoryMatch(place, prefs);
-            var bestForMatch = ScoreBestForMatch(place, prefs);
-            var aiVibeNormalized = ScoreAiVibe(place);
-
-            initial.Add((place, new ScoreBreakdown(
-                similarity, categoryMatch, bestForMatch, aiVibeNormalized, 0f)));
-        }
-
-        // Segunda pasada: aplicar penalty de diversidad según el orden preliminar
-        // (por similarity alone, para emular "ya se seleccionó uno de ese barrio")
-        var preliminaryOrdered = initial
-            .OrderByDescending(t => t.bd.Total)
-            .ToList();
-
-        foreach (var (place, bd) in preliminaryOrdered)
+        var seenNeighborhoods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var scored = new List<ScoredCandidate>(candidates.Count);
+        foreach (var (place, bd) in preliminary)
         {
             var penalty = 0f;
             if (!string.IsNullOrWhiteSpace(place.Neighborhood)
@@ -82,7 +97,6 @@ public class PlaceRankingService
             {
                 penalty = 1f; // flat penalty, multiplicado por WeightNeighborhoodPenalty = 0.05
             }
-
             var finalBd = new ScoreBreakdown(
                 bd.Similarity, bd.CategoryMatch, bd.BestForMatch,
                 bd.AiVibeNormalized, penalty);
@@ -91,49 +105,8 @@ public class PlaceRankingService
 
         return scored
             .OrderByDescending(s => s.Score)
-            .Select(s => s.Place)
+            .ThenBy(s => s.Place.Id) // deterministic tie-breaker
             .ToList();
-    }
-
-    /// <summary>Exposes scoring for tests/debug — same order as <see cref="Rank"/>.</summary>
-    public List<ScoredCandidate> RankWithScores(
-        IReadOnlyList<(Place place, float distance)> candidates,
-        ExtractedPreferences prefs)
-    {
-        // Reuse: run Rank logic, but return scored instead. Duplication is acceptable
-        // here because Rank is hot path and we want zero overhead.
-        if (candidates.Count == 0) return new List<ScoredCandidate>();
-
-        var seenNeighborhoods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var initial = candidates.Select(t =>
-        {
-            var similarity = Math.Clamp(1f - t.distance, 0f, 1f);
-            var bd = new ScoreBreakdown(
-                similarity,
-                ScoreCategoryMatch(t.place, prefs),
-                ScoreBestForMatch(t.place, prefs),
-                ScoreAiVibe(t.place),
-                0f);
-            return (t.place, bd);
-        }).ToList();
-
-        var preliminary = initial.OrderByDescending(t => t.bd.Total).ToList();
-        var scored = new List<ScoredCandidate>(candidates.Count);
-        foreach (var (place, bd) in preliminary)
-        {
-            var penalty = 0f;
-            if (!string.IsNullOrWhiteSpace(place.Neighborhood)
-                && !seenNeighborhoods.Add(place.Neighborhood))
-            {
-                penalty = 1f;
-            }
-            var finalBd = new ScoreBreakdown(
-                bd.Similarity, bd.CategoryMatch, bd.BestForMatch,
-                bd.AiVibeNormalized, penalty);
-            scored.Add(new ScoredCandidate(place, finalBd.Total, finalBd));
-        }
-
-        return scored.OrderByDescending(s => s.Score).ToList();
     }
 
     private static float ScoreCategoryMatch(Place place, ExtractedPreferences prefs)
