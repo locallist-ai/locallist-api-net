@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -26,6 +27,8 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         // Aseguramos no contaminar otros tests que dependan del handler por defecto.
         fixture.FakeGemini.Responder = null;
         fixture.FakeGemini.Calls.Clear();
+        fixture.FakeEmbeddings.Responder = null;
+        fixture.FakeEmbeddings.Calls.Clear();
     }
 
     [Fact]
@@ -119,6 +122,87 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         Assert.True(body.TryGetProperty("plan", out _), "Respuesta sin plan tras malformed JSON");
     }
 
+    [Fact]
+    public async Task Chat_WithEmbeddedPlaces_ActivatesRagPath()
+    {
+        // Seedeamos 4 places y los reindexamos via /admin/places/reindex-embeddings.
+        // Tras el reindex, el BuilderController detectará embeddedCount>=3 y activará
+        // el path RAG (embed query + cosine distance + rerank).
+        var seededIds = await SeedPublishedMiamiPlaces(4);
+        var adminClient = CreateAdminClient();
+        var reindex = await adminClient.PostAsync("/admin/places/reindex-embeddings", content: null);
+        Assert.Equal(HttpStatusCode.OK, reindex.StatusCode);
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new[] { "romantic" },
+            groupType = "couple",
+            planName = "RAG Test",
+            maxStopsPerDay = 3,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "romantic dinner in Wynwood",
+            tripContext = new { city = Miami },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var stops = body.GetProperty("stops");
+        Assert.True(stops.GetArrayLength() >= 1, "RAG path debería devolver al menos una stop");
+
+        // Validar que EmbeddingService hizo al menos una llamada extra al fake
+        // (la del reindex + la del query del chat). El reindex hace 1 call batch.
+        // Sin esto no podemos distinguir RAG activo de fallback activo.
+        Assert.True(fixture.FakeEmbeddings.Calls.Count >= 2,
+            $"Se esperaban >=2 llamadas al embedding fake (reindex+chat), hubo {fixture.FakeEmbeddings.Calls.Count}");
+    }
+
+    [Fact]
+    public async Task Chat_EmbeddingProviderFailsOnQuery_FallsBackToKeywords()
+    {
+        // Catálogo ya indexado (>=3 places con embedding).
+        await SeedPublishedMiamiPlaces(4);
+        var adminClient = CreateAdminClient();
+        var reindex = await adminClient.PostAsync("/admin/places/reindex-embeddings", content: null);
+        Assert.Equal(HttpStatusCode.OK, reindex.StatusCode);
+
+        // Ahora rompemos el embedding para la query del chat (sólo esta llamada).
+        // Nota: el reindex ya ocurrió con responder=null → handler default OK.
+        fixture.FakeEmbeddings.Responder = _ => new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Content = new StringContent("Bad Gateway", Encoding.UTF8, "text/plain"),
+        };
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "Fallback Test",
+            maxStopsPerDay = 3,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "some food in Miami",
+            tripContext = new { city = Miami },
+        });
+
+        // Fallback keyword activo → 200 con plan válido, no 500.
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.TryGetProperty("plan", out _), "Fallback debería devolver un plan");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string embeddedText)
@@ -144,15 +228,18 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
     }
 
-    private async Task SeedPublishedMiamiPlaces(int count)
+    private async Task<List<Guid>> SeedPublishedMiamiPlaces(int count)
     {
         var db = fixture.GetDbContext();
         var tag = Guid.NewGuid().ToString("N")[..8];
+        var ids = new List<Guid>();
         for (int i = 0; i < count; i++)
         {
+            var id = Guid.NewGuid();
+            ids.Add(id);
             db.Places.Add(new Place
             {
-                Id = Guid.NewGuid(),
+                Id = id,
                 Name = $"Builder Seed {tag}-{i}",
                 Category = "Food",
                 City = Miami,
@@ -161,8 +248,30 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
                 BestTime = "any",
                 Latitude = 25.77m + (decimal)(i * 0.01),
                 Longitude = -80.19m + (decimal)(i * 0.01),
+                GooglePlaceId = $"gpid-builder-{tag}-{i}",
             });
         }
         await db.SaveChangesAsync();
+        return ids;
+    }
+
+    private HttpClient CreateAdminClient()
+    {
+        var adminEmail = $"admin-{Guid.NewGuid():N}@locallist.ai";
+        var adminFbUid = $"fb-admin-{Guid.NewGuid():N}";
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User
+        {
+            Id = Guid.NewGuid(),
+            Email = adminEmail,
+            FirebaseUid = adminFbUid,
+            Role = "admin",
+        });
+        db.SaveChanges();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(adminFbUid, adminEmail);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return client;
     }
 }
