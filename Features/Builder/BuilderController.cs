@@ -3,9 +3,12 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using Pgvector;
+using Pgvector.EntityFrameworkCore;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -15,12 +18,29 @@ public class BuilderController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly AiProviderService _aiProvider;
+    private readonly EmbeddingService _embeddings;
+    private readonly PlaceRankingService _ranker;
     private readonly ILogger<BuilderController> _logger;
 
-    public BuilderController(LocalListDbContext db, AiProviderService aiProvider, ILogger<BuilderController> logger)
+    // Mínimo de places con embedding para considerar activo el retrieval semántico.
+    // Por debajo de este umbral → fallback al filtrado por categoría (comportamiento legacy).
+    private const int MinEmbeddedPlacesForRag = 3;
+
+    // Top-K devuelto por el índice HNSW antes del rerank. BuildPlanSchedule consume
+    // ~15, así que 50 deja margen al rerank para reordenar sin perder buenos candidatos.
+    private const int RetrievalTopK = 50;
+
+    public BuilderController(
+        LocalListDbContext db,
+        AiProviderService aiProvider,
+        EmbeddingService embeddings,
+        PlaceRankingService ranker,
+        ILogger<BuilderController> logger)
     {
         _db = db;
         _aiProvider = aiProvider;
+        _embeddings = embeddings;
+        _ranker = ranker;
         _logger = logger;
     }
 
@@ -38,14 +58,9 @@ public class BuilderController : ControllerBase
             // 1. Extract preferences from Gemini
             var prefs = await _aiProvider.ExtractPreferencesAsync(request.Message, request.TripContext, ct);
 
-            // 2. Query Curated Places matching the City
+            // 2+3. Retrieve + rank candidates semánticamente (RAG) con fallback a filtrado por categoría.
             var city = request.TripContext?.City ?? "Miami"; // Default fallback
-            var matchingPlaces = await _db.Places.AsNoTracking()
-                .Where(p => p.Status == "published" && p.City == city)
-                .ToListAsync(ct);
-
-            // 3. Filter using Category preferences
-            var filteredPlaces = FilterPlaces(matchingPlaces, prefs);
+            var filteredPlaces = await RetrieveCandidatesAsync(request.Message, city, prefs, ct);
 
             // 4. Build schedule (Haversine scheduling algorithm)
             var planStopsData = BuildPlanSchedule(filteredPlaces, prefs);
@@ -138,12 +153,99 @@ public class BuilderController : ControllerBase
         }
     }
 
-    private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
-        { "food", "nightlife", "coffee", "outdoors", "wellness", "culture" };
-
-    private List<Place> FilterPlaces(List<Place> allPlaces, ExtractedPreferences prefs)
+    /// <summary>
+    /// RAG retrieval con fallback: embeddea el query del usuario, saca top-K del catálogo
+    /// por cosine distance contra el índice HNSW, y rerank con señales determinísticas.
+    /// Si hay menos de <see cref="MinEmbeddedPlacesForRag"/> places con embedding en esa city
+    /// o si el proveedor de embeddings falla, cae al filtrado por categoría legacy.
+    /// </summary>
+    private async Task<List<Place>> RetrieveCandidatesAsync(
+        string rawMessage, string city, ExtractedPreferences prefs, CancellationToken ct)
     {
-        if (!prefs.Categories.Any()) return allPlaces;
+        // Contar places con embedding para esta city. AsNoTracking porque no muta.
+        var embeddedCount = await _db.Places.AsNoTracking()
+            .CountAsync(p => p.Status == "published" && p.City == city && p.Embedding != null, ct);
+
+        if (embeddedCount < MinEmbeddedPlacesForRag)
+        {
+            _logger.LogInformation(
+                "RAG fallback (keyword): city={City} embeddedCount={Count} < {Min}",
+                city, embeddedCount, MinEmbeddedPlacesForRag);
+            return await FallbackKeywordFilterAsync(city, prefs, ct);
+        }
+
+        // Componer query text combinando mensaje + preferencias extraídas.
+        // Filtramos partes vacías para no ensuciar el embedding con ". . . ".
+        var parts = new List<string> { rawMessage };
+        if (prefs.Categories != null && prefs.Categories.Count > 0)
+            parts.Add(string.Join(" ", prefs.Categories));
+        if (prefs.Vibes != null && prefs.Vibes.Count > 0)
+            parts.Add(string.Join(" ", prefs.Vibes));
+        if (!string.IsNullOrWhiteSpace(prefs.GroupType))
+            parts.Add(prefs.GroupType);
+        var queryText = string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
+
+        Vector? qvec;
+        try
+        {
+            qvec = await _embeddings.EmbedAsync(queryText, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Embedding provider failed — RAG fallback");
+            return await FallbackKeywordFilterAsync(city, prefs, ct);
+        }
+
+        if (qvec == null)
+        {
+            _logger.LogWarning("EmbedAsync returned null — RAG fallback");
+            return await FallbackKeywordFilterAsync(city, prefs, ct);
+        }
+
+        // Top-K por cosine distance via índice HNSW. Proyección incluye la distance
+        // (en [0..2], 0 = idéntico) para pasar al ranker.
+        var candidates = await _db.Places.AsNoTracking()
+            .Where(p => p.Status == "published" && p.City == city && p.Embedding != null)
+            .OrderBy(p => p.Embedding!.CosineDistance(qvec))
+            .Take(RetrievalTopK)
+            .Select(p => new { Place = p, Distance = (float)p.Embedding!.CosineDistance(qvec) })
+            .ToListAsync(ct);
+
+        if (candidates.Count == 0)
+        {
+            _logger.LogInformation("RAG returned 0 candidates — city={City}, falling back", city);
+            return await FallbackKeywordFilterAsync(city, prefs, ct);
+        }
+
+        var ranked = _ranker.Rank(
+            candidates.Select(c => (c.Place, c.Distance)).ToList(),
+            prefs);
+
+        _logger.LogInformation(
+            "RAG retrieval: city={City} query='{QueryPreview}' top-K={Count}",
+            city,
+            queryText.Length > 60 ? queryText[..60] + "…" : queryText,
+            ranked.Count);
+
+        return ranked;
+    }
+
+    /// <summary>
+    /// Fallback legacy: query categórica simple (comportamiento previo a Fase 2 RAG).
+    /// Se usa cuando el catálogo no está reindexado o el embedding provider falla.
+    /// </summary>
+    private async Task<List<Place>> FallbackKeywordFilterAsync(
+        string city, ExtractedPreferences prefs, CancellationToken ct)
+    {
+        var matching = await _db.Places.AsNoTracking()
+            .Where(p => p.Status == "published" && p.City == city)
+            .ToListAsync(ct);
+        return FilterPlaces(matching, prefs);
+    }
+
+    internal static List<Place> FilterPlaces(List<Place> allPlaces, ExtractedPreferences prefs)
+    {
+        if (prefs.Categories == null || !prefs.Categories.Any()) return allPlaces;
 
         return allPlaces.Where(p =>
             prefs.Categories.Any(c =>

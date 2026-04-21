@@ -75,6 +75,7 @@ if (!string.IsNullOrEmpty(connectionUrl))
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<AiProviderService>();
 builder.Services.AddHttpClient<EmbeddingService>();
+builder.Services.AddScoped<PlaceRankingService>();
 builder.Services.AddHttpClient<KlaviyoService>();
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
