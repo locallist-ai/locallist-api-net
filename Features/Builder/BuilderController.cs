@@ -53,17 +53,55 @@ public class BuilderController : ControllerBase
 
         Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
 
+        // Structured transcript of the Builder pipeline — every stage logs at Info
+        // so a single Railway Deploy Logs query (filter "Builder:") returns the full
+        // story of any /builder/chat request without code changes.
+        _logger.LogInformation(
+            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} preferences={Prefs} vibes={Vibes} msgLen={MsgLen}",
+            isAnonymous,
+            request.TripContext?.City ?? "(unset)",
+            request.TripContext?.Days?.ToString() ?? "(unset)",
+            request.TripContext?.GroupType ?? "(unset)",
+            request.TripContext?.Preferences == null ? "(null)" : string.Join(",", request.TripContext.Preferences),
+            request.TripContext?.Vibes == null ? "(null)" : string.Join(",", request.TripContext.Vibes),
+            request.Message.Length);
+
         try
         {
             // 1. Extract preferences from Gemini
             var prefs = await _aiProvider.ExtractPreferencesAsync(request.Message, request.TripContext, ct);
 
+            _logger.LogInformation(
+                "Builder: prefs days={Days} categories={Cats} vibes={Vibes} groupType={GT} planName='{Name}' maxStopsPerDay={Max}",
+                prefs.Days,
+                prefs.Categories == null ? "(null)" : string.Join(",", prefs.Categories),
+                prefs.Vibes == null ? "(null)" : string.Join(",", prefs.Vibes),
+                prefs.GroupType,
+                prefs.PlanName,
+                prefs.MaxStopsPerDay);
+
             // 2+3. Retrieve + rank candidates semánticamente (RAG) con fallback a filtrado por categoría.
             var city = request.TripContext?.City ?? "Miami"; // Default fallback
             var filteredPlaces = await RetrieveCandidatesAsync(request.Message, city, prefs, ct);
 
+            _logger.LogInformation("Builder: candidates count={Count}", filteredPlaces.Count);
+
             // 4. Build schedule (Haversine scheduling algorithm)
             var planStopsData = BuildPlanSchedule(filteredPlaces, prefs);
+
+            var pickedPlacesById = filteredPlaces.ToDictionary(p => p.Id);
+            var scheduleSummary = string.Join(" | ", planStopsData.Select(sd =>
+            {
+                pickedPlacesById.TryGetValue(sd.PlaceId, out var pl);
+                return $"d{sd.DayNumber}.{sd.TimeBlock}→{pl?.Name ?? "?"}({pl?.Category ?? "?"})";
+            }));
+            var categoryMix = string.Join(",", planStopsData
+                .Select(sd => pickedPlacesById.TryGetValue(sd.PlaceId, out var pl) ? pl.Category : "?")
+                .GroupBy(c => c)
+                .Select(g => $"{g.Key}:{g.Count()}"));
+            _logger.LogInformation(
+                "Builder: schedule days={Days} stops={N} categoryMix=[{Mix}] plan=[{Schedule}]",
+                prefs.Days, planStopsData.Count, categoryMix, scheduleSummary);
 
             var sanitizedMessage = request.Message.Length > 60 ? request.Message[..60] : request.Message;
             var planName = string.IsNullOrEmpty(prefs.PlanName) ? $"{sanitizedMessage} Plan" : prefs.PlanName;
@@ -218,17 +256,22 @@ public class BuilderController : ControllerBase
             return await FallbackKeywordFilterAsync(city, prefs, ct);
         }
 
-        var ranked = _ranker.Rank(
+        var rankedScored = _ranker.RankWithScores(
             candidates.Select(c => (c.Place, c.Distance)).ToList(),
             prefs);
 
         _logger.LogInformation(
-            "RAG retrieval: city={City} query='{QueryPreview}' top-K={Count}",
+            "RAG retrieval: city={City} query='{QueryPreview}' top-K={Count} top5=[{Top5}]",
             city,
             queryText.Length > 60 ? queryText[..60] + "…" : queryText,
-            ranked.Count);
+            rankedScored.Count,
+            string.Join(" | ", rankedScored.Take(5).Select(s =>
+                $"{s.Place.Name}({s.Place.Category}) total={s.Score:F3} " +
+                $"[sim={s.Breakdown.Similarity:F2} cat={s.Breakdown.CategoryMatch:F2} " +
+                $"bestFor={s.Breakdown.BestForMatch:F2} aiVibe={s.Breakdown.AiVibeNormalized:F2} " +
+                $"neighPen={s.Breakdown.NeighborhoodPenalty:F2}]")));
 
-        return ranked;
+        return rankedScored.Select(s => s.Place).ToList();
     }
 
     /// <summary>
