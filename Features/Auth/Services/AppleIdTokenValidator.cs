@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
@@ -52,14 +53,33 @@ public class AppleIdTokenValidator : IAppleIdTokenValidator
                 IssuerSigningKeys = config.SigningKeys
             };
 
-            var handler = new JwtSecurityTokenHandler();
+            // JwtSecurityTokenHandler tiene un legacy "inbound claim type map" que
+            // reescribe los nombres cortos JWT (sub, email) a URIs WS-Fed
+            // (nameidentifier, emailaddress). Lo desactivamos para que
+            // FindFirst("sub") funcione contra los claims crudos del token.
+            // Mismo patrón aplicado en GoogleIdTokenValidator (PR #40) — sin esto,
+            // Apple Sign-In desde iOS devolvía 401 silencioso en producción.
+            var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
             var principal = handler.ValidateToken(idToken, validationParameters, out _);
-            var sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-            if (string.IsNullOrEmpty(sub)) return null;
+
+            // Defensive lookup: si otro caller reintroduce el mapping, caemos a
+            // ClaimTypes.NameIdentifier / ClaimTypes.Email.
+            var sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
+                      ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrEmpty(sub))
+            {
+                _logger.LogWarning(
+                    "Apple ID token validated but sub claim is empty. Claim types present: {Types}",
+                    string.Join(",", principal.Claims.Select(c => c.Type)));
+                return null;
+            }
+
+            var email = principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value
+                        ?? principal.FindFirst(ClaimTypes.Email)?.Value;
 
             return new OAuthClaims(
                 Sub: sub,
-                Email: principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value,
+                Email: email,
                 Name: null,
                 Picture: null);
         }
