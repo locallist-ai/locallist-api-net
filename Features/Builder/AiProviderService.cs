@@ -92,21 +92,43 @@ public class AiProviderService
 
     private string BuildPrompt(string message, TripContextDto? context)
     {
-        // Sanitize user input to mitigate prompt injection
+        // Sanitize user input to mitigate prompt injection.
         var sanitized = message.Replace("\"", "'").Replace("\\", "");
         if (sanitized.Length > 500) sanitized = sanitized[..500];
-        var ctxStr = JsonSerializer.Serialize(context ?? new TripContextDto());
-        return $@"Extract travel plan preferences from this message. Return JSON only, no markdown.
-Message: ""{sanitized}""
-Context: {ctxStr}
 
-Return this exact JSON shape:
+        var groupType = context?.GroupType ?? "";
+        var prefs = context?.Preferences ?? new List<string>();
+        var vibes = context?.Vibes ?? new List<string>();
+        var days = context?.Days?.ToString() ?? "";
+        var city = context?.City ?? "";
+
+        // Prompt construido como constraints MANDATORY para que Gemini respete lo que el
+        // usuario ya seleccionó en el wizard. El mensaje libre ("Hola", "lo que sea") solo
+        // enriquece, no sobreescribe lo ya elegido.
+        return $@"You generate preferences for a travel plan. The user has ALREADY selected
+these MANDATORY constraints; you MUST respect them:
+
+- groupType: {groupType} (if family/family-kids: NEVER include ""nightlife"" in categories; prefer family-friendly places)
+- duration: {days} days
+- user preferences: {string.Join(",", prefs)} (merge into vibes AND categories; these MUST appear)
+- user vibes: {string.Join(",", vibes)} (merge into vibes; these MUST appear)
+- city: {city}
+
+User's free-text message: ""{sanitized}""
+
+Rules for planName:
+- MUST be a short descriptive phrase combining city + duration + 1-2 vibes (e.g. ""Family-friendly Miami weekend"", ""2-day adventure in Miami"").
+- DO NOT copy the user's message verbatim.
+- DO NOT use greetings like ""Hola"", ""Hi"", ""Hello"" as the plan name.
+- If the message is trivial or empty, synthesize planName from city + duration + vibes.
+
+Return JSON only, no markdown. EXACT shape:
 {{
   ""days"": number (1-7, default 1),
   ""categories"": string[] (from: food, nightlife, coffee, outdoors, wellness, culture),
   ""vibes"": string[] (e.g. romantic, adventurous, relaxed, party, cultural),
   ""groupType"": string (solo/couple/friends/family-kids/family/group),
-  ""planName"": string (short descriptive name for the plan),
+  ""planName"": string (following the rules above),
   ""maxStopsPerDay"": number (3-6, based on pace)
 }}";
     }
@@ -147,6 +169,17 @@ Return this exact JSON shape:
         }
     }
 
+    // Mapa fijo preference → categories. Se usa cuando Gemini no está disponible y tenemos
+    // que derivar algo razonable del tripContext seleccionado en el wizard.
+    private static readonly Dictionary<string, string[]> PreferenceToCategories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["adventure"] = new[] { "outdoors", "culture" },
+        ["relax"] = new[] { "wellness", "coffee" },
+        ["cultural"] = new[] { "culture" },
+        ["foodie"] = new[] { "food", "coffee" },
+        ["nightlife"] = new[] { "nightlife" },
+    };
+
     private ExtractedPreferences ExtractWithKeywords(string message, TripContextDto? context)
     {
         var lower = message.ToLower();
@@ -155,16 +188,46 @@ Return this exact JSON shape:
         if (lower.Contains("food") || lower.Contains("eat") || lower.Contains("restaurant")) cats.Add("food");
         if (lower.Contains("night") || lower.Contains("bar") || lower.Contains("club")) cats.Add("nightlife");
         if (lower.Contains("coffee") || lower.Contains("cafe") || lower.Contains("breakfast")) cats.Add("coffee");
+
+        // Seed desde context.Preferences: el wizard ya pasó "adventure"/"relax"/"cultural".
+        // Sin esto, un free-text vacío o saludo ("Hola") caía a defaults genéricos y
+        // ignoraba la intención del usuario.
+        var contextPrefs = context?.Preferences ?? new List<string>();
+        foreach (var pref in contextPrefs)
+        {
+            if (PreferenceToCategories.TryGetValue(pref, out var mapped))
+            {
+                foreach (var c in mapped)
+                {
+                    if (!cats.Contains(c, StringComparer.OrdinalIgnoreCase))
+                        cats.Add(c);
+                }
+            }
+        }
+
+        // Si tras los dos intentos seguimos vacíos, defaults sensatos.
         if (cats.Count == 0) cats.AddRange(new[] { "food", "outdoors", "culture" });
+
+        // family-kids: excluir nightlife aunque haya aparecido por keyword en el mensaje.
+        var groupType = context?.GroupType ?? "couple";
+        if (groupType is "family" or "family-kids")
+            cats.RemoveAll(c => string.Equals(c, "nightlife", StringComparison.OrdinalIgnoreCase));
+
+        // Vibes: merge contextual vibes + preferences (los preferences funcionan como vibes también).
+        var vibes = new List<string>();
+        if (context?.Vibes != null) vibes.AddRange(context.Vibes);
+        foreach (var pref in contextPrefs)
+            if (!vibes.Contains(pref, StringComparer.OrdinalIgnoreCase))
+                vibes.Add(pref);
 
         var result = new ExtractedPreferences
         {
             Days = context?.Days ?? (lower.Contains("weekend") ? 2 : 1),
             Categories = cats,
-            Vibes = context?.Vibes ?? context?.Preferences ?? new List<string>(),
-            GroupType = context?.GroupType ?? "couple",
+            Vibes = vibes,
+            GroupType = groupType,
             PlanName = message.Length > 60 ? message.Substring(0, 60) : message,
-            MaxStopsPerDay = context?.GroupType == "family-kids" ? 3 : 5
+            MaxStopsPerDay = groupType is "family" or "family-kids" ? 3 : 5
         };
 
         _logger.LogInformation(

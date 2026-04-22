@@ -104,7 +104,8 @@ public class BuilderController : ControllerBase
                 prefs.Days, planStopsData.Count, categoryMix, scheduleSummary);
 
             var sanitizedMessage = request.Message.Length > 60 ? request.Message[..60] : request.Message;
-            var planName = string.IsNullOrEmpty(prefs.PlanName) ? $"{sanitizedMessage} Plan" : prefs.PlanName;
+            var planName = BuildPlanName(prefs, city, request.Message);
+            var planDescription = BuildPlanDescription(prefs);
 
             if (isAnonymous)
             {
@@ -114,7 +115,7 @@ public class BuilderController : ControllerBase
                     Name = planName,
                     City = city,
                     Type = "ai",
-                    Description = $"AI-generated plan: {sanitizedMessage}",
+                    Description = planDescription,
                     DurationDays = prefs.Days,
                     TripContext = request.TripContext,
                     IsPublic = false,
@@ -137,7 +138,7 @@ public class BuilderController : ControllerBase
                 Name = planName,
                 City = city,
                 Type = "ai",
-                Description = $"AI-generated plan: {sanitizedMessage}",
+                Description = planDescription,
                 DurationDays = prefs.Days,
                 TripContext = request.TripContext != null ? JsonSerializer.SerializeToDocument(request.TripContext) : JsonSerializer.SerializeToDocument(new {}),
                 IsPublic = false,
@@ -431,6 +432,72 @@ public class BuilderController : ControllerBase
         var speedKmH = mode == "walk" ? 5.0 : 30.0;
         var timeHours = distanceKm / speedKmH;
         return (int)Math.Max(5, Math.Round(timeHours * 60)); // Minimum 5 mins
+    }
+
+    // ── Plan naming helpers (pure functions, internal para tests) ───────────────────────
+
+    private static readonly string[] GreetingPrefixes =
+    {
+        "hola", "hi", "hey", "hello", "buenas", "buenos dias", "buenos días", "good morning",
+        "saludos", "holi"
+    };
+
+    /// <summary>
+    /// Genera un plan name descriptivo a partir de preferencias + ciudad. Ignora el mensaje
+    /// crudo cuando es un saludo corto o cuando Gemini lo copió literal en <c>PlanName</c>.
+    /// Pura — testeable sin DI.
+    /// </summary>
+    public static string BuildPlanName(ExtractedPreferences prefs, string city, string rawMessage)
+    {
+        var candidate = prefs.PlanName?.Trim() ?? string.Empty;
+        var raw = rawMessage?.Trim() ?? string.Empty;
+
+        if (IsUsableName(candidate, raw))
+            return candidate;
+
+        // Synthesize: "{Days}-day {vibe-or-category} in {City}".
+        var descriptor = FirstNonEmpty(prefs.Vibes) ?? FirstNonEmpty(prefs.Categories) ?? "curated";
+        var dayLabel = prefs.Days == 1 ? "1-day" : $"{prefs.Days}-day";
+        var cityLabel = string.IsNullOrWhiteSpace(city) ? "Miami" : city;
+        return $"{dayLabel} {descriptor} plan in {cityLabel}";
+    }
+
+    /// <summary>
+    /// Description sustancial basada en groupType + duración + top-3 categorías.
+    /// Evita el "AI-generated plan: Hola" que salía cuando el mensaje era trivial.
+    /// </summary>
+    public static string BuildPlanDescription(ExtractedPreferences prefs)
+    {
+        var dayLabel = prefs.Days == 1 ? "1-day" : $"{prefs.Days}-day";
+        var groupLabel = string.IsNullOrWhiteSpace(prefs.GroupType) ? "curated" : $"{prefs.GroupType}-friendly";
+        var topCats = (prefs.Categories ?? new List<string>()).Take(3).ToList();
+        if (topCats.Count == 0)
+            return $"A {groupLabel} {dayLabel} plan.";
+        return $"A {groupLabel} {dayLabel} plan featuring {string.Join(", ", topCats)}.";
+    }
+
+    private static bool IsUsableName(string candidate, string rawMessage)
+    {
+        if (string.IsNullOrWhiteSpace(candidate)) return false;
+        if (candidate.Length < 4) return false;
+
+        var lower = candidate.ToLowerInvariant();
+
+        // Greetings copiados tal cual.
+        if (GreetingPrefixes.Any(g => lower.StartsWith(g))) return false;
+
+        // PlanName contiene el mensaje literal del usuario (Gemini copy-paste).
+        if (!string.IsNullOrWhiteSpace(rawMessage) && rawMessage.Length >= 4 &&
+            lower.Contains(rawMessage.ToLowerInvariant()))
+            return false;
+
+        return true;
+    }
+
+    private static string? FirstNonEmpty(IEnumerable<string>? values)
+    {
+        if (values == null) return null;
+        return values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
     }
 
     private object ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces)

@@ -203,6 +203,80 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         Assert.True(body.TryGetProperty("plan", out _), "Fallback debería devolver un plan");
     }
 
+    [Fact]
+    public async Task Chat_GreetingMessage_KeywordFallback_GeneratesDescriptivePlanName()
+    {
+        // Regresión PR #B: un mensaje trivial ("Hola") ya no debe aparecer como plan.Name
+        // cuando el fallback keyword se activa. BuildPlanName sintetiza a partir de vibes/city.
+        await SeedPublishedMiamiPlaces(3);
+
+        // Gemini devuelve 502 → ExtractWithKeywords toma el control. Le pasamos
+        // tripContext.preferences=["adventure"] para que el mapa de seed añada
+        // categories=outdoors,culture y vibes=adventure.
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Content = new StringContent("Bad Gateway", Encoding.UTF8, "text/plain")
+        };
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "Hola",
+            tripContext = new
+            {
+                city = Miami,
+                days = 2,
+                groupType = "family-kids",
+                preferences = new[] { "adventure" }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var planName = body.GetProperty("plan").GetProperty("name").GetString() ?? "";
+
+        Assert.DoesNotContain("Hola", planName, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Miami", planName);
+        // Debe venir de vibes (adventure) o duration (2-day).
+        Assert.Contains("2-day", planName);
+    }
+
+    [Fact]
+    public async Task Chat_KeywordFallback_SeedsCategoriesFromPreferences()
+    {
+        // Regresión PR #B: preferences=["adventure"] debe propagarse a categories=outdoors/culture
+        // en el fallback keyword — sin esto los planes family-adventure salían con wellness/food genérico.
+        await SeedPublishedMiamiPlaces(3);
+
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Content = new StringContent("", Encoding.UTF8, "text/plain")
+        };
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            // Mensaje SIN keywords de categories — todo lo que contenga categories tiene que venir de preferences.
+            message = "plan",
+            tripContext = new
+            {
+                city = Miami,
+                days = 1,
+                groupType = "couple",
+                preferences = new[] { "relax" }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        // La description incluye top categorías: si seed funcionó, contiene "wellness" o "coffee".
+        var description = body.GetProperty("plan").GetProperty("description").GetString() ?? "";
+        var hasRelaxCategory = description.Contains("wellness", StringComparison.OrdinalIgnoreCase)
+                            || description.Contains("coffee", StringComparison.OrdinalIgnoreCase);
+        Assert.True(hasRelaxCategory,
+            $"Se esperaba 'wellness' o 'coffee' en description, llegó: '{description}'");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string embeddedText)
