@@ -13,10 +13,18 @@ namespace LocalList.API.NET.Features.Builder.Services;
 /// </summary>
 public class PlaceRankingService
 {
-    // Pesos tal como documentados en ~/.claude/plans/teniamos-un-plan-...
-    private const float WeightCosine = 0.5f;
-    private const float WeightCategory = 0.2f;
+    // Pesos rebalanceados en Parte C del plan Builder quality:
+    // - Cosine baja 0.50→0.40 (RAG ya no es la única señal, hay más soft signals).
+    // - Category baja 0.20→0.15 (sobreindexaba cuando Gemini devolvía category errónea).
+    // - BestFor se mantiene en 0.15.
+    // - SuitableFor NUEVO en 0.15 (match con groupType: family/family-kids filtra adults-only).
+    // - AiVibe se mantiene en 0.10.
+    // - NeighborhoodPenalty se mantiene en 0.05.
+    // Total contributivo = 0.40 + 0.15 + 0.15 + 0.15 + 0.10 = 0.95. Penalty resta hasta 0.05.
+    private const float WeightCosine = 0.4f;
+    private const float WeightCategory = 0.15f;
     private const float WeightBestFor = 0.15f;
+    private const float WeightSuitableFor = 0.15f;
     private const float WeightAiVibe = 0.1f;
     private const float WeightNeighborhoodPenalty = 0.05f;
 
@@ -26,6 +34,7 @@ public class PlaceRankingService
         float Similarity,
         float CategoryMatch,
         float BestForMatch,
+        float SuitableForMatch,
         float AiVibeNormalized,
         float NeighborhoodPenalty)
     {
@@ -33,6 +42,7 @@ public class PlaceRankingService
             WeightCosine * Similarity
             + WeightCategory * CategoryMatch
             + WeightBestFor * BestForMatch
+            + WeightSuitableFor * SuitableForMatch
             + WeightAiVibe * AiVibeNormalized
             - WeightNeighborhoodPenalty * NeighborhoodPenalty;
     }
@@ -79,6 +89,7 @@ public class PlaceRankingService
                 similarity,
                 ScoreCategoryMatch(c.place, prefs),
                 ScoreBestForMatch(c.place, prefs),
+                ScoreSuitableForMatch(c.place, prefs),
                 ScoreAiVibe(c.place),
                 0f);
             return (c.place, bd);
@@ -99,7 +110,7 @@ public class PlaceRankingService
             }
             var finalBd = new ScoreBreakdown(
                 bd.Similarity, bd.CategoryMatch, bd.BestForMatch,
-                bd.AiVibeNormalized, penalty);
+                bd.SuitableForMatch, bd.AiVibeNormalized, penalty);
             scored.Add(new ScoredCandidate(place, finalBd.Total, finalBd));
         }
 
@@ -127,6 +138,44 @@ public class PlaceRankingService
             .Count(v => place.BestFor.Any(bf =>
                 string.Equals(bf, v, StringComparison.OrdinalIgnoreCase)));
         return Math.Min(1f, intersect / (float)Math.Max(1, prefs.Vibes.Count));
+    }
+
+    // SuitableFor valida si el place es apropiado para el groupType que eligió el usuario.
+    // Reglas:
+    //   - groupType vacío → 1.0 (neutral, no penalizamos cuando no hay señal de contexto).
+    //   - place.SuitableFor null/empty → 0.5 (catalog sin etiquetar, no-info no castiga).
+    //   - family/family-kids + place contiene family/kids/all-ages → 1.0.
+    //   - family/family-kids + place contiene adults-only/21+ → 0.0 (hard exclusion).
+    //   - otros cases → 0.7 (match parcial/ambiguo).
+    // El peso (0.15) hace que un match vs un no-match genere ~+0.105 de diferencia, suficiente
+    // para reordenar en top-5 sin dominar sobre cosine similarity.
+    private static float ScoreSuitableForMatch(Place place, ExtractedPreferences prefs)
+    {
+        if (string.IsNullOrWhiteSpace(prefs.GroupType)) return 1f;
+
+        var suitable = place.SuitableFor;
+        if (suitable == null || suitable.Count == 0) return 0.5f;
+
+        var isFamilyContext = string.Equals(prefs.GroupType, "family", StringComparison.OrdinalIgnoreCase)
+                           || string.Equals(prefs.GroupType, "family-kids", StringComparison.OrdinalIgnoreCase);
+
+        if (isFamilyContext)
+        {
+            var hasAdultsOnly = suitable.Any(s =>
+                string.Equals(s, "adults-only", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s, "21+", StringComparison.OrdinalIgnoreCase));
+            if (hasAdultsOnly) return 0f;
+
+            var hasFamilyTag = suitable.Any(s =>
+                string.Equals(s, "family", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s, "kids", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s, "all-ages", StringComparison.OrdinalIgnoreCase));
+            if (hasFamilyTag) return 1f;
+
+            return 0.5f; // no señal family ni adults-only, neutral-ish
+        }
+
+        return 0.7f;
     }
 
     private static float ScoreAiVibe(Place place)
