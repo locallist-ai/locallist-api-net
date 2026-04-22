@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
@@ -66,14 +67,31 @@ public class GoogleIdTokenValidator : IGoogleIdTokenValidator
                 IssuerSigningKeys = config.SigningKeys
             };
 
-            var handler = new JwtSecurityTokenHandler();
+            // JwtSecurityTokenHandler has a legacy "inbound claim type map" that
+            // rewrites short JWT claim names (sub, email) to long WS-Fed URIs
+            // (nameidentifier, emailaddress). Disable it so FindFirst("sub")
+            // keeps working against the raw token claims.
+            var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
             var principal = handler.ValidateToken(idToken, validationParameters, out _);
-            var sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-            if (string.IsNullOrEmpty(sub)) return null;
+
+            // Defensive lookup: in case another caller reintroduces the mapping,
+            // fall back to ClaimTypes.NameIdentifier.
+            var sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
+                      ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrEmpty(sub))
+            {
+                _logger.LogWarning(
+                    "Google ID token validated but sub claim is empty. Claim types present: {Types}",
+                    string.Join(",", principal.Claims.Select(c => c.Type)));
+                return null;
+            }
+
+            var email = principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value
+                        ?? principal.FindFirst(ClaimTypes.Email)?.Value;
 
             return new OAuthClaims(
                 Sub: sub,
-                Email: principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value,
+                Email: email,
                 Name: principal.FindFirst("name")?.Value,
                 Picture: principal.FindFirst("picture")?.Value);
         }
