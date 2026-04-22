@@ -1,3 +1,4 @@
+using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Builder.Services;
@@ -156,10 +157,7 @@ public class PlaceRankingService
         var suitable = place.SuitableFor;
         if (suitable == null || suitable.Count == 0) return 0.5f;
 
-        var isFamilyContext = string.Equals(prefs.GroupType, "family", StringComparison.OrdinalIgnoreCase)
-                           || string.Equals(prefs.GroupType, "family-kids", StringComparison.OrdinalIgnoreCase);
-
-        if (isFamilyContext)
+        if (GroupTypePolicy.IsFamilyContext(prefs.GroupType))
         {
             var hasAdultsOnly = suitable.Any(s =>
                 string.Equals(s, "adults-only", StringComparison.OrdinalIgnoreCase)

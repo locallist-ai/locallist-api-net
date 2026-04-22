@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -87,7 +88,8 @@ public class BuilderController : ControllerBase
             _logger.LogInformation("Builder: candidates count={Count}", filteredPlaces.Count);
 
             // 4. Build schedule (Haversine scheduling algorithm)
-            var planStopsData = BuildPlanSchedule(filteredPlaces, prefs);
+            var schedule = BuildPlanSchedule(filteredPlaces, prefs);
+            var planStopsData = schedule.Stops;
 
             var pickedPlacesById = filteredPlaces.ToDictionary(p => p.Id);
             var scheduleSummary = string.Join(" | ", planStopsData.Select(sd =>
@@ -100,8 +102,9 @@ public class BuilderController : ControllerBase
                 .GroupBy(c => c)
                 .Select(g => $"{g.Key}:{g.Count()}"));
             _logger.LogInformation(
-                "Builder: schedule days={Days} stops={N} categoryMix=[{Mix}] plan=[{Schedule}]",
-                prefs.Days, planStopsData.Count, categoryMix, scheduleSummary);
+                "Builder: schedule days={Days} stops={N} categoryMix=[{Mix}] plan=[{Schedule}] warnings=[{Warnings}]",
+                prefs.Days, planStopsData.Count, categoryMix, scheduleSummary,
+                string.Join(",", schedule.Warnings));
 
             var sanitizedMessage = request.Message.Length > 60 ? request.Message[..60] : request.Message;
             var planName = BuildPlanName(prefs, city, request.Message);
@@ -128,7 +131,8 @@ public class BuilderController : ControllerBase
                 {
                     plan = ephemeralPlan,
                     stops = stopsWithPlacesAnonymous,
-                    message = $"Created a {prefs.Days}-day plan with {planStopsData.Count} stops!"
+                    message = $"Created a {prefs.Days}-day plan with {planStopsData.Count} stops!",
+                    warnings = schedule.Warnings
                 });
             }
 
@@ -173,7 +177,8 @@ public class BuilderController : ControllerBase
             {
                 plan,
                 stops = stopsWithPlaces,
-                message = $"Created a {prefs.Days}-day plan with {planStopsData.Count} stops!"
+                message = $"Created a {prefs.Days}-day plan with {planStopsData.Count} stops!",
+                warnings = schedule.Warnings
             });
 
         }
@@ -279,11 +284,17 @@ public class BuilderController : ControllerBase
     /// Fallback legacy: query categórica simple (comportamiento previo a Fase 2 RAG).
     /// Se usa cuando el catálogo no está reindexado o el embedding provider falla.
     /// </summary>
+    // Hard cap del fallback keyword: aunque la city tenga miles de places, BuildPlanSchedule
+    // consume ~5-15 stops en total. 500 es buffer generoso para el filter categoría
+    // posterior sin tirar toda la city a memoria (audit SRE 2026-04-22).
+    private const int FallbackKeywordHardCap = 500;
+
     private async Task<List<Place>> FallbackKeywordFilterAsync(
         string city, ExtractedPreferences prefs, CancellationToken ct)
     {
         var matching = await _db.Places.AsNoTracking()
             .Where(p => p.Status == "published" && p.City == city)
+            .Take(FallbackKeywordHardCap)
             .ToListAsync(ct);
         return FilterPlaces(matching, prefs);
     }
@@ -317,9 +328,21 @@ public class BuilderController : ControllerBase
         public string mode { get; set; } = "drive";
     }
 
-    private List<ScheduledStopDto> BuildPlanSchedule(List<Place> filteredPlaces, ExtractedPreferences prefs)
+    /// <summary>
+    /// Resultado de <see cref="BuildPlanSchedule"/>: stops + metadata de qué reglas
+    /// tuvimos que relajar. Los warnings se propagan al response para que el cliente
+    /// pueda avisar al usuario ("este plan se construyó con catálogo limitado", etc).
+    /// </summary>
+    private sealed class ScheduleResult
     {
-        var stops = new List<ScheduledStopDto>();
+        public List<ScheduledStopDto> Stops { get; } = new();
+        public List<string> Warnings { get; } = new();
+    }
+
+    private ScheduleResult BuildPlanSchedule(List<Place> filteredPlaces, ExtractedPreferences prefs)
+    {
+        var result = new ScheduleResult();
+        var stops = result.Stops;
         var usedPlaceIds = new HashSet<Guid>();
 
         var shuffled = filteredPlaces.OrderBy(x => Random.Shared.Next()).ToList();
@@ -363,6 +386,8 @@ public class BuilderController : ControllerBase
                             "Builder: schedule soft fallback day={Day} slot={Slot} strictCount=0 relaxedPick={Place}",
                             day, slot.TimeBlock, relaxed.Name);
                         place = relaxed;
+                        if (!result.Warnings.Contains("catalog_relaxed_fallback"))
+                            result.Warnings.Add("catalog_relaxed_fallback");
                     }
                 }
                 else
@@ -409,7 +434,7 @@ public class BuilderController : ControllerBase
             }
         }
 
-        return stops;
+        return result;
     }
 
     // Matrix categoría × timeBlock: qué categorías tienen sentido en qué slot del día.
@@ -451,9 +476,7 @@ public class BuilderController : ControllerBase
         if (strict)
         {
             // Regla 1: family/family-kids sin nightlife.
-            var isFamilyContext = string.Equals(prefs.GroupType, "family", StringComparison.OrdinalIgnoreCase)
-                               || string.Equals(prefs.GroupType, "family-kids", StringComparison.OrdinalIgnoreCase);
-            if (isFamilyContext &&
+            if (GroupTypePolicy.IsFamilyContext(prefs.GroupType) &&
                 string.Equals(place.Category, "nightlife", StringComparison.OrdinalIgnoreCase))
                 return false;
 

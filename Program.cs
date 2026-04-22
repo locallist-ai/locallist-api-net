@@ -70,7 +70,14 @@ if (!string.IsNullOrEmpty(connectionUrl))
     var dataSource = dataSourceBuilder.Build();
 
     builder.Services.AddDbContext<LocalListDbContext>(options =>
-        options.UseNpgsql(dataSource, npg => npg.UseVector()));
+        options.UseNpgsql(dataSource, npg =>
+        {
+            npg.UseVector();
+            // Cap explícito del tiempo que una query espera a DB. Sin esto, una DB colgada
+            // puede bloquear request threads hasta el timeout default (30s). 10s es el
+            // sweet-spot entre tolerancia a latencia transitoria y failure-fast.
+            npg.CommandTimeout(10);
+        }));
 }
 
 // Add DI Services
