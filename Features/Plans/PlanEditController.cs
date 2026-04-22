@@ -81,41 +81,6 @@ public class PlanEditController : ControllerBase
             .ThenInclude(s => s.Place)
             .FirstAsync(p => p.Id == id, ct);
 
-        var days = updatedPlan.Stops
-            .OrderBy(s => s.DayNumber)
-            .ThenBy(s => s.OrderIndex)
-            .GroupBy(s => s.DayNumber)
-            .Select(g => new
-            {
-                dayNumber = g.Key,
-                stops = g.Select(s => new
-                {
-                    id = s.Id,
-                    orderIndex = s.OrderIndex,
-                    timeBlock = s.TimeBlock,
-                    suggestedArrival = s.SuggestedArrival,
-                    suggestedDurationMin = s.SuggestedDurationMin,
-                    travelFromPrevious = s.TravelFromPrevious,
-                    place = s.Place
-                })
-            });
-
-        return Ok(new
-        {
-            updatedPlan.Id,
-            updatedPlan.Name,
-            updatedPlan.City,
-            updatedPlan.Type,
-            updatedPlan.Description,
-            updatedPlan.ImageUrl,
-            updatedPlan.DurationDays,
-            updatedPlan.TripContext,
-            updatedPlan.IsPublic,
-            updatedPlan.IsShowcase,
-            updatedPlan.CreatedById,
-            updatedPlan.CreatedAt,
-            updatedPlan.UpdatedAt,
-            days
-        });
+        return Ok(PlanDetailDto.FromEntity(updatedPlan));
     }
 }

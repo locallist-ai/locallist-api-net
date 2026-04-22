@@ -1,6 +1,102 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
+using LocalList.API.NET.Features.Admin.Places;
+using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Admin.Plans;
+
+public record AdminPlanDto(
+    Guid Id,
+    string Name,
+    string City,
+    string Type,
+    string? Description,
+    string? ImageUrl,
+    int DurationDays,
+    JsonDocument? TripContext,
+    bool IsPublic,
+    bool IsShowcase,
+    string Source,
+    Guid? CreatedById,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt
+)
+{
+    public static AdminPlanDto FromEntity(Plan p) => new(
+        p.Id, p.Name, p.City, p.Type, p.Description, p.ImageUrl,
+        p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+        p.Source, p.CreatedById, p.CreatedAt, p.UpdatedAt
+    );
+}
+
+public record AdminPlanStopResponseDto(
+    Guid Id,
+    Guid PlaceId,
+    int DayNumber,
+    int OrderIndex,
+    string? TimeBlock,
+    TimeSpan? SuggestedArrival,
+    int? SuggestedDurationMin,
+    JsonDocument? TravelFromPrevious,
+    AdminPlaceDto? Place
+)
+{
+    public static AdminPlanStopResponseDto FromEntity(PlanStop s) => new(
+        s.Id, s.PlaceId, s.DayNumber, s.OrderIndex,
+        s.TimeBlock, s.SuggestedArrival, s.SuggestedDurationMin,
+        s.TravelFromPrevious,
+        s.Place is null ? null : AdminPlaceDto.FromEntity(s.Place)
+    );
+}
+
+public record AdminPlanDayDto(int DayNumber, List<AdminPlanStopResponseDto> Stops);
+
+public record AdminPlanDetailDto(
+    Guid Id,
+    string Name,
+    string City,
+    string Type,
+    string? Description,
+    string? ImageUrl,
+    int DurationDays,
+    JsonDocument? TripContext,
+    bool IsPublic,
+    bool IsShowcase,
+    string Source,
+    Guid? CreatedById,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    List<AdminPlanDayDto> Days
+)
+{
+    public static AdminPlanDetailDto FromEntity(Plan plan)
+    {
+        var days = plan.Stops
+            .OrderBy(s => s.DayNumber)
+            .ThenBy(s => s.OrderIndex)
+            .GroupBy(s => s.DayNumber)
+            .Select(g => new AdminPlanDayDto(
+                g.Key,
+                g.Select(AdminPlanStopResponseDto.FromEntity).ToList()
+            ))
+            .ToList();
+        return new AdminPlanDetailDto(
+            plan.Id, plan.Name, plan.City, plan.Type, plan.Description, plan.ImageUrl,
+            plan.DurationDays, plan.TripContext, plan.IsPublic, plan.IsShowcase,
+            plan.Source, plan.CreatedById, plan.CreatedAt, plan.UpdatedAt, days
+        );
+    }
+}
+
+public record AdminPlansListResponse(List<AdminPlanDto> Plans, int Total);
+
+public record AdminPlanCreatedDto(Guid Id, string Name);
+
+public record AdminBulkCreateResultDto(
+    int Created,
+    int TotalStops,
+    List<AdminPlanCreatedDto> Plans
+);
 
 public class CreatePlanRequest
 {

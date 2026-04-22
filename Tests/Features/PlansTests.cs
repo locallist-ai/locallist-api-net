@@ -108,6 +108,91 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    [Fact]
+    public async Task GetPlans_ResponseShape_MatchesPlanDto()
+    {
+        var db = fixture.GetDbContext();
+        db.Plans.Add(MakePlan("Shape Check Showcase", isShowcase: true));
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync("/plans");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var plans = body.GetProperty("plans").EnumerateArray();
+        foreach (var plan in plans)
+        {
+            // Propiedades requeridas por PlanDto (DTO público).
+            Assert.True(plan.TryGetProperty("id", out _));
+            Assert.True(plan.TryGetProperty("name", out _));
+            Assert.True(plan.TryGetProperty("city", out _));
+            Assert.True(plan.TryGetProperty("type", out _));
+            Assert.True(plan.TryGetProperty("durationDays", out _));
+            Assert.True(plan.TryGetProperty("isPublic", out _));
+            Assert.True(plan.TryGetProperty("isShowcase", out _));
+            Assert.True(plan.TryGetProperty("createdAt", out _));
+            // Navegaciones EF no deben aparecer en el JSON.
+            Assert.False(plan.TryGetProperty("stops", out _));
+            Assert.False(plan.TryGetProperty("createdBy", out _));
+            Assert.False(plan.TryGetProperty("followSessions", out _));
+        }
+    }
+
+    [Fact]
+    public async Task GetPlan_ResponseShape_StopsHavePublicPlaceDto()
+    {
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = "Shape Stop Place",
+            Category = "Food",
+            WhyThisPlace = "Amazing",
+            Status = "published",
+            // Campos de curación internos que NUNCA deben salir en el DTO público.
+            RejectionReason = "internal",
+            AiVibeScore = 88,
+            Flags = new List<string> { "flag-internal" }
+        };
+        var plan = MakePlan("Plan Shape With Stops");
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        db.PlanStops.Add(new PlanStop
+        {
+            Id = Guid.NewGuid(),
+            PlanId = plan.Id,
+            PlaceId = place.Id,
+            DayNumber = 1,
+            OrderIndex = 0,
+            TimeBlock = "morning"
+        });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync($"/plans/{plan.Id}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var day = body.GetProperty("days").EnumerateArray().First();
+        var stop = day.GetProperty("stops").EnumerateArray().First();
+
+        Assert.True(stop.TryGetProperty("id", out _));
+        Assert.True(stop.TryGetProperty("placeId", out _));
+        Assert.True(stop.TryGetProperty("dayNumber", out _));
+        Assert.True(stop.TryGetProperty("orderIndex", out _));
+
+        var stopPlace = stop.GetProperty("place");
+        Assert.True(stopPlace.TryGetProperty("name", out _));
+        Assert.True(stopPlace.TryGetProperty("whyThisPlace", out _));
+        // Curación interna NO debe aparecer en el DTO público de Place.
+        Assert.False(stopPlace.TryGetProperty("rejectionReason", out _));
+        Assert.False(stopPlace.TryGetProperty("aiVibeScore", out _));
+        Assert.False(stopPlace.TryGetProperty("submittedById", out _));
+        Assert.False(stopPlace.TryGetProperty("reviewedById", out _));
+        Assert.False(stopPlace.TryGetProperty("flags", out _));
+    }
+
     private static Plan MakePlan(
         string name,
         bool isPublic = true,

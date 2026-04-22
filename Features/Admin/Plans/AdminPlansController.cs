@@ -55,7 +55,10 @@ public class AdminPlansController : ControllerBase
             .Skip(offset).Take(limit)
             .ToListAsync(ct);
 
-        return Ok(new { plans, total });
+        return Ok(new AdminPlansListResponse(
+            plans.Select(AdminPlanDto.FromEntity).ToList(),
+            total
+        ));
     }
 
     [HttpPost]
@@ -131,7 +134,12 @@ public class AdminPlansController : ControllerBase
         _logger.LogInformation("Admin created plan {PlanId} ({Name}) with {StopCount} stops",
             plan.Id, plan.Name, stops.Count);
 
-        return CreatedAtAction(nameof(GetPlans), null, new { plan, stops = stops.Count });
+        var created = await _db.Plans.AsNoTracking()
+            .Include(p => p.Stops)
+            .ThenInclude(s => s.Place)
+            .FirstAsync(p => p.Id == plan.Id, ct);
+
+        return CreatedAtAction(nameof(GetPlans), null, AdminPlanDetailDto.FromEntity(created));
     }
 
     [HttpPost("bulk")]
@@ -214,12 +222,11 @@ public class AdminPlansController : ControllerBase
         _logger.LogInformation("Bulk created {PlanCount} plans with {StopCount} total stops",
             plansToAdd.Count, stopsToAdd.Count);
 
-        return Ok(new
-        {
-            created = plansToAdd.Count,
-            totalStops = stopsToAdd.Count,
-            plans = plansToAdd.Select(p => new { p.Id, p.Name })
-        });
+        return Ok(new AdminBulkCreateResultDto(
+            plansToAdd.Count,
+            stopsToAdd.Count,
+            plansToAdd.Select(p => new AdminPlanCreatedDto(p.Id, p.Name)).ToList()
+        ));
     }
 
     [HttpGet("{id}")]
@@ -233,40 +240,7 @@ public class AdminPlansController : ControllerBase
         if (plan == null)
             return NotFound(new { error = "Plan not found" });
 
-        var days = plan.Stops
-            .OrderBy(s => s.DayNumber)
-            .ThenBy(s => s.OrderIndex)
-            .GroupBy(s => s.DayNumber)
-            .Select(g => new
-            {
-                dayNumber = g.Key,
-                stops = g.Select(s => new
-                {
-                    id = s.Id,
-                    orderIndex = s.OrderIndex,
-                    timeBlock = s.TimeBlock,
-                    suggestedArrival = s.SuggestedArrival,
-                    suggestedDurationMin = s.SuggestedDurationMin,
-                    place = s.Place
-                })
-            });
-
-        return Ok(new
-        {
-            plan.Id,
-            plan.Name,
-            plan.City,
-            plan.Type,
-            plan.Description,
-            plan.ImageUrl,
-            plan.DurationDays,
-            plan.IsPublic,
-            plan.IsShowcase,
-            plan.CreatedById,
-            plan.CreatedAt,
-            plan.UpdatedAt,
-            days
-        });
+        return Ok(AdminPlanDetailDto.FromEntity(plan));
     }
 
     [HttpPatch("{id}")]
@@ -290,21 +264,7 @@ public class AdminPlansController : ControllerBase
 
         _logger.LogInformation("Admin updated plan {PlanId}", plan.Id);
 
-        return Ok(new
-        {
-            plan.Id,
-            plan.Name,
-            plan.City,
-            plan.Type,
-            plan.Description,
-            plan.ImageUrl,
-            plan.DurationDays,
-            plan.IsPublic,
-            plan.IsShowcase,
-            plan.CreatedById,
-            plan.CreatedAt,
-            plan.UpdatedAt
-        });
+        return Ok(AdminPlanDto.FromEntity(plan));
     }
 
     [HttpPut("{id}/stops")]
@@ -398,40 +358,7 @@ public class AdminPlansController : ControllerBase
             .ThenInclude(s => s.Place)
             .FirstAsync(p => p.Id == id, ct);
 
-        var days = updatedPlan.Stops
-            .OrderBy(s => s.DayNumber)
-            .ThenBy(s => s.OrderIndex)
-            .GroupBy(s => s.DayNumber)
-            .Select(g => new
-            {
-                dayNumber = g.Key,
-                stops = g.Select(s => new
-                {
-                    id = s.Id,
-                    orderIndex = s.OrderIndex,
-                    timeBlock = s.TimeBlock,
-                    suggestedArrival = s.SuggestedArrival,
-                    suggestedDurationMin = s.SuggestedDurationMin,
-                    place = s.Place
-                })
-            });
-
-        return Ok(new
-        {
-            updatedPlan.Id,
-            updatedPlan.Name,
-            updatedPlan.City,
-            updatedPlan.Type,
-            updatedPlan.Description,
-            updatedPlan.ImageUrl,
-            updatedPlan.DurationDays,
-            updatedPlan.IsPublic,
-            updatedPlan.IsShowcase,
-            updatedPlan.CreatedById,
-            updatedPlan.CreatedAt,
-            updatedPlan.UpdatedAt,
-            days
-        });
+        return Ok(AdminPlanDetailDto.FromEntity(updatedPlan));
     }
 
     [HttpDelete("{id}")]
