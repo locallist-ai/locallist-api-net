@@ -65,6 +65,10 @@ public class AiProviderService
                 .GetProperty("parts")[0]
                 .GetProperty("text").GetString() ?? "{}";
 
+            _logger.LogInformation(
+                "Gemini raw extracted text: {Preview}",
+                textResult.Length > 500 ? textResult[..500] + "…" : textResult);
+
             return ParseAiResponse(textResult);
         }
         catch (HttpRequestException ex)
@@ -125,6 +129,15 @@ Return this exact JSON shape:
             if (result.GroupType != null && !AllowedGroupTypes.Contains(result.GroupType.ToLower()))
                 result.GroupType = "couple";
 
+            _logger.LogInformation(
+                "Prefs source=gemini days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} planName='{Name}' maxStops={Max}",
+                result.Days,
+                string.Join(",", result.Categories ?? new List<string>()),
+                string.Join(",", result.Vibes ?? new List<string>()),
+                result.GroupType,
+                result.PlanName,
+                result.MaxStopsPerDay);
+
             return result;
         }
         catch (JsonException ex)
@@ -144,7 +157,7 @@ Return this exact JSON shape:
         if (lower.Contains("coffee") || lower.Contains("cafe") || lower.Contains("breakfast")) cats.Add("coffee");
         if (cats.Count == 0) cats.AddRange(new[] { "food", "outdoors", "culture" });
 
-        return new ExtractedPreferences
+        var result = new ExtractedPreferences
         {
             Days = context?.Days ?? (lower.Contains("weekend") ? 2 : 1),
             Categories = cats,
@@ -153,5 +166,16 @@ Return this exact JSON shape:
             PlanName = message.Length > 60 ? message.Substring(0, 60) : message,
             MaxStopsPerDay = context?.GroupType == "family-kids" ? 3 : 5
         };
+
+        _logger.LogInformation(
+            "Prefs source=keyword_fallback days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} planName='{Name}' maxStops={Max}",
+            result.Days,
+            string.Join(",", result.Categories),
+            string.Join(",", result.Vibes ?? new List<string>()),
+            result.GroupType,
+            result.PlanName,
+            result.MaxStopsPerDay);
+
+        return result;
     }
 }
