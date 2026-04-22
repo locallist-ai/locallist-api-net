@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Features.Builder.Shared;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -141,6 +142,12 @@ Return JSON only, no markdown. EXACT shape:
             var result = JsonSerializer.Deserialize<ExtractedPreferences>(cleaned, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                          ?? new ExtractedPreferences();
 
+            // WARN si Gemini se salió del rango — señal de prompt-injection o modelo alucinando.
+            if (result.Days < 1 || result.Days > 7)
+                _logger.LogWarning("Gemini Days out of range: {Days} (clamping to 1-7)", result.Days);
+            if (result.MaxStopsPerDay < 3 || result.MaxStopsPerDay > 6)
+                _logger.LogWarning("Gemini MaxStopsPerDay out of range: {Max} (clamping to 3-6)", result.MaxStopsPerDay);
+
             result.Days = Math.Clamp(result.Days, 1, 7);
             result.MaxStopsPerDay = Math.Clamp(result.MaxStopsPerDay, 3, 6);
 
@@ -151,14 +158,10 @@ Return JSON only, no markdown. EXACT shape:
             if (result.GroupType != null && !AllowedGroupTypes.Contains(result.GroupType.ToLower()))
                 result.GroupType = "couple";
 
-            _logger.LogInformation(
-                "Prefs source=gemini days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} planName='{Name}' maxStops={Max}",
-                result.Days,
-                string.Join(",", result.Categories ?? new List<string>()),
-                string.Join(",", result.Vibes ?? new List<string>()),
-                result.GroupType,
-                result.PlanName,
-                result.MaxStopsPerDay);
+            // Dedup post-audit: BuilderController.GeneratePlan ya loguea el echo de prefs
+            // a nivel Info ("Builder: prefs days=..."), así que aquí emitimos solo el tag
+            // de source para el transcript de observabilidad.
+            _logger.LogInformation("Prefs source=gemini (parsed OK)");
 
             return result;
         }
@@ -210,7 +213,7 @@ Return JSON only, no markdown. EXACT shape:
 
         // family-kids: excluir nightlife aunque haya aparecido por keyword en el mensaje.
         var groupType = context?.GroupType ?? "couple";
-        if (groupType is "family" or "family-kids")
+        if (GroupTypePolicy.IsFamilyContext(groupType))
             cats.RemoveAll(c => string.Equals(c, "nightlife", StringComparison.OrdinalIgnoreCase));
 
         // Vibes: merge contextual vibes + preferences (los preferences funcionan como vibes también).
@@ -227,17 +230,11 @@ Return JSON only, no markdown. EXACT shape:
             Vibes = vibes,
             GroupType = groupType,
             PlanName = message.Length > 60 ? message.Substring(0, 60) : message,
-            MaxStopsPerDay = groupType is "family" or "family-kids" ? 3 : 5
+            MaxStopsPerDay = GroupTypePolicy.IsFamilyContext(groupType) ? 3 : 5
         };
 
-        _logger.LogInformation(
-            "Prefs source=keyword_fallback days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} planName='{Name}' maxStops={Max}",
-            result.Days,
-            string.Join(",", result.Categories),
-            string.Join(",", result.Vibes ?? new List<string>()),
-            result.GroupType,
-            result.PlanName,
-            result.MaxStopsPerDay);
+        // Dedup post-audit: BuilderController.GeneratePlan ya loguea el echo de prefs.
+        _logger.LogInformation("Prefs source=keyword_fallback");
 
         return result;
     }
