@@ -49,27 +49,7 @@ public class PlansController : ControllerBase
 
         _logger.LogInformation("User {UserId} created plan {PlanId} ({Name})", userId, plan.Id, plan.Name);
 
-        return Created($"/plans/{plan.Id}", new
-        {
-            plan.Id,
-            plan.Name,
-            plan.City,
-            plan.Type,
-            plan.Description,
-            plan.ImageUrl,
-            plan.DurationDays,
-            plan.TripContext,
-            plan.IsPublic,
-            plan.IsShowcase,
-            plan.CreatedById,
-            plan.CreatedAt,
-            plan.UpdatedAt,
-            days = Enumerable.Range(1, plan.DurationDays).Select(d => new
-            {
-                dayNumber = d,
-                stops = Array.Empty<object>()
-            })
-        });
+        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan));
     }
 
     [HttpGet("mine")]
@@ -86,7 +66,10 @@ public class PlansController : ControllerBase
             .Take(50)
             .ToListAsync(ct);
 
-        return Ok(new { plans, total = plans.Count });
+        return Ok(new PlansListResponse(
+            plans.Select(PlanDto.FromEntity).ToList(),
+            plans.Count
+        ));
     }
 
     [HttpGet]
@@ -122,11 +105,10 @@ public class PlansController : ControllerBase
             .Take(limit)
             .ToListAsync(ct);
 
-        return Ok(new
-        {
-            plans,
+        return Ok(new PlansListResponse(
+            plans.Select(PlanDto.FromEntity).ToList(),
             total
-        });
+        ));
     }
 
     [HttpGet("{id}")]
@@ -149,42 +131,6 @@ public class PlansController : ControllerBase
             return NotFound(new { error = "Plan not found" });
         }
 
-        // Group stops by day to match the legacy format
-        var days = plan.Stops
-            .OrderBy(s => s.DayNumber)
-            .ThenBy(s => s.OrderIndex)
-            .GroupBy(s => s.DayNumber)
-            .Select(g => new
-            {
-                dayNumber = g.Key,
-                stops = g.Select(s => new
-                {
-                    id = s.Id,
-                    orderIndex = s.OrderIndex,
-                    timeBlock = s.TimeBlock,
-                    suggestedArrival = s.SuggestedArrival,
-                    suggestedDurationMin = s.SuggestedDurationMin,
-                    travelFromPrevious = s.TravelFromPrevious,
-                    place = s.Place
-                })
-            });
-
-        return Ok(new
-        {
-            plan.Id,
-            plan.Name,
-            plan.City,
-            plan.Type,
-            plan.Description,
-            plan.ImageUrl,
-            plan.DurationDays,
-            plan.TripContext,
-            plan.IsPublic,
-            plan.IsShowcase,
-            plan.CreatedById,
-            plan.CreatedAt,
-            plan.UpdatedAt,
-            days
-        });
+        return Ok(PlanDetailDto.FromEntity(plan));
     }
 }

@@ -115,6 +115,57 @@ public class PlanEditTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Contains("Places not found", err.GetString() ?? "");
     }
 
+    [Fact]
+    public async Task UpdateStops_Owner_ReturnsPlanDetailDtoShape()
+    {
+        var (ownerId, ownerFbUid) = await CreateUser("planedit-shape");
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Shape Place {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "Seeded shape",
+            Status = "published",
+            RejectionReason = "hidden-internal",
+            AiVibeScore = 99
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Plan Shape Edit",
+            City = "Miami",
+            Type = "user",
+            IsPublic = false,
+            CreatedById = ownerId,
+            DurationDays = 1
+        };
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
+        var payload = new
+        {
+            stops = new[]
+            {
+                new { placeId = place.Id, dayNumber = 1, orderIndex = 0, timeBlock = "morning", suggestedDurationMin = 60 }
+            }
+        };
+
+        var response = await client.PutAsJsonAsync($"/plans/{plan.Id}/stops", payload);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.TryGetProperty("id", out _));
+        Assert.True(body.TryGetProperty("days", out var days));
+        var stop = days.EnumerateArray().First().GetProperty("stops").EnumerateArray().First();
+        var stopPlace = stop.GetProperty("place");
+        Assert.False(stopPlace.TryGetProperty("rejectionReason", out _));
+        Assert.False(stopPlace.TryGetProperty("aiVibeScore", out _));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private async Task<(Guid userId, string firebaseUid)> CreateUser(string prefix)
