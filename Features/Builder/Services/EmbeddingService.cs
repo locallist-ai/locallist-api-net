@@ -11,7 +11,10 @@ public class EmbeddingService
     private readonly ILogger<EmbeddingService> _logger;
 
     public const int Dimensions = 768;
-    private const string DefaultModel = "text-embedding-004";
+    // text-embedding-004 se retiró 2026-01-14. gemini-embedding-001 es el reemplazo vigente.
+    // Por defecto devuelve 3072 dims (Matryoshka); truncamos a 768 vía outputDimensionality
+    // para preservar la columna vector(768) + índice HNSW ya existente.
+    private const string DefaultModel = "gemini-embedding-001";
     private const int BatchMax = 100;
 
     public EmbeddingService(HttpClient httpClient, IConfiguration config, ILogger<EmbeddingService> logger)
@@ -59,7 +62,8 @@ public class EmbeddingService
             requests = texts.Select(t => new
             {
                 model = $"models/{model}",
-                content = new { parts = new[] { new { text = Sanitize(t) } } }
+                content = new { parts = new[] { new { text = Sanitize(t) } } },
+                outputDimensionality = Dimensions
             }).ToArray()
         };
 
@@ -108,6 +112,16 @@ public class EmbeddingService
                 {
                     _logger.LogError("Unexpected embedding dimensions: got {Got}, expected {Expected}", arr.Length, Dimensions);
                     continue;
+                }
+                // gemini-embedding-001 devuelve vectores sin normalizar cuando outputDimensionality < 3072
+                // (Matryoshka truncation). Renormalizamos a L2=1 para que CosineDistance de pgvector se
+                // comporte como similitud coseno pura.
+                var norm = 0f;
+                for (var k = 0; k < arr.Length; k++) norm += arr[k] * arr[k];
+                norm = MathF.Sqrt(norm);
+                if (norm > 0f)
+                {
+                    for (var k = 0; k < arr.Length; k++) arr[k] /= norm;
                 }
                 vectors.Add(new Vector(arr));
             }
