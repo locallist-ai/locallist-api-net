@@ -17,15 +17,30 @@ public class GoogleIdTokenValidator : IGoogleIdTokenValidator
     private const string JwksUri = "https://www.googleapis.com/oauth2/v3/certs";
 
     private readonly ConfigurationManager<OpenIdConnectConfiguration> _cfg;
-    private readonly string _audience;
+    private readonly string[] _audiences;
     private readonly ILogger<GoogleIdTokenValidator> _logger;
 
     public GoogleIdTokenValidator(IConfiguration configuration, ILogger<GoogleIdTokenValidator> logger)
     {
-        _audience = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID")
-                    ?? configuration["Google:ClientId"]
-                    ?? throw new InvalidOperationException(
-                        "GOOGLE_CLIENT_ID is not configured.");
+        // Google emite ID tokens con `aud` = client ID de la plataforma que inició el flow
+        // (Web vs iOS vs Android). expo-auth-session en iOS usa el iOS client ID, en Android el
+        // Android, y en web el Web. Aceptamos los tres para no romper según plataforma.
+        var webClientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID")
+                          ?? configuration["Google:ClientId"]
+                          ?? throw new InvalidOperationException(
+                              "GOOGLE_CLIENT_ID is not configured.");
+
+        var list = new List<string> { webClientId };
+
+        var iosClientId = Environment.GetEnvironmentVariable("GOOGLE_IOS_CLIENT_ID")
+                          ?? configuration["Google:IosClientId"];
+        if (!string.IsNullOrWhiteSpace(iosClientId)) list.Add(iosClientId);
+
+        var androidClientId = Environment.GetEnvironmentVariable("GOOGLE_ANDROID_CLIENT_ID")
+                              ?? configuration["Google:AndroidClientId"];
+        if (!string.IsNullOrWhiteSpace(androidClientId)) list.Add(androidClientId);
+
+        _audiences = list.ToArray();
 
         _cfg = new ConfigurationManager<OpenIdConnectConfiguration>(
             JwksUri,
@@ -45,7 +60,7 @@ public class GoogleIdTokenValidator : IGoogleIdTokenValidator
                 ValidateIssuer = true,
                 ValidIssuers = ValidIssuers,
                 ValidateAudience = true,
-                ValidAudience = _audience,
+                ValidAudiences = _audiences,
                 ValidateLifetime = true,
                 ValidateIssuerSigningKey = true,
                 IssuerSigningKeys = config.SigningKeys
