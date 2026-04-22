@@ -277,6 +277,130 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
             $"Se esperaba 'wellness' o 'coffee' en description, llegó: '{description}'");
     }
 
+    // ── Parte C: family hard filters + matrix timeBlock ─────────────────────
+
+    [Fact]
+    public async Task Chat_GroupTypeFamily_PlanHasZeroNightlife()
+    {
+        // Mezcla: 3 places family-suitable en categorías OK para family + 2 nightlife adults-only.
+        // Con groupType=family-kids, el scheduler debe excluir los nightlife por matrix
+        // categoría×timeBlock + el rerank los pone al fondo por ScoreSuitableFor=0.
+        await SeedPlace("FamilyCoffee", "coffee", "morning", new List<string> { "family", "kids" });
+        await SeedPlace("FamilyCulture", "culture", "afternoon", new List<string> { "family" });
+        await SeedPlace("FamilyFood", "food", "lunch", new List<string> { "family", "all-ages" });
+        await SeedPlace("Bar1", "nightlife", "evening", new List<string> { "adults-only" });
+        await SeedPlace("Bar2", "nightlife", "evening", new List<string> { "21+" });
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food", "coffee", "culture" },
+            vibes = new string[] { },
+            groupType = "family-kids",
+            planName = "Family Miami Day",
+            maxStopsPerDay = 4,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "family trip with kids",
+            tripContext = new { city = Miami, groupType = "family-kids", days = 1 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var stops = body.GetProperty("stops").EnumerateArray().ToList();
+        Assert.NotEmpty(stops);
+        foreach (var s in stops)
+        {
+            var category = s.GetProperty("place").GetProperty("category").GetString() ?? "";
+            Assert.False(
+                string.Equals(category, "nightlife", StringComparison.OrdinalIgnoreCase),
+                $"Se esperaba 0 stops de nightlife para family-kids, apareció {category}");
+        }
+    }
+
+    [Fact]
+    public async Task Chat_GroupTypeFamily_TooFewCandidates_SoftFallback_Returns200()
+    {
+        // Catálogo SOLO con adults-only nightlife. Family request no tiene opciones estrictas,
+        // soft fallback debería al menos devolver 200 con los stops disponibles (o vacío) sin crash.
+        await SeedPlace("Bar1", "nightlife", "evening", new List<string> { "adults-only" });
+        await SeedPlace("Bar2", "nightlife", "evening", new List<string> { "21+" });
+        await SeedPlace("Bar3", "nightlife", "evening", new List<string> { "adults-only" });
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food", "coffee" },
+            vibes = new string[] { },
+            groupType = "family-kids",
+            planName = "Family Impossible",
+            maxStopsPerDay = 3,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "family",
+            tripContext = new { city = Miami, groupType = "family-kids", days = 1 },
+        });
+
+        // El pipeline no debe crashear aunque no haya candidatos family. 200 OK con stops=[]
+        // es aceptable, o stops con warning de soft fallback.
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.TryGetProperty("plan", out _));
+    }
+
+    [Fact]
+    public async Task Schedule_NightlifeWithAnyBestTime_DoesNotAppearInLunchSlot()
+    {
+        // nightlife con BestTime=any colaría en lunch por la regla BestTime legacy.
+        // La matrix categoría×timeBlock filtra: lunch solo admite food/coffee.
+        await SeedPlace("CoffeeA", "coffee", "any");
+        await SeedPlace("FoodA", "food", "any");
+        await SeedPlace("LatinBar", "nightlife", "any");
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food", "coffee", "nightlife" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "Test",
+            maxStopsPerDay = 5,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "a bit of everything",
+            tripContext = new { city = Miami, groupType = "couple", days = 1 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        var stops = body.GetProperty("stops").EnumerateArray().ToList();
+        var lunchStops = stops.Where(s =>
+            string.Equals(s.GetProperty("timeBlock").GetString(), "lunch", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Si hubo un lunch slot, nightlife NO debe aparecer allí.
+        foreach (var ls in lunchStops)
+        {
+            var cat = ls.GetProperty("place").GetProperty("category").GetString() ?? "";
+            Assert.False(
+                string.Equals(cat, "nightlife", StringComparison.OrdinalIgnoreCase),
+                $"nightlife no debería aparecer en lunch, llegó {cat}");
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string embeddedText)
@@ -300,6 +424,37 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         {
             Content = new StringContent(JsonSerializer.Serialize(envelope), Encoding.UTF8, "application/json")
         };
+    }
+
+    /// <summary>
+    /// Inserta un Place con campos customizables — útil para probar Parte C del Builder
+    /// (SuitableFor, Category, BestTime específicos por caso).
+    /// </summary>
+    private async Task<Guid> SeedPlace(
+        string name,
+        string category = "Food",
+        string bestTime = "any",
+        List<string>? suitableFor = null)
+    {
+        var db = fixture.GetDbContext();
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var id = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = id,
+            Name = $"{name}-{tag}",
+            Category = category,
+            City = Miami,
+            WhyThisPlace = $"Seed for {name}",
+            Status = "published",
+            BestTime = bestTime,
+            Latitude = 25.77m,
+            Longitude = -80.19m,
+            GooglePlaceId = $"gpid-{tag}",
+            SuitableFor = suitableFor,
+        });
+        await db.SaveChangesAsync();
+        return id;
     }
 
     private async Task<List<Guid>> SeedPublishedMiamiPlaces(int count)

@@ -343,9 +343,34 @@ public class BuilderController : ControllerBase
             {
                 var slot = daySlots[i];
 
-                var place = shuffled.FirstOrDefault(p =>
+                // Primera pasada: filtro fuerte (BestTime ∩ matrix categoría×timeBlock ∩ exclusión family-nightlife).
+                var strictEligible = shuffled.Where(p =>
                     !usedPlaceIds.Contains(p.Id) &&
-                    IsGoodTimeMatch(p, slot.TimeBlock));
+                    IsGoodTimeMatch(p, slot.TimeBlock, prefs, strict: true)).ToList();
+
+                // Soft fallback: si el filtro estricto dejó 0 elegibles, caemos a sólo BestTime.
+                // Preservamos el logging para ver cuándo pasa en prod.
+                var eligibleCount = strictEligible.Count;
+                var place = strictEligible.FirstOrDefault();
+                if (place == null)
+                {
+                    var relaxed = shuffled.FirstOrDefault(p =>
+                        !usedPlaceIds.Contains(p.Id) &&
+                        IsGoodTimeMatch(p, slot.TimeBlock, prefs, strict: false));
+                    if (relaxed != null)
+                    {
+                        _logger.LogWarning(
+                            "Builder: schedule soft fallback day={Day} slot={Slot} strictCount=0 relaxedPick={Place}",
+                            day, slot.TimeBlock, relaxed.Name);
+                        place = relaxed;
+                    }
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Builder: schedule day={Day} slot={Slot} strictEligible={Count} pick={Place}",
+                        day, slot.TimeBlock, eligibleCount, place.Name);
+                }
 
                 if (place == null) continue;
 
@@ -387,23 +412,64 @@ public class BuilderController : ControllerBase
         return stops;
     }
 
-    private bool IsGoodTimeMatch(Place place, string timeBlock)
+    // Matrix categoría × timeBlock: qué categorías tienen sentido en qué slot del día.
+    // morning: desayunos y actividades que abren temprano.
+    // lunch: comidas del mediodía (principalmente food, algún café que sirva almuerzo).
+    // afternoon: actividades al aire libre, cultura, cafés.
+    // dinner: cenas. 'wellness' sale porque a esas horas raramente tiene sentido.
+    // evening: nightlife, cenas tardías, música/cultura nocturna.
+    private static readonly Dictionary<string, HashSet<string>> TimeBlockCategories = new(StringComparer.OrdinalIgnoreCase)
     {
-        if (string.IsNullOrEmpty(place.BestTime) || place.BestTime.ToLower() == "any") return true;
+        ["morning"] = new(StringComparer.OrdinalIgnoreCase) { "coffee", "wellness", "outdoors", "culture", "food" },
+        ["lunch"] = new(StringComparer.OrdinalIgnoreCase) { "food", "coffee" },
+        ["afternoon"] = new(StringComparer.OrdinalIgnoreCase) { "coffee", "outdoors", "culture", "food" },
+        ["dinner"] = new(StringComparer.OrdinalIgnoreCase) { "food" },
+        ["evening"] = new(StringComparer.OrdinalIgnoreCase) { "nightlife", "food", "culture" },
+    };
 
-        var dict = new Dictionary<string, string[]>
-        {
-            { "morning", new[] { "morning" } },
-            { "lunch", new[] { "lunch", "morning", "afternoon" } },
-            { "afternoon", new[] { "afternoon", "morning" } },
-            { "dinner", new[] { "dinner", "evening", "lunch" } },
-            { "evening", new[] { "evening" } }
-        };
+    // BestTime del catálogo es texto libre ("morning", "any", "evening,night"); match por contains.
+    private static readonly Dictionary<string, string[]> BestTimeMatches = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["morning"] = new[] { "morning" },
+        ["lunch"] = new[] { "lunch", "morning", "afternoon" },
+        ["afternoon"] = new[] { "afternoon", "morning" },
+        ["dinner"] = new[] { "dinner", "evening", "lunch" },
+        ["evening"] = new[] { "evening" },
+    };
 
-        if (dict.TryGetValue(timeBlock, out var matchingTimes))
+    /// <summary>
+    /// Filtro combinado para el scheduling. En modo <c>strict</c> aplica 3 reglas:
+    ///   1. Family/family-kids NO admite <c>nightlife</c> en ningún timeBlock.
+    ///   2. Category debe pertenecer al set de timeBlock (<c>TimeBlockCategories</c>).
+    ///   3. BestTime debe encajar con el timeBlock (<c>BestTimeMatches</c>) — regla legacy.
+    ///
+    /// En modo <c>strict=false</c> aplica solo la regla 3 (BestTime). Sirve de soft fallback
+    /// cuando el catálogo no tiene suficientes places para cubrir la intersección estricta.
+    /// </summary>
+    private bool IsGoodTimeMatch(Place place, string timeBlock, ExtractedPreferences prefs, bool strict)
+    {
+        if (strict)
         {
-            return matchingTimes.Any(t => place.BestTime.ToLower().Contains(t));
+            // Regla 1: family/family-kids sin nightlife.
+            var isFamilyContext = string.Equals(prefs.GroupType, "family", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(prefs.GroupType, "family-kids", StringComparison.OrdinalIgnoreCase);
+            if (isFamilyContext &&
+                string.Equals(place.Category, "nightlife", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Regla 2: matrix categoría × timeBlock. Si no tenemos entrada para el timeBlock
+            // (no debería pasar con los 5 slots), caemos a permitir todas.
+            if (TimeBlockCategories.TryGetValue(timeBlock, out var allowedCategories))
+            {
+                if (!allowedCategories.Contains(place.Category))
+                    return false;
+            }
         }
+
+        // Regla 3 (siempre): BestTime. 'any' o vacío pasa siempre.
+        if (string.IsNullOrEmpty(place.BestTime) || place.BestTime.ToLower() == "any") return true;
+        if (BestTimeMatches.TryGetValue(timeBlock, out var matchingTimes))
+            return matchingTimes.Any(t => place.BestTime.ToLower().Contains(t));
 
         return true;
     }

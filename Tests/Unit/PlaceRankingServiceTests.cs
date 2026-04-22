@@ -11,7 +11,8 @@ public class PlaceRankingServiceTests
         string category = "Food",
         string? neighborhood = null,
         List<string>? bestFor = null,
-        int? aiVibeScore = null) => new()
+        int? aiVibeScore = null,
+        List<string>? suitableFor = null) => new()
     {
         Id = Guid.NewGuid(),
         Name = name,
@@ -21,6 +22,7 @@ public class PlaceRankingServiceTests
         Neighborhood = neighborhood,
         BestFor = bestFor,
         AiVibeScore = aiVibeScore,
+        SuitableFor = suitableFor,
     };
 
     [Fact]
@@ -143,5 +145,95 @@ public class PlaceRankingServiceTests
         }, prefs);
 
         Assert.Equal(highVibe.Id, ranked[0].Id);
+    }
+
+    // ── SuitableFor (Parte C) ────────────────────────────────────────────────
+
+    [Fact]
+    public void ScoreSuitableFor_FamilyGroup_MatchesKidsSuitable_Returns1()
+    {
+        var svc = new PlaceRankingService();
+        var kidsPlace = P("KidsPark", suitableFor: new List<string> { "kids", "family" });
+        var prefs = new ExtractedPreferences
+        {
+            GroupType = "family-kids",
+            Categories = new List<string>(),
+        };
+
+        var scored = svc.RankWithScores(new[] { (kidsPlace, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.SuitableForMatch);
+    }
+
+    [Fact]
+    public void ScoreSuitableFor_FamilyGroup_PlaceIsAdultsOnly_Returns0()
+    {
+        var svc = new PlaceRankingService();
+        var adultsOnly = P("AdultsBar", category: "nightlife", suitableFor: new List<string> { "adults-only" });
+        var prefs = new ExtractedPreferences
+        {
+            GroupType = "family-kids",
+            Categories = new List<string>(),
+        };
+
+        var scored = svc.RankWithScores(new[] { (adultsOnly, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.SuitableForMatch);
+    }
+
+    [Fact]
+    public void ScoreSuitableFor_NoGroupTypeHint_ReturnsNeutral1()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("NoHint", suitableFor: new List<string> { "adults-only" });
+        var prefs = new ExtractedPreferences
+        {
+            GroupType = "",
+            Categories = new List<string>(),
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        // Sin groupType, el scorer no castiga — devuelve 1.0 neutral.
+        Assert.Equal(1f, scored[0].Breakdown.SuitableForMatch);
+    }
+
+    [Fact]
+    public void ScoreSuitableFor_NullSuitableFor_ReturnsPointFive()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Untagged"); // suitableFor null por defecto
+        var prefs = new ExtractedPreferences
+        {
+            GroupType = "family-kids",
+            Categories = new List<string>(),
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        // No hay etiquetas suitable_for en el catálogo → no-info neutral-ish.
+        Assert.Equal(0.5f, scored[0].Breakdown.SuitableForMatch);
+    }
+
+    [Fact]
+    public void Rank_FamilyGroup_ExcludesAdultsOnlyFromTop()
+    {
+        var svc = new PlaceRankingService();
+        // Adults-only con cosine muy alto (0.95) DEBE quedar por debajo de un family
+        // con cosine peor (0.80), porque SuitableFor=0 le resta el peso entero (0.15).
+        var adultsOnly = P("AdultsLounge", category: "nightlife",
+            suitableFor: new List<string> { "adults-only" });
+        var familyFriendly = P("FamilyCafe", category: "coffee",
+            suitableFor: new List<string> { "family" });
+        var prefs = new ExtractedPreferences
+        {
+            GroupType = "family-kids",
+            Categories = new List<string>(),
+        };
+
+        var ranked = svc.Rank(new[]
+        {
+            (adultsOnly, 0.05f),   // cosine 0.95
+            (familyFriendly, 0.20f), // cosine 0.80
+        }, prefs);
+
+        Assert.Equal(familyFriendly.Id, ranked[0].Id);
+        Assert.Equal(adultsOnly.Id, ranked[1].Id);
     }
 }
