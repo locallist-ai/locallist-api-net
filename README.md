@@ -32,7 +32,9 @@ Required environment variables (live in Railway dashboard for production; for lo
 | `FIREBASE_PROJECT_ID` | `Program.cs` (Firebase scheme) | Validates Firebase RS256 tokens (admin) |
 | `JWT_SECRET` | `JwtTokenService` + `Program.cs` (App scheme) | Signs/validates app HS256 tokens (≥32 bytes) |
 | `APPLE_BUNDLE_ID` | `AppleIdTokenValidator` | Audience expected on Apple Sign-In ID tokens (`app.locallist.ios`) |
-| `GOOGLE_CLIENT_ID` | `GoogleIdTokenValidator` | Audience expected on Google Sign-In ID tokens |
+| `GOOGLE_CLIENT_ID` | `GoogleIdTokenValidator` | Web OAuth client ID (accepted audience for Google Sign-In tokens) |
+| `GOOGLE_IOS_CLIENT_ID` | `GoogleIdTokenValidator` | Optional — iOS OAuth client ID (added as accepted audience when set; required for iOS native sign-in via expo-auth-session) |
+| `GOOGLE_ANDROID_CLIENT_ID` | `GoogleIdTokenValidator` | Optional — Android OAuth client ID (accepted audience when set) |
 | `Gemini__ApiKey` | `AiProviderService` | Gemini 2.5 Flash API key |
 | `Klaviyo__ApiKey` | `KlaviyoService` | Klaviyo email-marketing API key (waitlist sync) |
 
