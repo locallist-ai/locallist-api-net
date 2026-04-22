@@ -93,10 +93,18 @@ public class PlaceRankingServiceTests
     public void Rank_ThreeSameNeighborhood_ThirdIsPenalized()
     {
         var svc = new PlaceRankingService();
+        // IDs fijos secuenciales para que el tie-breaker por Place.Id del ranker
+        // (cosine idéntico → ordena por Id asc) coincida con el orden declarativo:
+        // first debe ser el PRIMERO visto por el foreach de neighborhoods.
+        // Con Guid.NewGuid() aleatorios el test era flaky (~1/3 pass rate).
         var first = P("First", neighborhood: "Wynwood");
+        first.Id = Guid.Parse("00000000-0000-0000-0000-000000000001");
         var second = P("Second", neighborhood: "Wynwood");
+        second.Id = Guid.Parse("00000000-0000-0000-0000-000000000002");
         var third = P("Third", neighborhood: "Wynwood");
+        third.Id = Guid.Parse("00000000-0000-0000-0000-000000000003");
         var outsider = P("Outsider", neighborhood: "SouthBeach");
+        outsider.Id = Guid.Parse("00000000-0000-0000-0000-000000000004");
 
         // All cosine idénticos para aislar la señal de penalty.
         var prefs = new ExtractedPreferences { Categories = new List<string>() };

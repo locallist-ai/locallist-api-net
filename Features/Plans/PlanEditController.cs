@@ -32,13 +32,11 @@ public class PlanEditController : ControllerBase
             .Include(p => p.Stops)
             .FirstOrDefaultAsync(p => p.Id == id, ct);
 
-        if (plan == null)
-            return NotFound(new { error = "Plan not found" });
-
-        if (plan.CreatedById != userId.Value)
+        if (plan == null || plan.CreatedById != userId.Value)
         {
-            _logger.LogWarning("User {UserId} attempted to edit plan {PlanId} owned by {OwnerId}", userId, id, plan.CreatedById);
-            return Forbid();
+            if (plan != null)
+                _logger.LogWarning("User {UserId} attempted to edit plan {PlanId} owned by {OwnerId}", userId, id, plan.CreatedById);
+            return NotFound(new { error = "Plan not found" });
         }
 
         // Validate all placeIds exist
