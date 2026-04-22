@@ -11,7 +11,9 @@ using Npgsql;
 using Pgvector.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.IdentityModel.Tokens;
+using System.IO.Compression;
 using System.Threading.RateLimiting;
 using Serilog;
 
@@ -20,7 +22,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSerilog(configuration => configuration
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
-    .WriteTo.Console());
+    .WriteTo.Async(a => a.Console(), bufferSize: 10000, blockWhenFull: false));
 
 // A5: Limit Kestrel MaxRequestBodySize to prevent huge payload DoS (10 MB)
 builder.WebHost.ConfigureKestrel(serverOptions =>
@@ -73,10 +75,31 @@ if (!string.IsNullOrEmpty(connectionUrl))
 
 // Add DI Services
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddHttpClient<AiProviderService>();
-builder.Services.AddHttpClient<EmbeddingService>();
+builder.Services.AddHttpClient<AiProviderService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+    .AddStandardResilienceHandler(options =>
+    {
+        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
+        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(25);
+        options.CircuitBreaker.FailureRatio = 0.5;
+        options.Retry.MaxRetryAttempts = 1;
+        // Solo reintentar errores de red transitorios. Los 5xx son "duros" — el servicio
+        // cae a keyword fallback inmediatamente (AiProviderService catch HttpRequestException).
+        options.Retry.ShouldHandle = args => ValueTask.FromResult(
+            args.Outcome.Exception is HttpRequestException);
+    });
+
+builder.Services.AddHttpClient<EmbeddingService>(c => c.Timeout = TimeSpan.FromSeconds(15))
+    .AddStandardResilienceHandler(options =>
+    {
+        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(8);
+        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(15);
+        options.Retry.MaxRetryAttempts = 1;
+        options.Retry.ShouldHandle = args => ValueTask.FromResult(
+            args.Outcome.Exception is HttpRequestException);
+    });
+
 builder.Services.AddScoped<PlaceRankingService>();
-builder.Services.AddHttpClient<KlaviyoService>();
+builder.Services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
 // Configure JSON formatting
@@ -254,6 +277,16 @@ builder.Services.AddRateLimiter(options =>
     options.RejectionStatusCode = 429;
 });
 
+// Response compression (Brotli + Gzip). Registered before the pipeline uses it below.
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+    o.Providers.Add<BrotliCompressionProvider>();
+    o.Providers.Add<GzipCompressionProvider>();
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+
 // Add services to the container
 builder.Services.AddOpenApi();
 
@@ -303,10 +336,16 @@ app.UseExceptionHandler(errorApp =>
 });
 
 // Resolve client IP behind Railway's reverse proxy (required for rate limiting)
-app.UseForwardedHeaders(new ForwardedHeadersOptions
+var forwardedOptions = new ForwardedHeadersOptions
 {
-    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
-});
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+    // Railway edge es el único proxy en prod. ForwardLimit=1 hace que solo se lea el último hop
+    // (añadido por Railway). Cualquier XFF spoofeado por el cliente queda antes y se ignora.
+    ForwardLimit = 1
+};
+forwardedOptions.KnownIPNetworks.Clear();
+forwardedOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedOptions);
 
 // A1: Inject Security Headers to mitigate XSS, Clickjacking, and framing
 app.Use(async (context, next) =>
@@ -331,12 +370,37 @@ app.Use(async (context, next) =>
 
 app.UseSerilogRequestLogging();
 
+// Response compression must run upstream of HttpsRedirection and CORS so responses
+// are compressed regardless of redirect/cors short-circuit paths.
+app.UseResponseCompression();
+
 app.UseHttpsRedirection();
 app.UseCors("AllowSpecificOrigins");
 app.UseRateLimiter();
 
 // Setup Pipeline Security & Mapping
 app.UseAuthentication();
+
+// Push UserId into Serilog LogContext for every authenticated request.
+// Must run after UseAuthentication (so context.User is populated) and before MapControllers.
+app.Use(async (context, next) =>
+{
+    if (context.User?.Identity?.IsAuthenticated == true)
+    {
+        var userId = context.User.FindFirst("sub")?.Value
+                     ?? context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (!string.IsNullOrEmpty(userId))
+        {
+            using (Serilog.Context.LogContext.PushProperty("UserId", userId))
+            {
+                await next();
+                return;
+            }
+        }
+    }
+    await next();
+});
+
 app.UseAuthorization();
 app.MapControllers();
 

@@ -18,6 +18,17 @@ public class AppAuthController : ControllerBase
 {
     private const string AdminDomain = "@locallist.ai";
 
+    // Timing-equalization dummy hash: generated once at type init with the same
+    // bcrypt work factor as real passwords (12). Used in Login when the user
+    // doesn't exist or is OAuth-only so every failed path pays the same ~300ms
+    // bcrypt cost → no timing side-channel, no user enumeration. The input
+    // string contains a fresh Guid so the hash is never predictable / reused
+    // across process restarts.
+    private static readonly string DummyPasswordHash =
+        BCrypt.Net.BCrypt.HashPassword(
+            "unused_timing_buffer_" + Guid.NewGuid().ToString("N"),
+            workFactor: 12);
+
     private readonly LocalListDbContext _db;
     private readonly TimeProvider _clock;
     private readonly IPasswordHasher _hasher;
@@ -130,14 +141,28 @@ public class AppAuthController : ControllerBase
         if (!ModelState.IsValid) return BadRequest(new { error = "Invalid credentials" });
 
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
-        // Generic message for both unknown email and wrong password (user enumeration defense)
-        if (user is null) return Unauthorized(new { error = "Invalid credentials" });
+
+        // Unified error flow (anti-enumeration + anti-timing):
+        //   * All three failure branches return exactly the same JSON body.
+        //   * All three branches invoke bcrypt once with a real input, so latency
+        //     is indistinguishable (no "unknown email returns in 1 ms" leak).
+        if (user is null)
+        {
+            _hasher.Verify(request.Password, DummyPasswordHash);
+            return Unauthorized(new { error = "Invalid credentials" });
+        }
 
         if (string.IsNullOrEmpty(user.PasswordHash))
-            return Unauthorized(new { error = "Use Apple or Google to sign in" });
+        {
+            // OAuth-only account. Same body + same cost as "user not found".
+            _hasher.Verify(request.Password, DummyPasswordHash);
+            return Unauthorized(new { error = "Invalid credentials" });
+        }
 
         if (!_hasher.Verify(request.Password, user.PasswordHash))
+        {
             return Unauthorized(new { error = "Invalid credentials" });
+        }
 
         return Ok(await IssueTokensAsync(user, ct));
     }

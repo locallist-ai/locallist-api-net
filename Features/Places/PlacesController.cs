@@ -1,15 +1,21 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 
 namespace LocalList.API.NET.Features.Places;
 
+// NOTA: el query param `?status=` en GET /places es ADMIN-ONLY. Para callers no-admin
+// (incluidos anónimos) se fuerza silenciosamente `status = "published"` ignorando lo
+// pedido — no devolvemos 403 para no confirmar la existencia del filtro interno.
 [ApiController]
 [Route("places")]
 [AllowAnonymous]
 public class PlacesController : ControllerBase
 {
+    private const string AdminEmailDomain = "@locallist.ai";
+
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlacesController> _logger;
 
@@ -31,17 +37,21 @@ public class PlacesController : ControllerBase
         CancellationToken ct = default)
     {
         limit = Math.Clamp(limit, 1, 100);
-        // Prevent anonymous users from bypassing draft/review filters
-        var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
-        if (isAnonymous && status != "published")
-        {
-            _logger.LogWarning("Anonymous user attempted to access {Status} places", status);
-            return Unauthorized(new { error = "Only authenticated curators can view non-published places." });
-        }
+
+        // El filtro `status` solo lo honramos si el caller es admin (@locallist.ai).
+        // Cualquier otro caller —anónimo o usuario autenticado normal— ve únicamente
+        // places en "published" sin importar el valor que haya pedido.
+        // Igual que en AdminAuthorizationFilter: admin = autenticado + email bajo @locallist.ai.
+        var email = User.GetEmail();
+        var isAdmin = User.Identity?.IsAuthenticated == true
+            && !string.IsNullOrEmpty(email)
+            && email.EndsWith(AdminEmailDomain, StringComparison.OrdinalIgnoreCase);
+
+        var effectiveStatus = isAdmin ? (status ?? "published") : "published";
 
         var query = _db.Places.AsNoTracking().AsQueryable();
 
-        query = query.Where(p => p.Status == status);
+        query = query.Where(p => p.Status == effectiveStatus);
 
         if (!string.IsNullOrEmpty(city))
             query = query.Where(p => p.City == city);

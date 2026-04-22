@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -61,12 +62,81 @@ public class PlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task GetPlaces_DraftAnonymous_Returns401()
+    public async Task GetPlaces_NonAdmin_StatusDraftIgnored()
     {
-        var client = fixture.CreateClient();
-        var response = await client.GetAsync("/places?status=draft");
+        // Seed: 1 published + 1 draft, ambos con un tag único para aislar este test
+        // del resto de rows que otros tests comparten en la misma BD.
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var db = fixture.GetDbContext();
+        db.Places.Add(MakePlace($"Pub {tag}", status: "published", city: $"CITY-{tag}"));
+        db.Places.Add(MakePlace($"Draft {tag}", status: "draft", city: $"CITY-{tag}"));
+        await db.SaveChangesAsync();
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        // Usuario autenticado NORMAL (dominio no-admin). Usamos el flujo HS256 de la
+        // app (AppToken), idéntico al que emite JwtTokenService para usuarios reales.
+        var userId = Guid.NewGuid();
+        var userEmail = $"user-{tag}@test.com";
+        var client = fixture.CreateClient();
+        var token = fixture.CreateAppToken(userId, userEmail);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync($"/places?status=draft&city=CITY-{tag}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var places = body.GetProperty("places");
+        Assert.Equal(1, places.GetArrayLength());
+        Assert.Equal("published", places[0].GetProperty("status").GetString());
+        Assert.Equal($"Pub {tag}", places[0].GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task GetPlaces_Admin_StatusDraftRespected()
+    {
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var db = fixture.GetDbContext();
+        db.Places.Add(MakePlace($"Pub {tag}", status: "published", city: $"CITY-{tag}"));
+        db.Places.Add(MakePlace($"Draft {tag}", status: "draft", city: $"CITY-{tag}"));
+        await db.SaveChangesAsync();
+
+        // Admin = email bajo @locallist.ai (igual que AdminAuthorizationFilter).
+        // Usamos el mismo patrón que AdminPlacesTests: token Firebase RS256.
+        var adminEmail = $"admin-{tag}@locallist.ai";
+        var adminFbUid = $"fb-admin-{tag}";
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(adminFbUid, adminEmail);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync($"/places?status=draft&city=CITY-{tag}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var places = body.GetProperty("places");
+        Assert.Equal(1, places.GetArrayLength());
+        Assert.Equal("draft", places[0].GetProperty("status").GetString());
+        Assert.Equal($"Draft {tag}", places[0].GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task GetPlaces_Anonymous_OnlyPublished()
+    {
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var db = fixture.GetDbContext();
+        db.Places.Add(MakePlace($"Pub {tag}", status: "published", city: $"CITY-{tag}"));
+        db.Places.Add(MakePlace($"Draft {tag}", status: "draft", city: $"CITY-{tag}"));
+        await db.SaveChangesAsync();
+
+        // Sin header Authorization → caller anónimo. Debe recibir 200 con solo published,
+        // ignorando silenciosamente el ?status=draft.
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync($"/places?status=draft&city=CITY-{tag}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var places = body.GetProperty("places");
+        Assert.Equal(1, places.GetArrayLength());
+        Assert.Equal("published", places[0].GetProperty("status").GetString());
+        Assert.Equal($"Pub {tag}", places[0].GetProperty("name").GetString());
     }
 
     [Fact]

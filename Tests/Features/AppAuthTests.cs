@@ -58,6 +58,28 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
     }
 
+    [Fact]
+    public async Task Register_WithWeakPassword_Returns400()
+    {
+        // "password" satisface MinimumLength=8 pero no la regex (sin mayúscula/dígito/especial).
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/auth/register",
+            new { email = $"weak-{Guid.NewGuid():N}@test.com", password = "password", name = "Test" });
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        var body = await res.Content.ReadAsStringAsync();
+        Assert.Contains("uppercase", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Register_WithStrongPassword_Returns200()
+    {
+        var email = $"strong-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "StrongP4ss!", name = "Test" });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+    }
+
     // ─── Login ───────────────────────────────────────────
 
     [Fact]
@@ -85,6 +107,18 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task Login_WithInvalidEmail_ReturnsGenericError()
+    {
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/auth/login",
+            new { email = $"nobody-{Guid.NewGuid():N}@test.com", password = "Whatever1!" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+        var body = await res.Content.ReadAsStringAsync();
+        Assert.Equal("{\"error\":\"Invalid credentials\"}", body);
+    }
+
+    [Fact]
     public async Task Login_WrongPassword_Returns401()
     {
         var email = $"wp-{Guid.NewGuid():N}@test.com";
@@ -96,8 +130,11 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Login_OAuthOnlyUser_Returns401WithGuidanceMessage()
+    public async Task Login_OAuthOnlyAccount_ReturnsSameGenericError()
     {
+        // Seedea un usuario OAuth-only (email existe, pero PasswordHash NULL).
+        // La respuesta debe ser byte-idéntica a un login con email inexistente
+        // → cero enumeración de usuarios.
         var email = $"oauth-{Guid.NewGuid():N}@test.com";
         var db = fixture.GetDbContext();
         db.Users.Add(new User { Email = email, GoogleUserId = "google-oauth-only" });
@@ -108,8 +145,8 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             new { email, password = "Whatever1!" });
 
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
-        var json = await res.Content.ReadAsStringAsync();
-        Assert.Contains("Apple or Google", json);
+        var body = await res.Content.ReadAsStringAsync();
+        Assert.Equal("{\"error\":\"Invalid credentials\"}", body);
     }
 
     // ─── Signin (Apple / Google) ─────────────────────────
