@@ -19,7 +19,11 @@ public record SigninRequest(
 
 public record RegisterRequest(
     [Required, EmailAddress, StringLength(254)] string Email,
-    [Required, StringLength(128, MinimumLength = 8)] string Password,
+    [Required,
+     StringLength(128, MinimumLength = 8),
+     RegularExpression(@"^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$",
+        ErrorMessage = "Password must include uppercase, lowercase, digit and special character")]
+    string Password,
     [StringLength(255, MinimumLength = 1)] string? Name);
 
 public record LoginRequest(

@@ -107,7 +107,6 @@ public class BuilderController : ControllerBase
             };
 
             _db.Plans.Add(plan);
-            await _db.SaveChangesAsync(ct);
 
             var stopsToInsert = planStopsData.Select(sd => new PlanStop
             {
@@ -124,8 +123,10 @@ public class BuilderController : ControllerBase
             if (stopsToInsert.Any())
             {
                 _db.PlanStops.AddRange(stopsToInsert);
-                await _db.SaveChangesAsync(ct);
             }
+
+            // Persist plan + stops en un único roundtrip (EF resuelve FKs por Guid client-side).
+            await _db.SaveChangesAsync(ct);
 
             var stopsWithPlaces = ResolveStopPlaces(planStopsData, filteredPlaces);
 

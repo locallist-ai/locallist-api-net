@@ -72,6 +72,13 @@ public class AiProviderService
             _logger.LogError(ex, "Gemini API call failed. Falling back to keywords.");
             return ExtractWithKeywords(message, context);
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Polly/resilience canceló por timeout (AttemptTimeout o TotalRequestTimeout),
+            // no el cliente. Caemos al fallback keyword igual que en error transitorio.
+            _logger.LogError("Gemini API call timed out. Falling back to keywords.");
+            return ExtractWithKeywords(message, context);
+        }
         catch (JsonException ex)
         {
             _logger.LogError(ex, "Failed to parse Gemini response. Falling back to keywords.");

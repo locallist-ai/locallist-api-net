@@ -79,6 +79,12 @@ public class EmbeddingService
             _logger.LogError(ex, "Gemini batchEmbedContents request failed");
             return Array.Empty<Vector>();
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Polly/resilience timeout, no cancelación de cliente → degradación grácil.
+            _logger.LogError("Gemini batchEmbedContents timed out");
+            return Array.Empty<Vector>();
+        }
 
         var body = await response.Content.ReadAsStringAsync(ct);
         try
