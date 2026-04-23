@@ -565,12 +565,23 @@ public class BuilderController : ControllerBase
         return $"A {groupLabel} {dayLabel} plan featuring {string.Join(", ", topCats)}.";
     }
 
+    // Defaults/placeholder names que Gemini devuelve cuando ignora el prompt MANDATORY.
+    // Detectados en prod 2026-04-23 — el fix context-wins no corrige el planName aquí,
+    // hay que rechazarlos explícitamente para que BuildPlanName sintetice uno descriptivo.
+    private static readonly string[] DefaultPlaceholderNames =
+    {
+        "my plan", "new plan", "untitled", "plan", "trip", "trip plan", "your plan"
+    };
+
     private static bool IsUsableName(string candidate, string rawMessage)
     {
         if (string.IsNullOrWhiteSpace(candidate)) return false;
         if (candidate.Length < 4) return false;
 
-        var lower = candidate.ToLowerInvariant();
+        var lower = candidate.ToLowerInvariant().Trim();
+
+        // Placeholder/default names (ExtractedPreferences.PlanName default = "My Plan").
+        if (DefaultPlaceholderNames.Contains(lower)) return false;
 
         // Greetings copiados tal cual.
         if (GreetingPrefixes.Any(g => lower.StartsWith(g))) return false;

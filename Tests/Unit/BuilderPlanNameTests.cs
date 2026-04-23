@@ -66,6 +66,26 @@ public class BuilderPlanNameTests
     }
 
     [Fact]
+    public void BuildPlanName_LiteralMyPlan_SynthesizesDescriptive()
+    {
+        // Caso real observado en prod 2026-04-23: Gemini devuelve planName="My Plan"
+        // (default de ExtractedPreferences). Sin el fix, pasaba IsUsableName y ese
+        // nombre ruin llegaba al cliente.
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            Vibes = new List<string> { "cultural" },
+            PlanName = "My Plan",
+        };
+
+        var name = BuilderController.BuildPlanName(prefs, "Miami", "some message");
+
+        Assert.NotEqual("My Plan", name);
+        Assert.Contains("Miami", name);
+        Assert.Contains("2-day", name);
+    }
+
+    [Fact]
     public void BuildPlanName_UsableDescriptive_PassesThrough()
     {
         var prefs = new ExtractedPreferences

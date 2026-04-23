@@ -401,6 +401,132 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         }
     }
 
+    // ── Fix 2026-04-23: context wins — Gemini devolvía vacío/default ignorando el prompt ───
+
+    [Fact]
+    public async Task Chat_GeminiReturnsEmpty_ContextWins_RespectsFamilyAndDays()
+    {
+        // Reproduce el bug observado en prod: Gemini responde con campos vacíos/default
+        // (categories=[], vibes=[], groupType="", planName="My Plan", days=1) y el
+        // pipeline histórico caía a defaults "couple + 1 día + nightlife permitido".
+        // MergeContextIntoPrefs fuerza los valores del wizard sobre los de Gemini.
+        await SeedPlace("FamilyCoffee", "coffee", "morning", new List<string> { "family" });
+        await SeedPlace("FamilyCulture", "culture", "afternoon", new List<string> { "family" });
+        await SeedPlace("FamilyFood", "food", "lunch", new List<string> { "family" });
+        await SeedPlace("Bar", "nightlife", "evening", new List<string> { "adults-only" });
+
+        // Gemini responde vacío — imita el comportamiento real en prod.
+        var empty = new
+        {
+            days = 1,
+            categories = new string[] { },
+            vibes = new string[] { },
+            groupType = "",
+            planName = "My Plan",
+            maxStopsPerDay = 5,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(empty));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "x",
+            tripContext = new { city = Miami, groupType = "family-kids", preferences = new[] { "adventure" }, days = 3 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // Context wins: days del wizard, no el 1 por default de Gemini.
+        Assert.Equal(3, body.GetProperty("plan").GetProperty("durationDays").GetInt32());
+
+        // Name no es el placeholder "My Plan".
+        var planName = body.GetProperty("plan").GetProperty("name").GetString() ?? "";
+        Assert.NotEqual("My Plan", planName);
+
+        // Family-kids: 0 stops de nightlife (hard exclusion via merge + matrix).
+        foreach (var s in body.GetProperty("stops").EnumerateArray())
+        {
+            var cat = s.GetProperty("place").GetProperty("category").GetString() ?? "";
+            Assert.False(
+                string.Equals(cat, "nightlife", StringComparison.OrdinalIgnoreCase),
+                $"family-kids con Gemini vacío no debería traer nightlife, llegó {cat}");
+        }
+    }
+
+    [Fact]
+    public async Task Chat_GeminiReturnsConflictingGroupType_ContextWins()
+    {
+        // Gemini devuelve groupType="solo" contradiciendo el wizard que envió "family-kids".
+        // MergeContextIntoPrefs sobreescribe con el valor del wizard.
+        await SeedPlace("FamilyCafe", "coffee", "morning", new List<string> { "family" });
+        await SeedPlace("FamilyPark", "outdoors", "afternoon", new List<string> { "family", "kids" });
+        await SeedPlace("AdultBar", "nightlife", "evening", new List<string> { "adults-only" });
+
+        var conflict = new
+        {
+            days = 2,
+            categories = new[] { "nightlife", "food" },
+            vibes = new[] { "party" },
+            groupType = "solo",  // ← contradice el wizard
+            planName = "Solo Miami Night",
+            maxStopsPerDay = 5,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(conflict));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "family day out",
+            tripContext = new { city = Miami, groupType = "family-kids", preferences = new[] { "cultural" }, days = 1 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // Days del wizard (1), no el 2 de Gemini.
+        Assert.Equal(1, body.GetProperty("plan").GetProperty("durationDays").GetInt32());
+
+        // 0 nightlife en stops aunque Gemini lo incluía en categories.
+        foreach (var s in body.GetProperty("stops").EnumerateArray())
+        {
+            var cat = s.GetProperty("place").GetProperty("category").GetString() ?? "";
+            Assert.NotEqual("nightlife", cat);
+        }
+    }
+
+    [Fact]
+    public async Task Chat_NoContext_GeminiPrevailsForGroupType()
+    {
+        // Sin tripContext (o con context vacío), el pipeline debe honrar lo que diga Gemini.
+        // Verifica que MergeContextIntoPrefs no rompe el comportamiento cuando no hay context.
+        await SeedPlace("SoloFood", "food", "lunch");
+        await SeedPlace("SoloCoffee", "coffee", "morning");
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food", "coffee" },
+            vibes = new[] { "casual" },
+            groupType = "friends",
+            planName = "Friends Miami Day",
+            maxStopsPerDay = 4,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "friends day",
+            // Sin tripContext
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        // planName pasa through (no es placeholder ni greeting ni match raw).
+        Assert.Equal("Friends Miami Day", body.GetProperty("plan").GetProperty("name").GetString());
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string embeddedText)
