@@ -166,6 +166,90 @@ public class PlanEditTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(stopPlace.TryGetProperty("aiVibeScore", out _));
     }
 
+    [Fact]
+    public async Task DeletePlan_Owner_Returns204AndCascades()
+    {
+        var (ownerId, ownerFbUid) = await CreateUser("plandelete-owner");
+
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Del Place {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "Seeded",
+            Status = "published"
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Plan a borrar",
+            City = "Miami",
+            Type = "user",
+            IsPublic = false,
+            CreatedById = ownerId,
+            Stops = new List<PlanStop>
+            {
+                new() { Id = Guid.NewGuid(), PlaceId = place.Id, DayNumber = 1, OrderIndex = 0 }
+            }
+        };
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
+        var response = await client.DeleteAsync($"/plans/{plan.Id}");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var after = fixture.GetDbContext();
+        Assert.Null(await after.Plans.FindAsync(plan.Id));
+        var remainingStops = await after.PlanStops.Where(s => s.PlanId == plan.Id).CountAsync();
+        Assert.Equal(0, remainingStops);
+        // Place itself must still exist — deleting a plan must not delete places.
+        Assert.NotNull(await after.Places.FindAsync(place.Id));
+    }
+
+    [Fact]
+    public async Task DeletePlan_NonOwner_Returns404AndPreservesPlan()
+    {
+        var (ownerId, _) = await CreateUser("plandelete-owner2");
+        var (otherId, otherFbUid) = await CreateUser("plandelete-other");
+
+        var db = fixture.GetDbContext();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Plan protegido",
+            City = "Miami",
+            Type = "user",
+            IsPublic = false,
+            CreatedById = ownerId
+        };
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var attackerClient = fixture.CreateAuthenticatedClient(otherId, otherFbUid);
+        var response = await attackerClient.DeleteAsync($"/plans/{plan.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        var after = fixture.GetDbContext();
+        Assert.NotNull(await after.Plans.FindAsync(plan.Id));
+    }
+
+    [Fact]
+    public async Task DeletePlan_MissingPlan_Returns404()
+    {
+        var (userId, userFbUid) = await CreateUser("plandelete-missing");
+        var client = fixture.CreateAuthenticatedClient(userId, userFbUid);
+
+        var response = await client.DeleteAsync($"/plans/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private async Task<(Guid userId, string firebaseUid)> CreateUser(string prefix)

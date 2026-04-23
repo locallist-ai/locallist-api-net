@@ -83,4 +83,27 @@ public class PlanEditController : ControllerBase
 
         return Ok(PlanDetailDto.FromEntity(updatedPlan));
     }
+
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeletePlan(Guid id, CancellationToken ct)
+    {
+        var userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
+            return Unauthorized(new { error = "Invalid token" });
+
+        var plan = await _db.Plans.FirstOrDefaultAsync(p => p.Id == id, ct);
+
+        if (plan == null || plan.CreatedById != userId.Value)
+        {
+            if (plan != null)
+                _logger.LogWarning("User {UserId} attempted to delete plan {PlanId} owned by {OwnerId}", userId, id, plan.CreatedById);
+            return NotFound(new { error = "Plan not found" });
+        }
+
+        _db.Plans.Remove(plan);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("User {UserId} deleted plan {PlanId}", userId, id);
+        return NoContent();
+    }
 }
