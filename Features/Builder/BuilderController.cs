@@ -67,6 +67,25 @@ public class BuilderController : ControllerBase
             request.TripContext?.Vibes == null ? "(null)" : string.Join(",", request.TripContext.Vibes),
             request.Message.Length);
 
+        // Require minimum useful input — descriptive message OR ≥2 wizard signals.
+        // Sin esto, el endpoint acepta {"message":"x"} y genera planes ruidosos con defaults.
+        var inputCheck = ValidateMinimumInput(request);
+        if (!inputCheck.accepted)
+        {
+            _logger.LogInformation(
+                "Builder: rejected insufficient_input — msgDescriptive={M} wizardDays={D} wizardGroup={G} wizardPrefs={P}",
+                inputCheck.signals["message_descriptive"],
+                inputCheck.signals["wizard_days"],
+                inputCheck.signals["wizard_groupType"],
+                inputCheck.signals["wizard_preferences"]);
+            return BadRequest(new
+            {
+                error = "insufficient_input",
+                message = "Please complete at least 2 wizard steps (duration, group, preferences) or describe your trip in 20+ characters.",
+                signals = inputCheck.signals
+            });
+        }
+
         try
         {
             // 1. Extract preferences from Gemini
@@ -598,6 +617,61 @@ public class BuilderController : ControllerBase
     {
         if (values == null) return null;
         return values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+    }
+
+    // ── Input validation (Pablo feedback 2026-04-23) ───────────────────────────
+
+    private const int DescriptiveMessageMinChars = 20;
+
+    // Default placeholders comunes que el cliente puede enviar (i18n, autocomplete) y que
+    // NO deben considerarse input descriptivo. Lowercase match.
+    private static readonly HashSet<string> MessagePlaceholders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "x", "plan", "a plan", "create a plan", "make me a plan", "make a plan",
+        "crea un plan", "hazme un plan", "un plan", "quiero un plan"
+    };
+
+    /// <summary>
+    /// Valida que el request tenga input mínimo significativo. Acepta si cumple AL MENOS
+    /// uno de: (A) mensaje descriptivo ≥20 chars no-placeholder, (B) ≥2 señales del wizard
+    /// de entre {days, groupType válido, preferences||vibes no vacío}.
+    /// </summary>
+    private static (bool accepted, Dictionary<string, bool> signals) ValidateMinimumInput(BuilderChatRequest request)
+    {
+        var msgDescriptive = IsDescriptiveMessage(request.Message);
+
+        var days = request.TripContext?.Days.HasValue == true;
+        var groupType = !string.IsNullOrWhiteSpace(request.TripContext?.GroupType);
+        var preferences = (request.TripContext?.Preferences?.Count > 0)
+                       || (request.TripContext?.Vibes?.Count > 0);
+
+        var wizardSignals = (days ? 1 : 0) + (groupType ? 1 : 0) + (preferences ? 1 : 0);
+        var accepted = msgDescriptive || wizardSignals >= 2;
+
+        return (accepted, new Dictionary<string, bool>
+        {
+            ["message_descriptive"] = msgDescriptive,
+            ["wizard_days"] = days,
+            ["wizard_groupType"] = groupType,
+            ["wizard_preferences"] = preferences,
+        });
+    }
+
+    private static bool IsDescriptiveMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        var trimmed = message.Trim();
+        if (trimmed.Length < DescriptiveMessageMinChars) return false;
+
+        var lower = trimmed.ToLowerInvariant();
+
+        // Greetings explícitos aunque tengan >20 chars (ej "hola hola hola hola hola hola").
+        if (GreetingPrefixes.Any(g => lower.StartsWith(g))) return false;
+
+        // Placeholders conocidos (el cliente puede enviar un default del i18n).
+        if (MessagePlaceholders.Contains(lower)) return false;
+
+        return true;
     }
 
     private object ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces)
