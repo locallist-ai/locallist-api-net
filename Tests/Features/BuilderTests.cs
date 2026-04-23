@@ -51,7 +51,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "Plan romántico de comida en Miami",
-            tripContext = new { city = Miami }
+            tripContext = new { city = Miami, days = 1, groupType = "couple" }
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -77,7 +77,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "Buen restaurant en Miami",
-            tripContext = new { city = Miami }
+            tripContext = new { city = Miami, days = 1, groupType = "couple" }
         });
 
         // Gemini peta → AiProviderService captura HttpRequestException y tira de keywords.
@@ -114,7 +114,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "cafe por la mañana en Miami",
-            tripContext = new { city = Miami }
+            tripContext = new { city = Miami, days = 1, groupType = "couple" }
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -148,7 +148,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "romantic dinner in Wynwood",
-            tripContext = new { city = Miami },
+            tripContext = new { city = Miami, days = 1, groupType = "couple" },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -518,7 +518,8 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "weekend trip with my friends in Miami exploring food spots",
-            // Sin tripContext — el mensaje descriptivo >=20 chars pasa la validación mínima.
+            // Con tripContext con 3 señales wizard para pasar validación.
+            tripContext = new { city = Miami, days = 1, groupType = "friends" },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -542,8 +543,11 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("insufficient_input", body.GetProperty("error").GetString());
-        Assert.False(body.GetProperty("signals").GetProperty("message_descriptive").GetBoolean());
+        // chat_message=true (hay mensaje "x") pero ninguna señal wizard → <3 → 400.
+        Assert.True(body.GetProperty("signals").GetProperty("chat_message").GetBoolean());
         Assert.False(body.GetProperty("signals").GetProperty("wizard_days").GetBoolean());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_city").GetBoolean());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_groupType").GetBoolean());
     }
 
     [Fact]
@@ -605,15 +609,34 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     }
 
     [Fact]
-    public async Task Chat_DescriptiveMessageNoContext_Returns200()
+    public async Task Chat_DescriptiveMessageAlone_Returns400_WizardRequired()
     {
+        // Regla Pablo 2026-04-23: el chat NO sustituye al wizard, aunque sea descriptivo.
+        // Siempre se requieren ≥3 señales wizard. Solo mensaje → 400.
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "romantic dinner in Wynwood with my wife",  // 40 chars pero sin wizard
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("insufficient_input", body.GetProperty("error").GetString());
+        // chat_message es true pero no basta sin wizard.
+        Assert.True(body.GetProperty("signals").GetProperty("chat_message").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Chat_NoMessage_ThreeWizardSignals_Returns200()
+    {
+        // Regla Pablo: el chat es opcional. Con solo 3 señales wizard, plan se genera.
         await SeedPublishedMiamiPlaces(3);
 
         var extracted = new
         {
             days = 1,
             categories = new[] { "food" },
-            vibes = new[] { "romantic" },
+            vibes = new string[] { },
             groupType = "couple",
             planName = "Test",
             maxStopsPerDay = 4,
@@ -623,8 +646,8 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var client = fixture.CreateClient();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
-            message = "romantic dinner in Wynwood with my wife",  // 40 chars descriptivo
-            // Sin tripContext.
+            // Message omitido — es opcional.
+            tripContext = new { city = Miami, days = 1, groupType = "couple" },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
