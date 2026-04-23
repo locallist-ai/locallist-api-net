@@ -28,7 +28,7 @@ public class AiProviderService
             if (string.IsNullOrEmpty(apiKey))
             {
                 _logger.LogWarning("Gemini API Key missing. Falling back to keywords.");
-                return ExtractWithKeywords(message, context);
+                return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
             }
 
             var prompt = BuildPrompt(message, context);
@@ -70,24 +70,25 @@ public class AiProviderService
                 "Gemini raw extracted text: {Preview}",
                 textResult.Length > 500 ? textResult[..500] + "…" : textResult);
 
-            return ParseAiResponse(textResult);
+            var parsed = ParseAiResponse(textResult);
+            return MergeContextIntoPrefs(parsed, context);
         }
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "Gemini API call failed. Falling back to keywords.");
-            return ExtractWithKeywords(message, context);
+            return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             // Polly/resilience canceló por timeout (AttemptTimeout o TotalRequestTimeout),
             // no el cliente. Caemos al fallback keyword igual que en error transitorio.
             _logger.LogError("Gemini API call timed out. Falling back to keywords.");
-            return ExtractWithKeywords(message, context);
+            return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
         }
         catch (JsonException ex)
         {
             _logger.LogError(ex, "Failed to parse Gemini response. Falling back to keywords.");
-            return ExtractWithKeywords(message, context);
+            return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
         }
     }
 
@@ -237,5 +238,74 @@ Return JSON only, no markdown. EXACT shape:
         _logger.LogInformation("Prefs source=keyword_fallback");
 
         return result;
+    }
+
+    /// <summary>
+    /// Context wins: el wizard ya capturó las elecciones explícitas del usuario;
+    /// esas son autoritativas sobre lo que devuelva Gemini (que observado en prod
+    /// a veces retorna campos vacíos o defaults ignorando el prompt MANDATORY).
+    ///
+    /// Se llama post-parse en el happy path y también tras <see cref="ExtractWithKeywords"/>
+    /// (para que los 4 paths de <see cref="ExtractPreferencesAsync"/> converjan en el mismo
+    /// contrato hacia el resto del pipeline).
+    ///
+    /// Idempotente: si <paramref name="context"/> es null o ya estaba aplicado, no rompe nada.
+    /// </summary>
+    public ExtractedPreferences MergeContextIntoPrefs(ExtractedPreferences prefs, TripContextDto? context)
+    {
+        if (context == null) return prefs;
+
+        // Days autoritativo desde el wizard.
+        if (context.Days.HasValue)
+            prefs.Days = Math.Clamp(context.Days.Value, 1, 7);
+
+        // GroupType autoritativo desde el wizard (si el valor está en whitelist).
+        if (!string.IsNullOrWhiteSpace(context.GroupType)
+            && AllowedGroupTypes.Contains(context.GroupType.ToLowerInvariant()))
+        {
+            prefs.GroupType = context.GroupType;
+        }
+
+        // Preferences del wizard → merge en Categories (via PreferenceToCategories) + append a Vibes.
+        var contextPrefs = context.Preferences ?? new List<string>();
+        prefs.Categories ??= new List<string>();
+        prefs.Vibes ??= new List<string>();
+        foreach (var pref in contextPrefs)
+        {
+            if (PreferenceToCategories.TryGetValue(pref, out var mapped))
+            {
+                foreach (var c in mapped)
+                    if (!prefs.Categories.Contains(c, StringComparer.OrdinalIgnoreCase))
+                        prefs.Categories.Add(c);
+            }
+            if (!prefs.Vibes.Contains(pref, StringComparer.OrdinalIgnoreCase))
+                prefs.Vibes.Add(pref);
+        }
+
+        // Vibes del wizard (distintos de preferences) → merge.
+        var contextVibes = context.Vibes ?? new List<string>();
+        foreach (var vibe in contextVibes)
+        {
+            if (!prefs.Vibes.Contains(vibe, StringComparer.OrdinalIgnoreCase))
+                prefs.Vibes.Add(vibe);
+        }
+
+        // Family excluye nightlife globalmente (complementa la exclusión en ExtractWithKeywords
+        // + matrix timeBlock + ScoreSuitableFor; aquí lo hacemos al nivel de categories).
+        if (GroupTypePolicy.IsFamilyContext(prefs.GroupType))
+        {
+            prefs.Categories.RemoveAll(c => string.Equals(c, "nightlife", StringComparison.OrdinalIgnoreCase));
+            prefs.MaxStopsPerDay = 3;
+        }
+
+        _logger.LogInformation(
+            "Prefs after context merge: days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} maxStops={Max}",
+            prefs.Days,
+            string.Join(",", prefs.Categories),
+            string.Join(",", prefs.Vibes),
+            prefs.GroupType,
+            prefs.MaxStopsPerDay);
+
+        return prefs;
     }
 }
