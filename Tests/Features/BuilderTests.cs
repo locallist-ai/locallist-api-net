@@ -193,8 +193,8 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var client = fixture.CreateClient();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
-            message = "some food in Miami",
-            tripContext = new { city = Miami },
+            message = "some food in Miami for my group",
+            tripContext = new { city = Miami, groupType = "couple", days = 1 },
         });
 
         // Fallback keyword activo → 200 con plan válido, no 500.
@@ -517,14 +517,117 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var client = fixture.CreateClient();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
-            message = "friends day",
-            // Sin tripContext
+            message = "weekend trip with my friends in Miami exploring food spots",
+            // Sin tripContext — el mensaje descriptivo >=20 chars pasa la validación mínima.
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         // planName pasa through (no es placeholder ni greeting ni match raw).
         Assert.Equal("Friends Miami Day", body.GetProperty("plan").GetProperty("name").GetString());
+    }
+
+    // ── Input validation (Pablo feedback 2026-04-23) ───────────────────────
+
+    [Fact]
+    public async Task Chat_TrivialMessageNoContext_Returns400_InsufficientInput()
+    {
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "x",
+            // Sin tripContext → 0 señales wizard + mensaje no descriptivo → 400.
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("insufficient_input", body.GetProperty("error").GetString());
+        Assert.False(body.GetProperty("signals").GetProperty("message_descriptive").GetBoolean());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_days").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Chat_GreetingLongButNoContext_Returns400_InsufficientInput()
+    {
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            // Long pero empieza con greeting → no cuenta como descriptivo.
+            message = "hola que tal amigo como va todo por miami hoy",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("insufficient_input", body.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Chat_OneWizardSignal_TrivialMessage_Returns400_InsufficientInput()
+    {
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "x",
+            tripContext = new { city = Miami, groupType = "couple" },  // solo 1 señal wizard
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("signals").GetProperty("wizard_groupType").GetBoolean());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_days").GetBoolean());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_preferences").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Chat_TwoWizardSignals_TrivialMessage_Returns200()
+    {
+        await SeedPublishedMiamiPlaces(3);
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "Test",
+            maxStopsPerDay = 4,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "x",
+            tripContext = new { city = Miami, groupType = "couple", days = 2 },  // 2 señales
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Chat_DescriptiveMessageNoContext_Returns200()
+    {
+        await SeedPublishedMiamiPlaces(3);
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new[] { "romantic" },
+            groupType = "couple",
+            planName = "Test",
+            maxStopsPerDay = 4,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "romantic dinner in Wynwood with my wife",  // 40 chars descriptivo
+            // Sin tripContext.
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
