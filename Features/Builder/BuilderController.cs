@@ -58,38 +58,45 @@ public class BuilderController : ControllerBase
         // so a single Railway Deploy Logs query (filter "Builder:") returns the full
         // story of any /builder/chat request without code changes.
         _logger.LogInformation(
-            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} preferences={Prefs} vibes={Vibes} msgLen={MsgLen}",
+            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} preferences={Prefs} vibes={Vibes} budget={Budget} msgLen={MsgLen}",
             isAnonymous,
             request.TripContext?.City ?? "(unset)",
             request.TripContext?.Days?.ToString() ?? "(unset)",
             request.TripContext?.GroupType ?? "(unset)",
             request.TripContext?.Preferences == null ? "(null)" : string.Join(",", request.TripContext.Preferences),
             request.TripContext?.Vibes == null ? "(null)" : string.Join(",", request.TripContext.Vibes),
-            request.Message.Length);
+            request.TripContext?.Budget ?? "(unset)",
+            request.Message?.Length ?? 0);
 
-        // Require minimum useful input — descriptive message OR ≥2 wizard signals.
-        // Sin esto, el endpoint acepta {"message":"x"} y genera planes ruidosos con defaults.
+        // Require minimum wizard input — ≥3 de 5 señales wizard (city, days, groupType,
+        // preferences, budget). El chat message es opcional, complementa pero no sustituye.
         var inputCheck = ValidateMinimumInput(request);
         if (!inputCheck.accepted)
         {
             _logger.LogInformation(
-                "Builder: rejected insufficient_input — msgDescriptive={M} wizardDays={D} wizardGroup={G} wizardPrefs={P}",
-                inputCheck.signals["message_descriptive"],
+                "Builder: rejected insufficient_input — hasMsg={M} wizardCity={C} wizardDays={D} wizardGroup={G} wizardPrefs={P} wizardBudget={B}",
+                inputCheck.signals["chat_message"],
+                inputCheck.signals["wizard_city"],
                 inputCheck.signals["wizard_days"],
                 inputCheck.signals["wizard_groupType"],
-                inputCheck.signals["wizard_preferences"]);
+                inputCheck.signals["wizard_preferences"],
+                inputCheck.signals["wizard_budget"]);
             return BadRequest(new
             {
                 error = "insufficient_input",
-                message = "Please complete at least 2 wizard steps (duration, group, preferences) or describe your trip in 20+ characters.",
+                message = "Please complete at least 3 wizard steps (city, duration, group, style, budget).",
                 signals = inputCheck.signals
             });
         }
 
         try
         {
+            // Normalizamos Message a "" para el resto del pipeline (ExtractPreferences,
+            // RetrieveCandidates, BuildPlanName, etc. asumían non-null).
+            var message = request.Message ?? string.Empty;
+
             // 1. Extract preferences from Gemini
-            var prefs = await _aiProvider.ExtractPreferencesAsync(request.Message, request.TripContext, ct);
+            var prefs = await _aiProvider.ExtractPreferencesAsync(message, request.TripContext, ct);
 
             _logger.LogInformation(
                 "Builder: prefs days={Days} categories={Cats} vibes={Vibes} groupType={GT} planName='{Name}' maxStopsPerDay={Max}",
@@ -102,7 +109,7 @@ public class BuilderController : ControllerBase
 
             // 2+3. Retrieve + rank candidates semánticamente (RAG) con fallback a filtrado por categoría.
             var city = request.TripContext?.City ?? "Miami"; // Default fallback
-            var filteredPlaces = await RetrieveCandidatesAsync(request.Message, city, prefs, ct);
+            var filteredPlaces = await RetrieveCandidatesAsync(message, city, prefs, ct);
 
             _logger.LogInformation("Builder: candidates count={Count}", filteredPlaces.Count);
 
@@ -125,8 +132,8 @@ public class BuilderController : ControllerBase
                 prefs.Days, planStopsData.Count, categoryMix, scheduleSummary,
                 string.Join(",", schedule.Warnings));
 
-            var sanitizedMessage = request.Message.Length > 60 ? request.Message[..60] : request.Message;
-            var planName = BuildPlanName(prefs, city, request.Message);
+            var sanitizedMessage = message.Length > 60 ? message[..60] : message;
+            var planName = BuildPlanName(prefs, city, message);
             var planDescription = BuildPlanDescription(prefs);
 
             if (isAnonymous)
@@ -632,28 +639,39 @@ public class BuilderController : ControllerBase
     };
 
     /// <summary>
-    /// Valida que el request tenga input mínimo significativo. Acepta si cumple AL MENOS
-    /// uno de: (A) mensaje descriptivo ≥20 chars no-placeholder, (B) ≥2 señales del wizard
-    /// de entre {days, groupType válido, preferences||vibes no vacío}.
+    /// Valida que el request tenga input mínimo del wizard. Regla producto (Pablo 2026-04-23):
+    /// **SIEMPRE** ≥3 de 5 señales wizard {city, days, groupType, preferences||vibes, budget}.
+    /// El chat message es opcional y NO sustituye al wizard — si el user escribió algo,
+    /// complementa (se pasa a Gemini + embedding) pero no puede reemplazar pasos faltantes.
     /// </summary>
     private static (bool accepted, Dictionary<string, bool> signals) ValidateMinimumInput(BuilderChatRequest request)
     {
-        var msgDescriptive = IsDescriptiveMessage(request.Message);
+        var hasMessage = !string.IsNullOrWhiteSpace(request.Message);
 
+        var city = !string.IsNullOrWhiteSpace(request.TripContext?.City);
         var days = request.TripContext?.Days.HasValue == true;
         var groupType = !string.IsNullOrWhiteSpace(request.TripContext?.GroupType);
         var preferences = (request.TripContext?.Preferences?.Count > 0)
                        || (request.TripContext?.Vibes?.Count > 0);
+        var budget = !string.IsNullOrWhiteSpace(request.TripContext?.Budget);
 
-        var wizardSignals = (days ? 1 : 0) + (groupType ? 1 : 0) + (preferences ? 1 : 0);
-        var accepted = msgDescriptive || wizardSignals >= 2;
+        var wizardSignals = (city ? 1 : 0)
+                          + (days ? 1 : 0)
+                          + (groupType ? 1 : 0)
+                          + (preferences ? 1 : 0)
+                          + (budget ? 1 : 0);
+
+        // SIEMPRE ≥3 señales wizard. El chat no puede compensar pasos wizard saltados.
+        var accepted = wizardSignals >= 3;
 
         return (accepted, new Dictionary<string, bool>
         {
-            ["message_descriptive"] = msgDescriptive,
+            ["chat_message"] = hasMessage,  // informativo, no cuenta para el umbral
+            ["wizard_city"] = city,
             ["wizard_days"] = days,
             ["wizard_groupType"] = groupType,
             ["wizard_preferences"] = preferences,
+            ["wizard_budget"] = budget,
         });
     }
 

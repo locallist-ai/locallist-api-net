@@ -4,10 +4,11 @@ namespace LocalList.API.NET.Features.Builder;
 
 public class BuilderChatRequest
 {
-    [Required]
-    [MinLength(1)]
+    // Message opcional (Pablo 2026-04-23): el chat complementa al wizard pero no lo sustituye.
+    // Si el user no escribe nada, el wizard debe tener mínimo 3/5 señales para generar plan.
+    // Si el user escribe algo, se pasa tal cual al pipeline (Gemini + embedding query).
     [MaxLength(5000)]
-    public required string Message { get; set; }
+    public string? Message { get; set; }
     public TripContextDto? TripContext { get; set; }
 }
 
@@ -33,4 +34,6 @@ public class TripContextDto
     public int? Days { get; set; }
     [MaxLength(100)]
     public string? City { get; set; }
+    [MaxLength(20)]
+    public string? Budget { get; set; } // "budget" | "moderate" | "premium"
 }
