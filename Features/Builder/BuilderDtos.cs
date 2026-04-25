@@ -36,4 +36,21 @@ public class TripContextDto
     public string? City { get; set; }
     [MaxLength(20)]
     public string? Budget { get; set; } // "budget" | "moderate" | "premium"
+
+    /// <summary>
+    /// Top-level interests seleccionados en el nuevo step del wizard
+    /// (ej. "food", "outdoors", "culture"). Mapean contra Place.Category.
+    /// Pablo 2026-04-25: campo additive, el matching contra el catálogo se
+    /// implementa en sesión siguiente. De momento se acepta y se loggea.
+    /// </summary>
+    [MaxLength(10)]
+    public List<string>? Categories { get; set; }
+
+    /// <summary>
+    /// Drill-down por categoría: { "food": ["sushi","italian"], "outdoors": ["beach"] }.
+    /// Mapean contra Place.Subcategory mediante substring match (ver helper en
+    /// memoria project_real_routing_pending para el patrón). Cada lista tiene
+    /// como máximo 10 tags y los strings van validados aparte si se persisten.
+    /// </summary>
+    public Dictionary<string, List<string>>? Subcategories { get; set; }
 }
