@@ -38,6 +38,16 @@ public class TripContextDto
     public string? Budget { get; set; } // "budget" | "moderate" | "premium"
 
     /// <summary>
+    /// Presupuesto diario por persona en USD (custom input). Pablo 2026-04-25:
+    /// "en vez de 3 tabs, deberíamos dejar que el usuario ponga su presupuesto".
+    /// El frontend sigue mandando `Budget` con el tier derivado (budget/moderate/
+    /// premium) para compat con el matching actual. `BudgetAmount` viaja como
+    /// contexto extra para futuro matching más fino.
+    /// </summary>
+    [Range(0, 10000)]
+    public int? BudgetAmount { get; set; }
+
+    /// <summary>
     /// Top-level interests seleccionados en el nuevo step del wizard
     /// (ej. "food", "outdoors", "culture"). Mapean contra Place.Category.
     /// Pablo 2026-04-25: campo additive, el matching contra el catálogo se
