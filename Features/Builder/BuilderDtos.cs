@@ -63,4 +63,20 @@ public class TripContextDto
     /// como máximo 10 tags y los strings van validados aparte si se persisten.
     /// </summary>
     public Dictionary<string, List<string>>? Subcategories { get; set; }
+
+    /// <summary>
+    /// Drill-down tags del company step seleccionado (ej. ["honeymoon"] cuando
+    /// GroupType="couple"). Solo se envían los del parent activo. Pablo
+    /// 2026-04-25: drill-down también para company y style. Mapean contra
+    /// Place.SuitableFor / BestFor en el catálogo.
+    /// </summary>
+    [MaxLength(5)]
+    public List<string>? CompanyTags { get; set; }
+
+    /// <summary>
+    /// Drill-down tags del style step seleccionado (ej. ["urban","foodie"]
+    /// cuando vibes=["adventure"]). Mapean contra Place.BestFor / BestTime.
+    /// </summary>
+    [MaxLength(5)]
+    public List<string>? StyleTags { get; set; }
 }
