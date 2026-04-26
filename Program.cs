@@ -233,14 +233,18 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(1)
             }));
             
-    // A3: Builder specific rate limits (5 per hour per IP) to prevent Gemini abuse
+    // A3: Builder specific rate limits per hour per IP to prevent Gemini abuse.
+    // Configurable via env `Builder__RateLimitPerHour` (default 5). Pablo
+    // 2026-04-26: durante testing intensivo override en Railway a 100+ para
+    // no bloquearse; revertir antes de scale-out con usuarios reales.
+    var builderLimit = builder.Configuration.GetValue<int?>("Builder:RateLimitPerHour") ?? 5;
     options.AddPolicy("BuilderLimit", context =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 AutoReplenishment = true,
-                PermitLimit = 5,
+                PermitLimit = builderLimit,
                 QueueLimit = 0,
                 Window = TimeSpan.FromHours(1)
             }));
