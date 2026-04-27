@@ -14,6 +14,7 @@ public class LocalListDbContext : DbContext
     public DbSet<FollowSession> FollowSessions { get; set; } = null!;
     public DbSet<WaitlistEntry> WaitlistEntries { get; set; } = null!;
     public DbSet<RefreshToken> RefreshTokens { get; set; } = null!;
+    public DbSet<City> Cities { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -75,6 +76,9 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<Place>().HasIndex(p => new { p.Status, p.City });
         modelBuilder.Entity<Place>().HasIndex(p => p.Category);
         modelBuilder.Entity<Place>().HasIndex(p => p.GooglePlaceId).IsUnique();
+
+        // Cities — unique normalized_name evita duplicados (Miami/miami/MIAMI).
+        modelBuilder.Entity<City>().HasIndex(c => c.NormalizedName).IsUnique();
 
         // Explicit array column types for Npgsql
         modelBuilder.Entity<Place>().Property(p => p.BestFor).HasColumnType("text[]");
