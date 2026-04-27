@@ -167,6 +167,12 @@ builder.Services.AddAuthentication(MultiScheme)
         {
             ValidateIssuer = true,
             ValidIssuer = JwtTokenService.Issuer,
+            // Audit follow-up 2026-04-27 (C2 fase A): emit `aud` desde
+            // JwtTokenService pero NO validar todavía. Tokens viejos sin
+            // `aud` siguen siendo aceptados durante el refresh window (30d).
+            // Activar `ValidateAudience = true` con `ValidAudience =
+            // JwtTokenService.Audience` en una migración futura tras la
+            // ventana de transición.
             ValidateAudience = false,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
@@ -175,19 +181,38 @@ builder.Services.AddAuthentication(MultiScheme)
     })
     .AddPolicyScheme(MultiScheme, "Firebase or App JWT", options =>
     {
+        // Audit follow-up 2026-04-27 (C1): size cap antes de parsear bytes
+        // attacker-controlled. JwtSecurityTokenHandler.ReadJwtToken hace
+        // base64-decode del header+payload sin tope de tamaño — tokens de 1MB
+        // se parseaban antes de rechazarse.
+        const int MaxTokenLength = 4096;
         options.ForwardDefaultSelector = context =>
         {
             var auth = context.Request.Headers["Authorization"].FirstOrDefault();
             if (auth is null || !auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
                 return FirebaseScheme;
             var token = auth["Bearer ".Length..].Trim();
+            if (token.Length > MaxTokenLength)
+            {
+                var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+                logger.LogWarning(
+                    "Bearer token of {Length} chars exceeded {Max} cap on {Path}; routing to {Scheme}",
+                    token.Length, MaxTokenLength, context.Request.Path, FirebaseScheme);
+                return FirebaseScheme;
+            }
             try
             {
                 var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
                 return jwt.Issuer == JwtTokenService.Issuer ? AppScheme : FirebaseScheme;
             }
-            catch
+            catch (Exception ex)
             {
+                // Tokens malformados → FirebaseScheme. Log warn con request path
+                // para no enmascarar señal de App tokens corruptos.
+                var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+                logger.LogWarning(ex,
+                    "Failed to parse Bearer token on {Path}; routing to {Scheme}",
+                    context.Request.Path, FirebaseScheme);
                 return FirebaseScheme;
             }
         };

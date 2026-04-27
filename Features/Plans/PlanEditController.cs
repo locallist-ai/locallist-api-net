@@ -100,10 +100,29 @@ public class PlanEditController : ControllerBase
             return NotFound(new { error = "Plan not found" });
         }
 
+        // Audit follow-up 2026-04-27 (C3): cascade en LocalListDbContext borra
+        // FollowSessions tied al plan — incluyendo las de OTROS users si el
+        // plan era público. Loggeamos el blast radius para que un follower
+        // afectado pueda rastrearlo si reporta "mi sesión desapareció".
+        var cascadedFollowSessions = await _db.FollowSessions
+            .Where(fs => fs.PlanId == id)
+            .Select(fs => new { fs.Id, fs.UserId })
+            .ToListAsync(ct);
+
         _db.Plans.Remove(plan);
         await _db.SaveChangesAsync(ct);
 
-        _logger.LogInformation("User {UserId} deleted plan {PlanId}", userId, id);
+        if (cascadedFollowSessions.Count > 0)
+        {
+            _logger.LogInformation(
+                "User {UserId} deleted plan {PlanId}; cascade removed {Count} follow sessions for users [{FollowerIds}]",
+                userId, id, cascadedFollowSessions.Count,
+                string.Join(",", cascadedFollowSessions.Select(s => s.UserId)));
+        }
+        else
+        {
+            _logger.LogInformation("User {UserId} deleted plan {PlanId}", userId, id);
+        }
         return NoContent();
     }
 }
