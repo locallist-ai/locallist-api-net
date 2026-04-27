@@ -12,7 +12,9 @@ public class PlaceRankingServiceTests
         string? neighborhood = null,
         List<string>? bestFor = null,
         int? aiVibeScore = null,
-        List<string>? suitableFor = null) => new()
+        List<string>? suitableFor = null,
+        string? subcategory = null,
+        string? priceRange = null) => new()
     {
         Id = Guid.NewGuid(),
         Name = name,
@@ -23,6 +25,8 @@ public class PlaceRankingServiceTests
         BestFor = bestFor,
         AiVibeScore = aiVibeScore,
         SuitableFor = suitableFor,
+        Subcategory = subcategory,
+        PriceRange = priceRange,
     };
 
     [Fact]
@@ -55,8 +59,9 @@ public class PlaceRankingServiceTests
     public void Rank_BestForMatch_OvertakesHigherCosineWithoutMatch()
     {
         var svc = new PlaceRankingService();
-        // cand1: cosine 0.80, sin bestFor match. base score = 0.5*0.80 = 0.40
-        // cand2: cosine 0.65, bestFor match perfecto → 0.5*0.65 + 0.15*1 = 0.475
+        // cand1: cosine 0.80, sin bestFor match. base score ≈ WeightCosine*0.80 = 0.32
+        // cand2: cosine 0.65, bestFor match perfecto → WeightCosine*0.65 + WeightVibes*1
+        // El WeightVibes domina a la diferencia de cosine entre 0.80 y 0.65.
         var cosineLeader = P("CosineLeader");
         var vibeLeader = P("VibeLeader", bestFor: new List<string> { "romantic" });
         var prefs = new ExtractedPreferences
@@ -84,8 +89,8 @@ public class PlaceRankingServiceTests
 
         var ranked = svc.Rank(new[]
         {
-            (a, 0.50f), // similarity 0.50
-            (b, 0.30f), // similarity 0.70 — gana
+            (a, 0.50f), // cosine similarity 0.50
+            (b, 0.30f), // cosine similarity 0.70 — gana por cosine
         }, prefs);
 
         Assert.Equal(b.Id, ranked[0].Id);
@@ -235,5 +240,215 @@ public class PlaceRankingServiceTests
 
         Assert.Equal(familyFriendly.Id, ranked[0].Id);
         Assert.Equal(adultsOnly.Id, ranked[1].Id);
+    }
+
+    // ── Soft signals: Subcategory, CompanyTags, StyleTags, Budget ────────────
+    // B1 (audit follow-up 2026-04-27): Pablo's "no breaking, regression test
+    // mandatory" rule for soft-signals. Each signal: at least 1 absent (legacy
+    // preserved) + 1 present (expected delta) test.
+
+    [Fact]
+    public void ScoreSubcategoryMatch_NoSubcategoriesPref_ReturnsZero()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Sushi", category: "Food", subcategory: "Sushi / japanese");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string> { "food" },
+            Subcategories = null, // legacy: no drill-down
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.SubcategoryMatch);
+    }
+
+    [Fact]
+    public void ScoreSubcategoryMatch_BucketMatchesBySubstring_ReturnsOne()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Pasta", category: "Food", subcategory: "Coastal Italian / seafood");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string> { "food" },
+            Subcategories = new Dictionary<string, List<string>>
+            {
+                ["food"] = new() { "italian" },
+            },
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.SubcategoryMatch);
+    }
+
+    [Fact]
+    public void ScoreSubcategoryMatch_BucketWithoutMatch_ReturnsZero()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Mex", category: "Food", subcategory: "Tacos / mexican");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string> { "food" },
+            Subcategories = new Dictionary<string, List<string>>
+            {
+                ["food"] = new() { "sushi", "italian" },
+            },
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.SubcategoryMatch);
+    }
+
+    [Fact]
+    public void ScoreCompanyTagsMatch_EmptyTags_ReturnsZero()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Spot", suitableFor: new List<string> { "honeymoon" });
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            CompanyTags = null,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.CompanyTagsMatch);
+    }
+
+    [Fact]
+    public void ScoreCompanyTagsMatch_HoneymoonInSuitableFor_ReturnsOne()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Romantic", suitableFor: new List<string> { "honeymoon", "anniversary" });
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            CompanyTags = new List<string> { "honeymoon" },
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.CompanyTagsMatch);
+    }
+
+    [Fact]
+    public void ScoreStyleTagsMatch_EmptyTags_ReturnsZero()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Spot", bestFor: new List<string> { "urban-explorer", "foodie" });
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            StyleTags = null,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.StyleTagsMatch);
+    }
+
+    [Fact]
+    public void ScoreStyleTagsMatch_PartialOverlap_ReturnsProportional()
+    {
+        var svc = new PlaceRankingService();
+        // place tiene foodie pero no urban → 1 of 2 prefs matches → 0.5
+        var place = P("Foodie", bestFor: new List<string> { "foodie" });
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            StyleTags = new List<string> { "urban", "foodie" },
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0.5f, scored[0].Breakdown.StyleTagsMatch);
+    }
+
+    [Fact]
+    public void ScoreStyleTagsMatch_FullOverlap_ReturnsOne()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Both", bestFor: new List<string> { "urban-explorer", "foodie" });
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            StyleTags = new List<string> { "urban", "foodie" },
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.StyleTagsMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_NoBudgetAmount_ReturnsZero()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Spot", priceRange: "$$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = null,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_AmountSetButPlacePriceRangeEmpty_ReturnsHalf()
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Spot", priceRange: null);
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 150,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0.5f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_TierExact_ReturnsOne()
+    {
+        var svc = new PlaceRankingService();
+        // amount 150 → desiredTier 2 ($$), place "$$" → exact match
+        var place = P("Mid", priceRange: "$$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 150,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_TierAdjacent_ReturnsPointSix()
+    {
+        var svc = new PlaceRankingService();
+        // amount 150 → desiredTier 2 ($$), place "$$$" → diff 1 → 0.6
+        var place = P("Up", priceRange: "$$$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 150,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0.6f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_TierFar_ReturnsZero()
+    {
+        var svc = new PlaceRankingService();
+        // amount 50 → desiredTier 1 ($), place "$$$$" → diff 3 → 0
+        var place = P("Premium", priceRange: "$$$$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 50,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.BudgetMatch);
     }
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -12,12 +13,28 @@ namespace LocalList.API.Tests.Features;
 public class CitiesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
     [Fact]
-    public async Task NormalizeName_StripsAccentsAndLowercases()
+    public void NormalizeName_StripsAccentsAndLowercases()
     {
+        Assert.Equal("malaga", CityNameNormalizer.Normalize("Málaga"));
+        Assert.Equal("sao paulo", CityNameNormalizer.Normalize("São Paulo"));
+        Assert.Equal("miami", CityNameNormalizer.Normalize("MIAMI"));
+        Assert.Equal("miami", CityNameNormalizer.Normalize("  Miami  "));
+    }
+
+    [Fact]
+    public void NormalizeName_StripsControlAndFormatChars()
+    {
+        // Zero-width joiner (U+200D, Cf) entre caracteres no debe sobrevivir.
+        Assert.Equal("miami", CityNameNormalizer.Normalize("Mi\u200Dami"));
+        // Bell control char (U+0007, Cc).
+        Assert.Equal("miami", CityNameNormalizer.Normalize("Mi\u0007ami"));
+    }
+
+    [Fact]
+    public void CitiesController_NormalizeName_DelegatesToHelper()
+    {
+        // Compatibility wrapper sigue funcionando para callers existentes.
         Assert.Equal("malaga", CitiesController.NormalizeName("Málaga"));
-        Assert.Equal("sao paulo", CitiesController.NormalizeName("São Paulo"));
-        Assert.Equal("miami", CitiesController.NormalizeName("MIAMI"));
-        Assert.Equal("miami", CitiesController.NormalizeName("  Miami  "));
     }
 
     [Fact]
@@ -88,16 +105,143 @@ public class CitiesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task PostCity_InvalidName_Returns400()
+    public async Task PostCity_OneCharName_Returns400()
     {
-        var (userId, fbUid) = await CreateUser("city-invalid");
+        var (userId, fbUid) = await CreateUser("city-tooshort");
         var client = fixture.CreateAuthenticatedClient(userId, fbUid);
 
-        var tooShort = await client.PostAsJsonAsync("/cities", new { name = "M" });
-        Assert.Equal(HttpStatusCode.BadRequest, tooShort.StatusCode);
+        var response = await client.PostAsJsonAsync("/cities", new { name = "M" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
 
-        var empty = await client.PostAsJsonAsync("/cities", new { name = "  " });
-        Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
+    [Fact]
+    public async Task PostCity_WhitespaceOnly_Returns400()
+    {
+        var (userId, fbUid) = await CreateUser("city-whitespace");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        var response = await client.PostAsJsonAsync("/cities", new { name = "  " });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostCity_DuplicateName_DoesNotCreateExtraRow()
+    {
+        // B2: idempotency must prove DB count == 1 (the existing test only
+        // checks same Id is returned — could mask a duplicate that's deduped
+        // on read).
+        var (userId, fbUid) = await CreateUser("city-dup-count");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+        var name = $"DupCountCity_{Guid.NewGuid():N}";
+
+        await client.PostAsJsonAsync("/cities", new { name });
+        await client.PostAsJsonAsync("/cities", new { name = name.ToUpperInvariant() });
+
+        var db = fixture.GetDbContext();
+        var normalized = CityNameNormalizer.Normalize(name);
+        var count = await db.Cities.CountAsync(c => c.NormalizedName == normalized);
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public async Task PostCity_ConcurrentRequests_RemainsIdempotent()
+    {
+        // A3: race regression test. Two concurrent POSTs with the same
+        // normalized name must both return 2xx with same Id, NOT 500.
+        // Without the DbUpdateException handler this fires the unique
+        // violation and surfaces InternalServerError.
+        var (userId, fbUid) = await CreateUser("city-race");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+        var name = $"RaceCity_{Guid.NewGuid():N}";
+        var payload = new { name };
+
+        var tasks = Enumerable.Range(0, 2)
+            .Select(_ => client.PostAsJsonAsync("/cities", payload))
+            .ToArray();
+        var responses = await Task.WhenAll(tasks);
+
+        foreach (var r in responses)
+            Assert.True(r.IsSuccessStatusCode, $"Expected 2xx, got {r.StatusCode}");
+
+        var bodies = await Task.WhenAll(responses.Select(r => r.Content.ReadFromJsonAsync<CityDto>()));
+        Assert.NotNull(bodies[0]);
+        Assert.NotNull(bodies[1]);
+        Assert.Equal(bodies[0]!.Id, bodies[1]!.Id);
+
+        // DB must have exactly one row.
+        var db = fixture.GetDbContext();
+        var normalized = CityNameNormalizer.Normalize(name);
+        var count = await db.Cities.CountAsync(c => c.NormalizedName == normalized);
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public async Task PostCity_TokenWithoutDbUser_Returns401()
+    {
+        // C5: válid JWT (correctamente firmado) pero el userId no corresponde
+        // a ningún User en DB. El controller debe rechazar antes de persistir
+        // una fila huérfana con CreatedById=null.
+        var phantomUserId = Guid.NewGuid();
+        var phantomFbUid = $"fb-phantom-{phantomUserId:N}";
+        var client = fixture.CreateAuthenticatedClient(phantomUserId, phantomFbUid);
+
+        var response = await client.PostAsJsonAsync("/cities", new { name = "PhantomCity" });
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Search_AccentInsensitivePrefix_ReturnsCity()
+    {
+        // B2: end-to-end prueba que NormalizeName está realmente aplicado en
+        // la query, no sólo en el helper estático.
+        var name = $"México_{Guid.NewGuid():N}";
+        var db = fixture.GetDbContext();
+        db.Cities.Add(new City
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            NormalizedName = CityNameNormalizer.Normalize(name),
+            Source = "seed",
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        // Query "MEX" (uppercase, no accent) debe encontrar "México".
+        var response = await client.GetAsync("/cities/search?q=MEX");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<SearchResponse>();
+        Assert.NotNull(body);
+        Assert.Contains(body!.Cities, c => c.Name == name);
+    }
+
+    [Fact]
+    public async Task Search_EmptyQuery_Returns400()
+    {
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync("/cities/search");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Search_TooShortQuery_Returns400()
+    {
+        // Hardening: empty + 1-char queries hacen sort over full table sin
+        // índice. Reject < MinSearchLength (2).
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync("/cities/search?q=a");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Search_TooLongQuery_Returns400()
+    {
+        // DoS guard: cap input at MaxRawLength (64).
+        var longQ = new string('a', 65);
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync($"/cities/search?q={longQ}");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     private class SearchResponse

@@ -250,6 +250,51 @@ public class PlanEditTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task DeletePlan_WithActiveFollowSession_CascadesAll()
+    {
+        // B3 (audit follow-up 2026-04-27): el modelo configura cascade desde Plan a
+        // FollowSession (LocalListDbContext.cs:45-49). Confirmar que el DELETE
+        // efectivamente borra las FollowSessions tied al plan en Postgres real
+        // (no sólo EF in-memory).
+        var (ownerId, ownerFbUid) = await CreateUser("plandelete-cascade-owner");
+        var (followerId, _) = await CreateUser("plandelete-cascade-follower");
+
+        var db = fixture.GetDbContext();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Plan con follow",
+            City = "Miami",
+            Type = "user",
+            IsPublic = true,
+            CreatedById = ownerId,
+        };
+        var session = new FollowSession
+        {
+            Id = Guid.NewGuid(),
+            UserId = followerId,
+            PlanId = plan.Id,
+            Status = "active",
+            CurrentStopIndex = 0,
+            StartedAt = DateTimeOffset.UtcNow,
+        };
+        db.Plans.Add(plan);
+        db.FollowSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
+        var response = await client.DeleteAsync($"/plans/{plan.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var after = fixture.GetDbContext();
+        Assert.Null(await after.Plans.FindAsync(plan.Id));
+        // Cascade: la FollowSession del follower también desaparece. Esto es
+        // intencional (no se puede follow un plan inexistente) pero el dueño
+        // del plan está borrando datos de OTROS users — vigilar UX/audit.
+        Assert.Null(await after.FollowSessions.FindAsync(session.Id));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private async Task<(Guid userId, string firebaseUid)> CreateUser(string prefix)
