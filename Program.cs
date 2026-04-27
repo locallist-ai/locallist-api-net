@@ -310,6 +310,41 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(1)
             }));
 
+    // CitySearchLimit (anonymous): autocomplete on /cities/search. The endpoint
+    // runs Unicode FormD normalization on every call → DoS vector if uncapped.
+    // 30/min/IP is generous for real autocomplete (debounced at 250ms client-side
+    // → max ~4 calls per typing burst).
+    options.AddPolicy("CitySearchLimit", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 30,
+                QueueLimit = 0,
+                Window = TimeSpan.FromMinutes(1)
+            }));
+
+    // CityCreateLimit (authenticated): partitioned by userId (NOT IP) so attackers
+    // sharing an IP don't squeeze legit users. POST /cities writes to a public
+    // anonymous-readable registry (XSS / SEO pollution surface), so cap is tight.
+    options.AddPolicy("CityCreateLimit", context =>
+    {
+        var userId = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                     ?? context.User?.FindFirst("sub")?.Value
+                     ?? context.Connection.RemoteIpAddress?.ToString()
+                     ?? "anonymous";
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: userId,
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = 10,
+                QueueLimit = 0,
+                Window = TimeSpan.FromHours(1)
+            });
+    });
+
     options.RejectionStatusCode = 429;
 });
 
