@@ -29,6 +29,15 @@ public class PlaceRankingService
     private const float WeightAiVibe = 0.1f;
     private const float WeightNeighborhoodPenalty = 0.05f;
 
+    // Pablo 2026-04-27 — soft signals adicionales del wizard. Solo aportan
+    // si el usuario aportó la señal (drill-down, budget). Aditivos sobre el
+    // total existente (no rebalancean los pesos previos para no romper
+    // tests de regresión).
+    private const float WeightSubcategory = 0.10f;
+    private const float WeightCompanyTags = 0.05f;
+    private const float WeightStyleTags = 0.05f;
+    private const float WeightBudget = 0.05f;
+
     public readonly record struct ScoredCandidate(Place Place, float Score, ScoreBreakdown Breakdown);
 
     public readonly record struct ScoreBreakdown(
@@ -37,7 +46,11 @@ public class PlaceRankingService
         float BestForMatch,
         float SuitableForMatch,
         float AiVibeNormalized,
-        float NeighborhoodPenalty)
+        float NeighborhoodPenalty,
+        float SubcategoryMatch,
+        float CompanyTagsMatch,
+        float StyleTagsMatch,
+        float BudgetMatch)
     {
         public float Total =>
             WeightCosine * Similarity
@@ -45,6 +58,10 @@ public class PlaceRankingService
             + WeightBestFor * BestForMatch
             + WeightSuitableFor * SuitableForMatch
             + WeightAiVibe * AiVibeNormalized
+            + WeightSubcategory * SubcategoryMatch
+            + WeightCompanyTags * CompanyTagsMatch
+            + WeightStyleTags * StyleTagsMatch
+            + WeightBudget * BudgetMatch
             - WeightNeighborhoodPenalty * NeighborhoodPenalty;
     }
 
@@ -92,7 +109,11 @@ public class PlaceRankingService
                 ScoreBestForMatch(c.place, prefs),
                 ScoreSuitableForMatch(c.place, prefs),
                 ScoreAiVibe(c.place),
-                0f);
+                0f,
+                ScoreSubcategoryMatch(c.place, prefs),
+                ScoreCompanyTagsMatch(c.place, prefs),
+                ScoreStyleTagsMatch(c.place, prefs),
+                ScoreBudgetMatch(c.place, prefs));
             return (c.place, bd);
         })
         .OrderByDescending(t => t.bd.Total)
@@ -111,7 +132,9 @@ public class PlaceRankingService
             }
             var finalBd = new ScoreBreakdown(
                 bd.Similarity, bd.CategoryMatch, bd.BestForMatch,
-                bd.SuitableForMatch, bd.AiVibeNormalized, penalty);
+                bd.SuitableForMatch, bd.AiVibeNormalized, penalty,
+                bd.SubcategoryMatch, bd.CompanyTagsMatch,
+                bd.StyleTagsMatch, bd.BudgetMatch);
             scored.Add(new ScoredCandidate(place, finalBd.Total, finalBd));
         }
 
@@ -182,5 +205,99 @@ public class PlaceRankingService
         if (!place.AiVibeScore.HasValue) return 0f;
         var v = Math.Clamp(place.AiVibeScore.Value, 0, 100);
         return v / 100f;
+    }
+
+    // Subcategory drill-down match (Pablo 2026-04-25/27).
+    // prefs.Subcategories es { "food": ["sushi","italian"], ... }. Para cada
+    // place, buscamos el bucket que coincide con su Category y validamos
+    // que algún tag del bucket aparezca como substring en place.Subcategory.
+    // Returns:
+    //   - 0.0 si no hay subcategorías para esta Category (no info, neutral).
+    //   - 1.0 si algún tag matchea por substring (case-insensitive).
+    //   - 0.0 si hay tags pero ninguno matchea (place no encaja con drill-down).
+    // El catálogo Miami tiene Subcategory descriptiva como "Coastal Italian /
+    // seafood" — substring match captura "italian" + "seafood" sin perder.
+    private static float ScoreSubcategoryMatch(Place place, ExtractedPreferences prefs)
+    {
+        if (prefs.Subcategories == null || prefs.Subcategories.Count == 0) return 0f;
+        if (string.IsNullOrWhiteSpace(place.Subcategory) || string.IsNullOrWhiteSpace(place.Category)) return 0f;
+
+        // Buscamos el bucket de subcategorías para la category del place.
+        // Match case-insensitive en el key del dict.
+        List<string>? tags = null;
+        foreach (var (key, value) in prefs.Subcategories)
+        {
+            if (string.Equals(key, place.Category, StringComparison.OrdinalIgnoreCase))
+            {
+                tags = value;
+                break;
+            }
+        }
+        if (tags == null || tags.Count == 0) return 0f;
+
+        var sub = place.Subcategory.ToLowerInvariant();
+        return tags.Any(t => !string.IsNullOrWhiteSpace(t) && sub.Contains(t.ToLowerInvariant()))
+            ? 1f
+            : 0f;
+    }
+
+    // CompanyTags refinement match — ej. usuario eligió couple → honeymoon.
+    // Se cruza con place.SuitableFor + place.BestFor (algunos catálogos taggean
+    // "honeymoon", "kids", "anniversary" en bestFor; otros en suitableFor).
+    // Returns 1.0 si algún tag matchea exact (case-insensitive), else 0.
+    private static float ScoreCompanyTagsMatch(Place place, ExtractedPreferences prefs)
+    {
+        if (prefs.CompanyTags == null || prefs.CompanyTags.Count == 0) return 0f;
+
+        bool MatchesAny(IEnumerable<string>? haystack)
+        {
+            if (haystack == null) return false;
+            return haystack.Any(h => prefs.CompanyTags!.Any(t =>
+                string.Equals(h, t, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return MatchesAny(place.SuitableFor) || MatchesAny(place.BestFor) ? 1f : 0f;
+    }
+
+    // StyleTags refinement match — ej. usuario eligió adventure → ["urban","foodie"].
+    // Cruza con place.BestFor (urban-explorer, foodie, outdoor, etc).
+    private static float ScoreStyleTagsMatch(Place place, ExtractedPreferences prefs)
+    {
+        if (prefs.StyleTags == null || prefs.StyleTags.Count == 0) return 0f;
+        if (place.BestFor == null || place.BestFor.Count == 0) return 0f;
+
+        var matches = prefs.StyleTags.Count(t => place.BestFor.Any(b =>
+            !string.IsNullOrWhiteSpace(b)
+            && (string.Equals(b, t, StringComparison.OrdinalIgnoreCase)
+                || b.ToLowerInvariant().Contains(t.ToLowerInvariant()))));
+        return matches > 0 ? Math.Min(1f, matches / (float)prefs.StyleTags.Count) : 0f;
+    }
+
+    // Budget match — derivamos tier desde BudgetAmount (USD/día/persona) y
+    // lo comparamos con place.PriceRange ("$"/"$$"/"$$$"/"$$$$"). El frontend
+    // ya envía Budget tier (string), pero BudgetAmount permite match más fino:
+    //   - <80 budget → prefiere $/$$
+    //   - 80-199 moderate → $$/$$$
+    //   - >=200 premium → $$$/$$$$
+    // Returns 1.0 si tier-place encaja, 0.5 si está adyacente, 0 si discrepa.
+    private static float ScoreBudgetMatch(Place place, ExtractedPreferences prefs)
+    {
+        if (!prefs.BudgetAmount.HasValue) return 0f;
+        if (string.IsNullOrWhiteSpace(place.PriceRange)) return 0.5f; // sin info, neutral
+
+        var amount = prefs.BudgetAmount.Value;
+        // tier deseado por amount
+        int desiredTier = amount < 80 ? 1 : amount < 200 ? 2 : amount < 400 ? 3 : 4;
+        // tier del place por count de '$'
+        int placeTier = place.PriceRange.Count(c => c == '$');
+        if (placeTier == 0) return 0.5f;
+
+        var diff = Math.Abs(desiredTier - placeTier);
+        return diff switch
+        {
+            0 => 1f,
+            1 => 0.6f,
+            _ => 0f,
+        };
     }
 }

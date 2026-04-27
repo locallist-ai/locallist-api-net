@@ -298,6 +298,32 @@ Return JSON only, no markdown. EXACT shape:
             prefs.MaxStopsPerDay = 3;
         }
 
+        // Categories explícitas del wizard (interests step) — autoritativas:
+        // si el usuario marcó food/outdoors/etc directamente, sobrescriben/
+        // amplían las derivadas de Preferences. Pablo 2026-04-25.
+        if (context.Categories != null && context.Categories.Count > 0)
+        {
+            foreach (var cat in context.Categories)
+            {
+                if (!string.IsNullOrWhiteSpace(cat)
+                    && !prefs.Categories.Contains(cat, StringComparer.OrdinalIgnoreCase))
+                {
+                    prefs.Categories.Add(cat);
+                }
+            }
+        }
+
+        // Sub-categorías, company/style tags, budget amount — pasan tal cual
+        // al ranking. PlaceRankingService los usa como soft signals.
+        if (context.Subcategories != null && context.Subcategories.Count > 0)
+            prefs.Subcategories = context.Subcategories;
+        if (context.CompanyTags != null && context.CompanyTags.Count > 0)
+            prefs.CompanyTags = context.CompanyTags;
+        if (context.StyleTags != null && context.StyleTags.Count > 0)
+            prefs.StyleTags = context.StyleTags;
+        if (context.BudgetAmount.HasValue && context.BudgetAmount.Value > 0)
+            prefs.BudgetAmount = context.BudgetAmount.Value;
+
         _logger.LogInformation(
             "Prefs after context merge: days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} maxStops={Max}",
             prefs.Days,
