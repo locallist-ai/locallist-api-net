@@ -174,6 +174,10 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("WaitlistLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("CitySearchLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("CityCreateLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
     }
