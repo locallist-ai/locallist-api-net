@@ -13,6 +13,15 @@ public interface IJwtTokenService
 public class JwtTokenService : IJwtTokenService
 {
     public const string Issuer = "locallist-api";
+    /// <summary>
+    /// Audience claim para tokens emitidos por este servicio. Audit follow-up
+    /// 2026-04-27 (C2): empezamos a embeber `aud` ahora; la validación
+    /// (ValidateAudience=true en Program.cs) se activa en una segunda fase
+    /// tras dejar que los tokens viejos sin `aud` expiren (lifetime 15min;
+    /// refresh window 30d, así que durante 30 días convivirán tokens nuevos
+    /// con/sin aud — no romper.)
+    /// </summary>
+    public const string Audience = "locallist-app";
     private static readonly TimeSpan AccessTokenLifetime = TimeSpan.FromMinutes(15);
 
     private readonly SymmetricSecurityKey _signingKey;
@@ -39,7 +48,7 @@ public class JwtTokenService : IJwtTokenService
 
         var token = new JwtSecurityToken(
             issuer: Issuer,
-            audience: null,
+            audience: Audience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),

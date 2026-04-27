@@ -313,14 +313,29 @@ Return JSON only, no markdown. EXACT shape:
             }
         }
 
-        // Sub-categorías, company/style tags, budget amount — pasan tal cual
-        // al ranking. PlaceRankingService los usa como soft signals.
+        // Sub-categorías, company/style tags, budget amount — pasan al ranking
+        // como soft signals. Audit follow-up 2026-04-27 (C6): cap explícito
+        // contra clientes que shippeen dicts/listas grandes para hinchar
+        // el coste/latency del pipeline Gemini.
+        const int MaxSubcategoryBuckets = 10;
+        const int MaxTagsPerBucket = 10;
+        const int MaxCompanyOrStyleTags = 10;
         if (context.Subcategories != null && context.Subcategories.Count > 0)
-            prefs.Subcategories = context.Subcategories;
+        {
+            // Cap claves del dict + tags por bucket. Trunca silenciosamente —
+            // no lanzamos 400 porque el cliente legítimo nunca debería pasar
+            // de los caps; sólo es defense-in-depth contra requests maliciosos.
+            var capped = context.Subcategories
+                .Take(MaxSubcategoryBuckets)
+                .ToDictionary(
+                    kv => kv.Key,
+                    kv => (kv.Value ?? new List<string>()).Take(MaxTagsPerBucket).ToList());
+            prefs.Subcategories = capped;
+        }
         if (context.CompanyTags != null && context.CompanyTags.Count > 0)
-            prefs.CompanyTags = context.CompanyTags;
+            prefs.CompanyTags = context.CompanyTags.Take(MaxCompanyOrStyleTags).ToList();
         if (context.StyleTags != null && context.StyleTags.Count > 0)
-            prefs.StyleTags = context.StyleTags;
+            prefs.StyleTags = context.StyleTags.Take(MaxCompanyOrStyleTags).ToList();
         if (context.BudgetAmount.HasValue && context.BudgetAmount.Value > 0)
             prefs.BudgetAmount = context.BudgetAmount.Value;
 
