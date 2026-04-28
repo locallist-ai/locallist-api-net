@@ -106,6 +106,7 @@ builder.Services.AddHttpClient<EmbeddingService>(c => c.Timeout = TimeSpan.FromS
     });
 
 builder.Services.AddScoped<PlaceRankingService>();
+builder.Services.AddScoped<SchedulingService>();
 builder.Services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
