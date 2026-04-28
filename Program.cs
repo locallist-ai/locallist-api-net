@@ -167,13 +167,8 @@ builder.Services.AddAuthentication(MultiScheme)
         {
             ValidateIssuer = true,
             ValidIssuer = JwtTokenService.Issuer,
-            // Audit follow-up 2026-04-27 (C2 fase A): emit `aud` desde
-            // JwtTokenService pero NO validar todavía. Tokens viejos sin
-            // `aud` siguen siendo aceptados durante el refresh window (30d).
-            // Activar `ValidateAudience = true` con `ValidAudience =
-            // JwtTokenService.Audience` en una migración futura tras la
-            // ventana de transición.
-            ValidateAudience = false,
+            ValidateAudience = true,
+            ValidAudiences = new[] { JwtTokenService.Audience },
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret))
