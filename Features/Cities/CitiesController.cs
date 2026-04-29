@@ -64,8 +64,14 @@ public class CitiesController : ControllerBase
         if (queryNorm.Length < MinSearchLength)
             return BadRequest(new { error = $"q must contain at least {MinSearchLength} usable characters" });
 
+        // Seeds visibles para todos; ciudades de usuario solo para su creador.
+        Guid? currentUserId = null;
+        if (User.Identity?.IsAuthenticated == true)
+            currentUserId = await User.GetUserIdAsync(_db, ct);
+
         var matches = await _db.Cities
-            .Where(c => c.NormalizedName.StartsWith(queryNorm))
+            .Where(c => c.NormalizedName.StartsWith(queryNorm)
+                        && (c.Source == "seed" || (currentUserId != null && c.CreatedById == currentUserId)))
             .OrderBy(c => c.Name)
             .Take(10)
             .Select(c => new CityDto

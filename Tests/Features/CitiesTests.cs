@@ -321,6 +321,75 @@ public class CitiesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // ── Visibilidad seed vs usuario ────────────────────────────────────────
+
+    [Fact]
+    public async Task Search_SeedCity_VisibleToAnonymous()
+    {
+        var name = $"SeedVis_{Guid.NewGuid():N}";
+        var db = fixture.GetDbContext();
+        db.Cities.Add(new City
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            NormalizedName = CityNameNormalizer.Normalize(name),
+            Source = "seed",
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var response = await client.GetAsync($"/cities/search?q={name[..6]}");
+        var body = await response.Content.ReadFromJsonAsync<SearchResponse>();
+        Assert.Contains(body!.Cities, c => c.Name == name);
+    }
+
+    [Fact]
+    public async Task Search_UserCity_VisibleToCreator()
+    {
+        var (userId, fbUid) = await CreateUser("vis-creator");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        var name = $"UserCity_{Guid.NewGuid():N}";
+        await client.PostAsJsonAsync("/cities", new { name });
+
+        var response = await client.GetAsync($"/cities/search?q={name[..8]}");
+        var body = await response.Content.ReadFromJsonAsync<SearchResponse>();
+        Assert.Contains(body!.Cities, c => c.Name == name);
+    }
+
+    [Fact]
+    public async Task Search_UserCity_NotVisibleToOtherUser()
+    {
+        var (ownerUserId, ownerFbUid) = await CreateUser("vis-owner");
+        var ownerClient = fixture.CreateAuthenticatedClient(ownerUserId, ownerFbUid);
+
+        var name = $"PrivCity_{Guid.NewGuid():N}";
+        await ownerClient.PostAsJsonAsync("/cities", new { name });
+
+        var (otherUserId, otherFbUid) = await CreateUser("vis-other");
+        var otherClient = fixture.CreateAuthenticatedClient(otherUserId, otherFbUid);
+
+        var response = await otherClient.GetAsync($"/cities/search?q={name[..8]}");
+        var body = await response.Content.ReadFromJsonAsync<SearchResponse>();
+        Assert.DoesNotContain(body!.Cities, c => c.Name == name);
+    }
+
+    [Fact]
+    public async Task Search_UserCity_NotVisibleToAnonymous()
+    {
+        var (userId, fbUid) = await CreateUser("vis-anon");
+        var userClient = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        var name = $"AnonCity_{Guid.NewGuid():N}";
+        await userClient.PostAsJsonAsync("/cities", new { name });
+
+        var anonClient = fixture.CreateClient();
+        var response = await anonClient.GetAsync($"/cities/search?q={name[..8]}");
+        var body = await response.Content.ReadFromJsonAsync<SearchResponse>();
+        Assert.DoesNotContain(body!.Cities, c => c.Name == name);
+    }
+
     private class SearchResponse
     {
         public List<CityDto> Cities { get; set; } = new();
