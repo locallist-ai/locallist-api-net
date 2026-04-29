@@ -88,12 +88,15 @@ public class CitiesController : ControllerBase
             return BadRequest(new { error = "name is required" });
 
         var name = request.Name.Trim();
-        if (name.Length < 2 || name.Length > CityNameNormalizer.MaxRawLength)
-            return BadRequest(new { error = $"name length must be between 2 and {CityNameNormalizer.MaxRawLength}" });
+        if (name.Length < 3 || name.Length > CityNameNormalizer.MaxRawLength)
+            return BadRequest(new { error = $"name length must be between 3 and {CityNameNormalizer.MaxRawLength}" });
 
         var normalized = CityNameNormalizer.Normalize(name);
         if (normalized.Length == 0)
             return BadRequest(new { error = "name has no usable characters" });
+
+        if (!CityNameValidator.IsLikelyRealCity(normalized, out var rejectReason))
+            return BadRequest(new { error = rejectReason });
 
         // Si ya existe (case/accent insensitive), devolver la existente. Esto
         // hace el endpoint idempotente — POST con nombre duplicado no rompe.
