@@ -227,7 +227,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
                 city = Miami,
                 days = 2,
                 groupType = "family-kids",
-                preferences = new[] { "adventure" }
+                categories = new[] { "outdoors", "culture" }
             }
         });
 
@@ -237,15 +237,15 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
 
         Assert.DoesNotContain("Hola", planName, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Miami", planName);
-        // Debe venir de vibes (adventure) o duration (2-day).
+        // Debe venir de categories (outdoors/culture) o duration (2-day).
         Assert.Contains("2-day", planName);
     }
 
     [Fact]
-    public async Task Chat_KeywordFallback_SeedsCategoriesFromPreferences()
+    public async Task Chat_KeywordFallback_SeedsCategoriesFromWizardCategories()
     {
-        // Regresión PR #B: preferences=["adventure"] debe propagarse a categories=outdoors/culture
-        // en el fallback keyword — sin esto los planes family-adventure salían con wellness/food genérico.
+        // El wizard envía categories directas (food/outdoors/wellness…). En el fallback keyword
+        // esas categorías se transfieren directamente a ExtractedPreferences.Categories.
         await SeedPublishedMiamiPlaces(3);
 
         fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.BadGateway)
@@ -256,14 +256,14 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var client = fixture.CreateClient();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
-            // Mensaje SIN keywords de categories — todo lo que contenga categories tiene que venir de preferences.
+            // Mensaje SIN keywords de categories — todo lo que contenga categories tiene que venir del wizard.
             message = "plan",
             tripContext = new
             {
                 city = Miami,
                 days = 1,
                 groupType = "couple",
-                preferences = new[] { "relax" }
+                categories = new[] { "wellness", "coffee" }
             }
         });
 
@@ -271,9 +271,9 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         // La description incluye top categorías: si seed funcionó, contiene "wellness" o "coffee".
         var description = body.GetProperty("plan").GetProperty("description").GetString() ?? "";
-        var hasRelaxCategory = description.Contains("wellness", StringComparison.OrdinalIgnoreCase)
-                            || description.Contains("coffee", StringComparison.OrdinalIgnoreCase);
-        Assert.True(hasRelaxCategory,
+        var hasExpectedCategory = description.Contains("wellness", StringComparison.OrdinalIgnoreCase)
+                               || description.Contains("coffee", StringComparison.OrdinalIgnoreCase);
+        Assert.True(hasExpectedCategory,
             $"Se esperaba 'wellness' o 'coffee' en description, llegó: '{description}'");
     }
 
@@ -431,7 +431,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "x",
-            tripContext = new { city = Miami, groupType = "family-kids", preferences = new[] { "adventure" }, days = 3 },
+            tripContext = new { city = Miami, groupType = "family-kids", categories = new[] { "outdoors", "culture" }, days = 3 },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -478,7 +478,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "family day out",
-            tripContext = new { city = Miami, groupType = "family-kids", preferences = new[] { "cultural" }, days = 1 },
+            tripContext = new { city = Miami, groupType = "family-kids", categories = new[] { "culture" }, days = 1 },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -579,7 +579,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.True(body.GetProperty("signals").GetProperty("wizard_groupType").GetBoolean());
         Assert.False(body.GetProperty("signals").GetProperty("wizard_days").GetBoolean());
-        Assert.False(body.GetProperty("signals").GetProperty("wizard_preferences").GetBoolean());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_interests").GetBoolean());
     }
 
     [Fact]
@@ -651,6 +651,51 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Chat_WizardSendsCategoriesNoPreferences_CountsAsSignal()
+    {
+        // Verifica que el wizard nuevo (categories en lugar de preferences) cuenta como señal.
+        // city + days + groupType + categories = 4 señales → ≥3 → 200.
+        await SeedPublishedMiamiPlaces(3);
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "Test",
+            maxStopsPerDay = 4,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            tripContext = new { city = Miami, days = 1, groupType = "couple", categories = new[] { "food" } },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.TryGetProperty("plan", out _));
+    }
+
+    [Fact]
+    public async Task Chat_NoCategoriesNoInterests_BelowThreshold_Returns400()
+    {
+        // Sin categories ni subcategories, city + groupType = 2 señales → <3 → 400.
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            tripContext = new { city = Miami, groupType = "couple" },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("insufficient_input", body.GetProperty("error").GetString());
+        Assert.False(body.GetProperty("signals").GetProperty("wizard_interests").GetBoolean());
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────

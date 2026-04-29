@@ -51,13 +51,12 @@ public class BuilderController : ControllerBase
         Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
 
         _logger.LogInformation(
-            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} preferences={Prefs} vibes={Vibes} budget={Budget} msgLen={MsgLen}",
+            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} categories={Categories} budget={Budget} msgLen={MsgLen}",
             isAnonymous,
             request.TripContext?.City ?? "(unset)",
             request.TripContext?.Days?.ToString() ?? "(unset)",
             request.TripContext?.GroupType ?? "(unset)",
-            request.TripContext?.Preferences == null ? "(null)" : string.Join(",", request.TripContext.Preferences),
-            request.TripContext?.Vibes == null ? "(null)" : string.Join(",", request.TripContext.Vibes),
+            request.TripContext?.Categories == null ? "(null)" : string.Join(",", request.TripContext.Categories),
             request.TripContext?.Budget ?? "(unset)",
             request.Message?.Length ?? 0);
 
@@ -65,17 +64,17 @@ public class BuilderController : ControllerBase
         if (!inputCheck.accepted)
         {
             _logger.LogInformation(
-                "Builder: rejected insufficient_input — hasMsg={M} wizardCity={C} wizardDays={D} wizardGroup={G} wizardPrefs={P} wizardBudget={B}",
+                "Builder: rejected insufficient_input — hasMsg={M} wizardCity={C} wizardDays={D} wizardGroup={G} wizardInterests={I} wizardBudget={B}",
                 inputCheck.signals["chat_message"],
                 inputCheck.signals["wizard_city"],
                 inputCheck.signals["wizard_days"],
                 inputCheck.signals["wizard_groupType"],
-                inputCheck.signals["wizard_preferences"],
+                inputCheck.signals["wizard_interests"],
                 inputCheck.signals["wizard_budget"]);
             return BadRequest(new
             {
                 error = "insufficient_input",
-                message = "Please complete at least 3 wizard steps (city, duration, group, style, budget).",
+                message = "Please complete at least 3 wizard steps (city, duration, group, interests, budget).",
                 signals = inputCheck.signals
             });
         }
@@ -308,55 +307,33 @@ public class BuilderController : ControllerBase
 
     // ── Input validation ──────────────────────────────────────────────────────────
 
-    private const int DescriptiveMessageMinChars = 20;
-
-    private static readonly HashSet<string> MessagePlaceholders = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "x", "plan", "a plan", "create a plan", "make me a plan", "make a plan",
-        "crea un plan", "hazme un plan", "un plan", "quiero un plan"
-    };
-
     private static (bool accepted, Dictionary<string, bool> signals) ValidateMinimumInput(BuilderChatRequest request)
     {
         var hasMessage = !string.IsNullOrWhiteSpace(request.Message);
 
-        var city        = !string.IsNullOrWhiteSpace(request.TripContext?.City);
-        var days        = request.TripContext?.Days.HasValue == true;
-        var groupType   = !string.IsNullOrWhiteSpace(request.TripContext?.GroupType);
-        var preferences = (request.TripContext?.Preferences?.Count > 0)
-                       || (request.TripContext?.Vibes?.Count > 0);
-        var budget      = !string.IsNullOrWhiteSpace(request.TripContext?.Budget);
+        var city      = !string.IsNullOrWhiteSpace(request.TripContext?.City);
+        var days      = request.TripContext?.Days.HasValue == true;
+        var groupType = !string.IsNullOrWhiteSpace(request.TripContext?.GroupType);
+        var interests = (request.TripContext?.Categories?.Count > 0)
+                     || (request.TripContext?.Subcategories?.Count > 0);
+        var budget    = !string.IsNullOrWhiteSpace(request.TripContext?.Budget);
 
         var wizardSignals = (city ? 1 : 0)
                           + (days ? 1 : 0)
                           + (groupType ? 1 : 0)
-                          + (preferences ? 1 : 0)
+                          + (interests ? 1 : 0)
                           + (budget ? 1 : 0);
 
         var accepted = wizardSignals >= 3;
 
         return (accepted, new Dictionary<string, bool>
         {
-            ["chat_message"]       = hasMessage,
-            ["wizard_city"]        = city,
-            ["wizard_days"]        = days,
-            ["wizard_groupType"]   = groupType,
-            ["wizard_preferences"] = preferences,
-            ["wizard_budget"]      = budget,
+            ["chat_message"]     = hasMessage,
+            ["wizard_city"]      = city,
+            ["wizard_days"]      = days,
+            ["wizard_groupType"] = groupType,
+            ["wizard_interests"] = interests,
+            ["wizard_budget"]    = budget,
         });
-    }
-
-    private static bool IsDescriptiveMessage(string? message)
-    {
-        if (string.IsNullOrWhiteSpace(message)) return false;
-        var trimmed = message.Trim();
-        if (trimmed.Length < DescriptiveMessageMinChars) return false;
-
-        var lower = trimmed.ToLowerInvariant();
-
-        if (PlanNamingService.GreetingPrefixes.Any(g => lower.StartsWith(g))) return false;
-        if (MessagePlaceholders.Contains(lower)) return false;
-
-        return true;
     }
 }

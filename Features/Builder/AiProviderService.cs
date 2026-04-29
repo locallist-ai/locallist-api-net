@@ -99,8 +99,7 @@ public class AiProviderService
         if (sanitized.Length > 500) sanitized = sanitized[..500];
 
         var groupType = context?.GroupType ?? "";
-        var prefs = context?.Preferences ?? new List<string>();
-        var vibes = context?.Vibes ?? new List<string>();
+        var categories = context?.Categories ?? new List<string>();
         var days = context?.Days?.ToString() ?? "";
         var city = context?.City ?? "";
 
@@ -112,8 +111,7 @@ these MANDATORY constraints; you MUST respect them:
 
 - groupType: {groupType} (if family/family-kids: NEVER include ""nightlife"" in categories; prefer family-friendly places)
 - duration: {days} days
-- user preferences: {string.Join(",", prefs)} (merge into vibes AND categories; these MUST appear)
-- user vibes: {string.Join(",", vibes)} (merge into vibes; these MUST appear)
+- user interests: {string.Join(",", categories)} (MUST appear in categories output)
 - city: {city}
 
 User's free-text message: ""{sanitized}""
@@ -193,20 +191,12 @@ Return JSON only, no markdown. EXACT shape:
         if (lower.Contains("night") || lower.Contains("bar") || lower.Contains("club")) cats.Add("nightlife");
         if (lower.Contains("coffee") || lower.Contains("cafe") || lower.Contains("breakfast")) cats.Add("coffee");
 
-        // Seed desde context.Preferences: el wizard ya pasó "adventure"/"relax"/"cultural".
-        // Sin esto, un free-text vacío o saludo ("Hola") caía a defaults genéricos y
-        // ignoraba la intención del usuario.
-        var contextPrefs = context?.Preferences ?? new List<string>();
-        foreach (var pref in contextPrefs)
+        // Seed desde context.Categories: el wizard ya capturó los intereses del usuario.
+        var contextCats = context?.Categories ?? new List<string>();
+        foreach (var cat in contextCats)
         {
-            if (PreferenceToCategories.TryGetValue(pref, out var mapped))
-            {
-                foreach (var c in mapped)
-                {
-                    if (!cats.Contains(c, StringComparer.OrdinalIgnoreCase))
-                        cats.Add(c);
-                }
-            }
+            if (!cats.Contains(cat, StringComparer.OrdinalIgnoreCase))
+                cats.Add(cat);
         }
 
         // Si tras los dos intentos seguimos vacíos, defaults sensatos.
@@ -217,12 +207,8 @@ Return JSON only, no markdown. EXACT shape:
         if (GroupTypePolicy.IsFamilyContext(groupType))
             cats.RemoveAll(c => string.Equals(c, "nightlife", StringComparison.OrdinalIgnoreCase));
 
-        // Vibes: merge contextual vibes + preferences (los preferences funcionan como vibes también).
-        var vibes = new List<string>();
-        if (context?.Vibes != null) vibes.AddRange(context.Vibes);
-        foreach (var pref in contextPrefs)
-            if (!vibes.Contains(pref, StringComparer.OrdinalIgnoreCase))
-                vibes.Add(pref);
+        // Vibes: usar categories como descriptores de vibe para naming.
+        var vibes = new List<string>(contextCats);
 
         var result = new ExtractedPreferences
         {
@@ -266,29 +252,8 @@ Return JSON only, no markdown. EXACT shape:
             prefs.GroupType = context.GroupType;
         }
 
-        // Preferences del wizard → merge en Categories (via PreferenceToCategories) + append a Vibes.
-        var contextPrefs = context.Preferences ?? new List<string>();
         prefs.Categories ??= new List<string>();
         prefs.Vibes ??= new List<string>();
-        foreach (var pref in contextPrefs)
-        {
-            if (PreferenceToCategories.TryGetValue(pref, out var mapped))
-            {
-                foreach (var c in mapped)
-                    if (!prefs.Categories.Contains(c, StringComparer.OrdinalIgnoreCase))
-                        prefs.Categories.Add(c);
-            }
-            if (!prefs.Vibes.Contains(pref, StringComparer.OrdinalIgnoreCase))
-                prefs.Vibes.Add(pref);
-        }
-
-        // Vibes del wizard (distintos de preferences) → merge.
-        var contextVibes = context.Vibes ?? new List<string>();
-        foreach (var vibe in contextVibes)
-        {
-            if (!prefs.Vibes.Contains(vibe, StringComparer.OrdinalIgnoreCase))
-                prefs.Vibes.Add(vibe);
-        }
 
         // Family excluye nightlife globalmente (complementa la exclusión en ExtractWithKeywords
         // + matrix timeBlock + ScoreSuitableFor; aquí lo hacemos al nivel de categories).
@@ -334,8 +299,6 @@ Return JSON only, no markdown. EXACT shape:
         }
         if (context.CompanyTags != null && context.CompanyTags.Count > 0)
             prefs.CompanyTags = context.CompanyTags.Take(MaxCompanyOrStyleTags).ToList();
-        if (context.StyleTags != null && context.StyleTags.Count > 0)
-            prefs.StyleTags = context.StyleTags.Take(MaxCompanyOrStyleTags).ToList();
         if (context.BudgetAmount.HasValue && context.BudgetAmount.Value > 0)
             prefs.BudgetAmount = context.BudgetAmount.Value;
 
