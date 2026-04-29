@@ -39,10 +39,6 @@ public class TripContextDto
 {
     [MaxLength(20)]
     public string? GroupType { get; set; }
-    [MaxLength(10)]
-    public List<string>? Preferences { get; set; }
-    [MaxLength(10)]
-    public List<string>? Vibes { get; set; }
     [Range(1, 7)]
     public int? Days { get; set; }
     [MaxLength(100)]
@@ -86,10 +82,4 @@ public class TripContextDto
     [MaxLength(5)]
     public List<string>? CompanyTags { get; set; }
 
-    /// <summary>
-    /// Drill-down tags del style step seleccionado (ej. ["urban","foodie"]
-    /// cuando vibes=["adventure"]). Mapean contra Place.BestFor / BestTime.
-    /// </summary>
-    [MaxLength(5)]
-    public List<string>? StyleTags { get; set; }
 }
