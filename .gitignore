@@ -30,6 +30,9 @@ appsettings.*.json
 ## Claude Code
 .claude/
 
+## Node (Scripts folder)
+Scripts/node_modules/
+
 ## Script output files (may contain API keys or sensitive data)
 Scripts/candidates-*.json
 Scripts/*-result.json
