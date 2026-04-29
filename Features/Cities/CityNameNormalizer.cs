@@ -36,3 +36,30 @@ public static class CityNameNormalizer
         return sb.ToString().Normalize(NormalizationForm.FormC).ToLowerInvariant();
     }
 }
+
+/// <summary>
+/// Heurísticas mínimas para rechazar inputs basura en POST /cities.
+/// Pablo 2026-04-29 — el builder custom dejaba pasar "Mal", "abc", "asdf".
+///
+/// Opera sobre el nombre ya normalizado (resultado de <see cref="CityNameNormalizer.Normalize"/>):
+///   - longitud >= 3
+///   - contiene al menos una vocal ASCII (a/e/i/o/u)
+///   - no está en la blocklist de tokens no-lugar conocidos
+/// </summary>
+public static class CityNameValidator
+{
+    public static bool IsLikelyRealCity(string normalized, out string? reason)
+    {
+        if (normalized.Length < 3) { reason = "name must be at least 3 characters"; return false; }
+        if (!normalized.Any(c => "aeiou".Contains(c))) { reason = "name must contain a vowel"; return false; }
+        if (Blocklist.Contains(normalized)) { reason = "name is not a recognized city"; return false; }
+        reason = null;
+        return true;
+    }
+
+    private static readonly HashSet<string> Blocklist = new(StringComparer.Ordinal)
+    {
+        "mal", "abc", "xyz", "asdf", "asd", "qwe", "qwerty", "test", "demo",
+        "foo", "bar", "baz", "lorem", "ipsum", "null", "none", "todo",
+    };
+}

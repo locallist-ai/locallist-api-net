@@ -12,6 +12,36 @@ namespace LocalList.API.Tests.Features;
 /// </summary>
 public class CitiesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
+    // ── CityNameValidator ─────────────────────────────────────────────────
+
+    [Fact]
+    public void IsLikelyRealCity_Mal_ReturnsFalse()
+    {
+        Assert.False(CityNameValidator.IsLikelyRealCity("mal", out var reason));
+        Assert.NotNull(reason);
+    }
+
+    [Fact]
+    public void IsLikelyRealCity_Lima_ReturnsTrue()
+    {
+        Assert.True(CityNameValidator.IsLikelyRealCity("lima", out var reason));
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void IsLikelyRealCity_TwoChars_ReturnsFalse()
+    {
+        Assert.False(CityNameValidator.IsLikelyRealCity("mi", out _));
+    }
+
+    [Fact]
+    public void IsLikelyRealCity_NoVowel_ReturnsFalse()
+    {
+        Assert.False(CityNameValidator.IsLikelyRealCity("xxx", out _));
+    }
+
+    // ── NormalizeName ──────────────────────────────────────────────────────
+
     [Fact]
     public void NormalizeName_StripsAccentsAndLowercases()
     {
@@ -112,6 +142,53 @@ public class CitiesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         var response = await client.PostAsJsonAsync("/cities", new { name = "M" });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostCity_TwoCharName_Returns400()
+    {
+        var (userId, fbUid) = await CreateUser("city-twochars");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        var response = await client.PostAsJsonAsync("/cities", new { name = "Mi" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostCity_NoVowel_Returns400()
+    {
+        var (userId, fbUid) = await CreateUser("city-novowel");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        var response = await client.PostAsJsonAsync("/cities", new { name = "xxx" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostCity_BlocklistedName_Returns400()
+    {
+        var (userId, fbUid) = await CreateUser("city-blocklist");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        var r1 = await client.PostAsJsonAsync("/cities", new { name = "Mal" });
+        Assert.Equal(HttpStatusCode.BadRequest, r1.StatusCode);
+
+        var r2 = await client.PostAsJsonAsync("/cities", new { name = "asdf" });
+        Assert.Equal(HttpStatusCode.BadRequest, r2.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostCity_LegitimateShortNames_Return201()
+    {
+        var (userId, fbUid) = await CreateUser("city-legit");
+        var client = fixture.CreateAuthenticatedClient(userId, fbUid);
+
+        foreach (var city in new[] { "Lima", "Roma", "Lyon", "Bern" })
+        {
+            var name = $"{city}_{Guid.NewGuid():N}";
+            var response = await client.PostAsJsonAsync("/cities", new { name });
+            Assert.True(response.IsSuccessStatusCode, $"{city} should be accepted, got {response.StatusCode}");
+        }
     }
 
     [Fact]
