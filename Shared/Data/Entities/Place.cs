@@ -77,6 +77,30 @@ public class Place
     [Column("google_review_count")]
     public int? GoogleReviewCount { get; set; }
 
+    [Column("name_i18n", TypeName = "jsonb")]
+    public JsonDocument? NameI18n { get; set; }
+
+    [Column("why_this_place_i18n", TypeName = "jsonb")]
+    public JsonDocument? WhyThisPlaceI18n { get; set; }
+
+    [Column("best_time_i18n", TypeName = "jsonb")]
+    public JsonDocument? BestTimeI18n { get; set; }
+
+    [Column("neighborhood_i18n", TypeName = "jsonb")]
+    public JsonDocument? NeighborhoodI18n { get; set; }
+
+    [Column("subcategory_i18n", TypeName = "jsonb")]
+    public JsonDocument? SubcategoryI18n { get; set; }
+
+    [Column("best_for_i18n", TypeName = "jsonb")]
+    public JsonDocument? BestForI18n { get; set; }
+
+    [Column("suitable_for_i18n", TypeName = "jsonb")]
+    public JsonDocument? SuitableForI18n { get; set; }
+
+    [Column("translation_status", TypeName = "jsonb")]
+    public JsonDocument? TranslationStatus { get; set; }
+
     [Column("source")]
     [StringLength(50)]
     public string Source { get; set; } = "curated";

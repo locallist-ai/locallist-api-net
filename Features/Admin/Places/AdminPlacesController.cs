@@ -4,7 +4,9 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -18,6 +20,7 @@ public class AdminPlacesController : ControllerBase
     private readonly ILogger<AdminPlacesController> _logger;
     private readonly TimeProvider _clock;
     private readonly EmbeddingService _embeddings;
+    private readonly AiProviderService _ai;
 
     private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -33,12 +36,14 @@ public class AdminPlacesController : ControllerBase
         LocalListDbContext db,
         ILogger<AdminPlacesController> logger,
         TimeProvider clock,
-        EmbeddingService embeddings)
+        EmbeddingService embeddings,
+        AiProviderService ai)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
         _embeddings = embeddings;
+        _ai = ai;
     }
 
     [HttpGet("cities")]
@@ -303,6 +308,24 @@ public class AdminPlacesController : ControllerBase
         if (request.AiVibeScore.HasValue) place.AiVibeScore = request.AiVibeScore;
         if (request.Flags != null) place.Flags = request.Flags;
 
+        // i18n ES fields
+        if (request.NameEs != null)
+            place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, "es", request.NameEs);
+        if (request.WhyThisPlaceEs != null)
+            place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, "es", request.WhyThisPlaceEs);
+        if (request.BestTimeEs != null)
+            place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, "es", request.BestTimeEs);
+        if (request.NeighborhoodEs != null)
+            place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, "es", request.NeighborhoodEs);
+        if (request.SubcategoryEs != null)
+            place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, "es", request.SubcategoryEs);
+        if (request.BestForEs != null)
+            place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, "es", request.BestForEs);
+        if (request.SuitableForEs != null)
+            place.SuitableForI18n = LanguageAccessor.SetI18nList(place.SuitableForI18n, "es", request.SuitableForEs);
+        if (request.TranslationStatusEs != null)
+            place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, "es", request.TranslationStatusEs);
+
         place.UpdatedAt = _clock.GetUtcNow();
         await _db.SaveChangesAsync(ct);
 
@@ -424,5 +447,96 @@ public class AdminPlacesController : ControllerBase
             tracked.Count, tracked.Count, onlyMissing, limit);
 
         return Ok(new { reindexed = tracked.Count, failed = 0, total = tracked.Count });
+    }
+
+    [HttpPost("{id}/translate")]
+    public async Task<IActionResult> TranslatePlace(Guid id, CancellationToken ct)
+    {
+        var place = await _db.Places.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (place == null) return NotFound(new { error = "Place not found" });
+
+        if (place.Source != "curated")
+            return BadRequest(new { error = "Translation is only supported for curated places." });
+
+        var draft = await _ai.TranslatePlaceAsync(place, "es", ct);
+        if (draft == null)
+            return StatusCode(503, new { error = "Translation service unavailable." });
+
+        _logger.LogInformation("Translation: entity=Place id={Id} lang=es action=draft", place.Id);
+
+        return Ok(new
+        {
+            nameEs = draft.Name,
+            whyThisPlaceEs = draft.WhyThisPlace,
+            bestTimeEs = draft.BestTime,
+            neighborhoodEs = draft.Neighborhood,
+            subcategoryEs = draft.Subcategory,
+            bestForEs = draft.BestFor,
+            suitableForEs = draft.SuitableFor,
+        });
+    }
+
+    /// <summary>
+    /// Backfill: translate all curated places without ES translation.
+    /// Idempotent — only processes places missing name_i18n.es.
+    /// Saves progress every 5 places so partial runs are resumable.
+    /// </summary>
+    [HttpPost("translate-batch")]
+    public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", CancellationToken ct = default)
+    {
+        var allCurated = await _db.Places
+            .Where(p => p.Source == "curated" && p.Status == "published")
+            .ToListAsync(ct);
+
+        var toTranslate = allCurated
+            .Where(p => p.NameI18n == null
+                     || !p.NameI18n.RootElement.TryGetProperty(lang, out _))
+            .ToList();
+
+        if (toTranslate.Count == 0)
+            return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
+                message = $"All published curated places already have '{lang}' translation." });
+
+        var translated = 0;
+        var failed = 0;
+
+        foreach (var chunk in toTranslate.Chunk(5))
+        {
+            foreach (var place in chunk)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                var draft = await _ai.TranslatePlaceAsync(place, lang, ct);
+                if (draft == null) { failed++; continue; }
+
+                place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, lang, draft.Name);
+                place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, lang, draft.WhyThisPlace);
+                place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, lang, draft.BestTime);
+                place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, lang, draft.Neighborhood);
+                place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, lang, draft.Subcategory);
+                place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, lang, draft.BestFor);
+                place.SuitableForI18n = LanguageAccessor.SetI18nList(place.SuitableForI18n, lang, draft.SuitableFor);
+                place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, lang, "approved");
+                place.UpdatedAt = _clock.GetUtcNow();
+
+                _logger.LogInformation("Translation: entity=Place id={Id} lang={Lang} action=approved", place.Id, lang);
+                translated++;
+            }
+
+            // Save progress after each chunk — allows partial resumption on timeout
+            if (!ct.IsCancellationRequested)
+                await _db.SaveChangesAsync(ct);
+        }
+
+        _logger.LogInformation("translate-batch places: translated={T} failed={F} skipped={S}",
+            translated, failed, allCurated.Count - toTranslate.Count);
+
+        return Ok(new
+        {
+            translated,
+            failed,
+            skipped = allCurated.Count - toTranslate.Count,
+            remaining = toTranslate.Count - translated - failed
+        });
     }
 }

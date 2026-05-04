@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Plans;
 
@@ -16,12 +18,14 @@ public class AdminPlansController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<AdminPlansController> _logger;
     private readonly TimeProvider _clock;
+    private readonly AiProviderService _ai;
 
-    public AdminPlansController(LocalListDbContext db, ILogger<AdminPlansController> logger, TimeProvider clock)
+    public AdminPlansController(LocalListDbContext db, ILogger<AdminPlansController> logger, TimeProvider clock, AiProviderService ai)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
+        _ai = ai;
     }
 
     [HttpGet]
@@ -259,12 +263,91 @@ public class AdminPlansController : ControllerBase
         if (request.IsPublic.HasValue) plan.IsPublic = request.IsPublic.Value;
         if (request.IsShowcase.HasValue) plan.IsShowcase = request.IsShowcase.Value;
 
+        // i18n ES fields
+        if (request.NameEs != null)
+            plan.NameI18n = LanguageAccessor.SetI18nString(plan.NameI18n, "es", request.NameEs);
+        if (request.DescriptionEs != null)
+            plan.DescriptionI18n = LanguageAccessor.SetI18nString(plan.DescriptionI18n, "es", request.DescriptionEs);
+        if (request.TranslationStatusEs != null)
+            plan.TranslationStatus = LanguageAccessor.SetI18nString(plan.TranslationStatus, "es", request.TranslationStatusEs);
+
         plan.UpdatedAt = _clock.GetUtcNow();
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Admin updated plan {PlanId}", plan.Id);
 
         return Ok(AdminPlanDto.FromEntity(plan));
+    }
+
+    [HttpPost("{id}/translate")]
+    public async Task<IActionResult> TranslatePlan(Guid id, CancellationToken ct)
+    {
+        var plan = await _db.Plans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (plan == null) return NotFound(new { error = "Plan not found" });
+
+        if (plan.Source != "curated")
+            return BadRequest(new { error = "Translation is only supported for curated plans." });
+
+        var draft = await _ai.TranslatePlanAsync(plan, "es", ct);
+        if (draft == null)
+            return StatusCode(503, new { error = "Translation service unavailable." });
+
+        _logger.LogInformation("Translation: entity=Plan id={Id} lang=es action=draft", plan.Id);
+
+        return Ok(new { nameEs = draft.Name, descriptionEs = draft.Description });
+    }
+
+    /// <summary>
+    /// Backfill: translate all curated plans without ES translation.
+    /// Idempotent — only processes plans missing name_i18n.es.
+    /// </summary>
+    [HttpPost("translate-batch")]
+    public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", CancellationToken ct = default)
+    {
+        var allCurated = await _db.Plans
+            .Where(p => p.Source == "curated")
+            .ToListAsync(ct);
+
+        var toTranslate = allCurated
+            .Where(p => p.NameI18n == null
+                     || !p.NameI18n.RootElement.TryGetProperty(lang, out _))
+            .ToList();
+
+        if (toTranslate.Count == 0)
+            return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
+                message = $"All curated plans already have '{lang}' translation." });
+
+        var translated = 0;
+        var failed = 0;
+
+        foreach (var plan in toTranslate)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var draft = await _ai.TranslatePlanAsync(plan, lang, ct);
+            if (draft == null) { failed++; continue; }
+
+            plan.NameI18n = LanguageAccessor.SetI18nString(plan.NameI18n, lang, draft.Name);
+            plan.DescriptionI18n = LanguageAccessor.SetI18nString(plan.DescriptionI18n, lang, draft.Description);
+            plan.TranslationStatus = LanguageAccessor.SetI18nString(plan.TranslationStatus, lang, "approved");
+            plan.UpdatedAt = _clock.GetUtcNow();
+
+            _logger.LogInformation("Translation: entity=Plan id={Id} lang={Lang} action=approved", plan.Id, lang);
+            translated++;
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("translate-batch plans: translated={T} failed={F} skipped={S}",
+            translated, failed, allCurated.Count - toTranslate.Count);
+
+        return Ok(new
+        {
+            translated,
+            failed,
+            skipped = allCurated.Count - toTranslate.Count,
+            remaining = toTranslate.Count - translated - failed
+        });
     }
 
     [HttpPut("{id}/stops")]

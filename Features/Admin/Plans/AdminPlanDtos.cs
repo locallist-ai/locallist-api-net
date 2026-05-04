@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Plans;
 
@@ -19,13 +20,20 @@ public record AdminPlanDto(
     string Source,
     Guid? CreatedById,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt
+    DateTimeOffset UpdatedAt,
+    string? NameEs,
+    string? DescriptionEs,
+    string? TranslationStatusEs
 )
 {
     public static AdminPlanDto FromEntity(Plan p) => new(
         p.Id, p.Name, p.City, p.Type, p.Description, p.ImageUrl,
         p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
-        p.Source, p.CreatedById, p.CreatedAt, p.UpdatedAt
+        p.Source, p.CreatedById, p.CreatedAt, p.UpdatedAt,
+        NameEs: LanguageAccessor.ResolveString(p.NameI18n, "es", null, isCurated: false),
+        DescriptionEs: LanguageAccessor.ResolveString(p.DescriptionI18n, "es", null, isCurated: false),
+        TranslationStatusEs: p.TranslationStatus?.RootElement.TryGetProperty("es", out var tsEs) == true
+            && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null
     );
 }
 
@@ -66,7 +74,10 @@ public record AdminPlanDetailDto(
     Guid? CreatedById,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    List<AdminPlanDayDto> Days
+    List<AdminPlanDayDto> Days,
+    string? NameEs,
+    string? DescriptionEs,
+    string? TranslationStatusEs
 )
 {
     public static AdminPlanDetailDto FromEntity(Plan plan)
@@ -83,7 +94,11 @@ public record AdminPlanDetailDto(
         return new AdminPlanDetailDto(
             plan.Id, plan.Name, plan.City, plan.Type, plan.Description, plan.ImageUrl,
             plan.DurationDays, plan.TripContext, plan.IsPublic, plan.IsShowcase,
-            plan.Source, plan.CreatedById, plan.CreatedAt, plan.UpdatedAt, days
+            plan.Source, plan.CreatedById, plan.CreatedAt, plan.UpdatedAt, days,
+            NameEs: LanguageAccessor.ResolveString(plan.NameI18n, "es", null, isCurated: false),
+            DescriptionEs: LanguageAccessor.ResolveString(plan.DescriptionI18n, "es", null, isCurated: false),
+            TranslationStatusEs: plan.TranslationStatus?.RootElement.TryGetProperty("es", out var tsEs) == true
+                && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null
         );
     }
 }
@@ -160,6 +175,12 @@ public class UpdatePlanRequest
 
     public bool? IsPublic { get; set; }
     public bool? IsShowcase { get; set; }
+
+    // i18n ES fields
+    public string? NameEs { get; set; }
+    public string? DescriptionEs { get; set; }
+    // "draft" | "approved" | null (null = no change)
+    public string? TranslationStatusEs { get; set; }
 }
 
 public class UpdatePlanStopsRequest

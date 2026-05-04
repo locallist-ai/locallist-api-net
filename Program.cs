@@ -2,9 +2,11 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Text;
 using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -105,8 +107,12 @@ builder.Services.AddHttpClient<EmbeddingService>(c => c.Timeout = TimeSpan.FromS
             args.Outcome.Exception is HttpRequestException);
     });
 
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<LanguageAccessor>();
 builder.Services.AddScoped<PlaceRankingService>();
 builder.Services.AddScoped<SchedulingService>();
+builder.Services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
+builder.Services.AddScoped<RouteResolver>();
 builder.Services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 

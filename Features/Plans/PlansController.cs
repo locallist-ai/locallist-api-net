@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -13,11 +15,15 @@ public class PlansController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlansController> _logger;
+    private readonly LanguageAccessor _lang;
+    private readonly RouteResolver _routeResolver;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, RouteResolver routeResolver)
     {
         _db = db;
         _logger = logger;
+        _lang = lang;
+        _routeResolver = routeResolver;
     }
 
     [HttpPost]
@@ -49,7 +55,7 @@ public class PlansController : ControllerBase
 
         _logger.LogInformation("User {UserId} created plan {PlanId} ({Name})", userId, plan.Id, plan.Name);
 
-        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan));
+        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan, _lang.Language));
     }
 
     [HttpGet("mine")]
@@ -66,8 +72,9 @@ public class PlansController : ControllerBase
             .Take(50)
             .ToListAsync(ct);
 
+        var lang = _lang.Language;
         return Ok(new PlansListResponse(
-            plans.Select(PlanDto.FromEntity).ToList(),
+            plans.Select(p => PlanDto.FromEntity(p, lang)).ToList(),
             plans.Count
         ));
     }
@@ -105,8 +112,9 @@ public class PlansController : ControllerBase
             .Take(limit)
             .ToListAsync(ct);
 
+        var lang = _lang.Language;
         return Ok(new PlansListResponse(
-            plans.Select(PlanDto.FromEntity).ToList(),
+            plans.Select(p => PlanDto.FromEntity(p, lang)).ToList(),
             total
         ));
     }
@@ -131,6 +139,7 @@ public class PlansController : ControllerBase
             return NotFound(new { error = "Plan not found" });
         }
 
-        return Ok(PlanDetailDto.FromEntity(plan));
+        var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
+        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments));
     }
 }

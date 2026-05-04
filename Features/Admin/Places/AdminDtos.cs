@@ -1,5 +1,7 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -30,7 +32,16 @@ public record AdminPlaceDto(
     Guid? SubmittedById,
     Guid? ReviewedById,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt
+    DateTimeOffset UpdatedAt,
+    // i18n fields — ES draft/approved content
+    string? NameEs,
+    string? WhyThisPlaceEs,
+    string? BestTimeEs,
+    string? NeighborhoodEs,
+    string? SubcategoryEs,
+    List<string>? BestForEs,
+    List<string>? SuitableForEs,
+    string? TranslationStatusEs
 )
 {
     public static AdminPlaceDto FromEntity(Place p) => new(
@@ -39,7 +50,16 @@ public record AdminPlaceDto(
         p.BestTime, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
         p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
         p.RejectionReason, p.AiVibeScore, p.Flags,
-        p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt
+        p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
+        NameEs: LanguageAccessor.ResolveString(p.NameI18n, "es", null, isCurated: false),
+        WhyThisPlaceEs: LanguageAccessor.ResolveString(p.WhyThisPlaceI18n, "es", null, isCurated: false),
+        BestTimeEs: LanguageAccessor.ResolveString(p.BestTimeI18n, "es", null, isCurated: false),
+        NeighborhoodEs: LanguageAccessor.ResolveString(p.NeighborhoodI18n, "es", null, isCurated: false),
+        SubcategoryEs: LanguageAccessor.ResolveString(p.SubcategoryI18n, "es", null, isCurated: false),
+        BestForEs: LanguageAccessor.ResolveStringList(p.BestForI18n, "es", null, isCurated: false),
+        SuitableForEs: LanguageAccessor.ResolveStringList(p.SuitableForI18n, "es", null, isCurated: false),
+        TranslationStatusEs: p.TranslationStatus?.RootElement.TryGetProperty("es", out var tsEs) == true
+            && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null
     );
 }
 
@@ -148,6 +168,17 @@ public class UpdatePlaceRequest
 
     public int? AiVibeScore { get; set; }
     public List<string>? Flags { get; set; }
+
+    // i18n ES fields — null means "no change", empty string clears the field
+    public string? NameEs { get; set; }
+    public string? WhyThisPlaceEs { get; set; }
+    public string? BestTimeEs { get; set; }
+    public string? NeighborhoodEs { get; set; }
+    public string? SubcategoryEs { get; set; }
+    public List<string>? BestForEs { get; set; }
+    public List<string>? SuitableForEs { get; set; }
+    // "draft" | "approved" | null (null = no change)
+    public string? TranslationStatusEs { get; set; }
 }
 
 public record BulkImportResult(

@@ -5,6 +5,7 @@ using System.Text.Json;
 using LocalList.API.NET.Shared.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -14,9 +15,11 @@ using Pgvector;
 namespace LocalList.API.NET.Migrations
 {
     [DbContext(typeof(LocalListDbContext))]
-    partial class LocalListDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260504173200_AddI18nFields")]
+    partial class AddI18nFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -367,10 +370,6 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("source");
 
-                    b.Property<JsonDocument>("TranslationStatus")
-                        .HasColumnType("jsonb")
-                        .HasColumnName("translation_status");
-
                     b.Property<JsonDocument>("TripContext")
                         .HasColumnType("jsonb")
                         .HasColumnName("trip_context");
@@ -485,54 +484,6 @@ namespace LocalList.API.NET.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("refresh_tokens");
-                });
-
-            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.RouteSegmentCache", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTimeOffset>("ComputedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("computed_at");
-
-                    b.Property<int>("DistanceMeters")
-                        .HasColumnType("integer")
-                        .HasColumnName("distance_meters");
-
-                    b.Property<int>("DurationSeconds")
-                        .HasColumnType("integer")
-                        .HasColumnName("duration_seconds");
-
-                    b.Property<string>("EncodedPolyline")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("encoded_polyline");
-
-                    b.Property<Guid>("FromPlaceId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("from_place_id");
-
-                    b.Property<string>("Mode")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("mode");
-
-                    b.Property<Guid>("ToPlaceId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("to_place_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ToPlaceId");
-
-                    b.HasIndex("FromPlaceId", "ToPlaceId", "Mode")
-                        .IsUnique();
-
-                    b.ToTable("route_segment_cache");
                 });
 
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.User", b =>
@@ -728,25 +679,6 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
 
                     b.Navigation("User");
-                });
-
-            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.RouteSegmentCache", b =>
-                {
-                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.Place", "FromPlace")
-                        .WithMany()
-                        .HasForeignKey("FromPlaceId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.Place", "ToPlace")
-                        .WithMany()
-                        .HasForeignKey("ToPlaceId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("FromPlace");
-
-                    b.Navigation("ToPlace");
                 });
 
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.Place", b =>
