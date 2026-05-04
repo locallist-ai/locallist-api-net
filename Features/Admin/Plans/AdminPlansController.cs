@@ -329,10 +329,10 @@ public class AdminPlansController : ControllerBase
 
             plan.NameI18n = LanguageAccessor.SetI18nString(plan.NameI18n, lang, draft.Name);
             plan.DescriptionI18n = LanguageAccessor.SetI18nString(plan.DescriptionI18n, lang, draft.Description);
-            plan.TranslationStatus = LanguageAccessor.SetI18nString(plan.TranslationStatus, lang, "draft");
+            plan.TranslationStatus = LanguageAccessor.SetI18nString(plan.TranslationStatus, lang, "approved");
             plan.UpdatedAt = _clock.GetUtcNow();
 
-            _logger.LogInformation("Translation: entity=Plan id={Id} lang={Lang} action=draft", plan.Id, lang);
+            _logger.LogInformation("Translation: entity=Plan id={Id} lang={Lang} action=approved", plan.Id, lang);
             translated++;
         }
 

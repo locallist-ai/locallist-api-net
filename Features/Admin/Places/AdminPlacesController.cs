@@ -516,10 +516,10 @@ public class AdminPlacesController : ControllerBase
                 place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, lang, draft.Subcategory);
                 place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, lang, draft.BestFor);
                 place.SuitableForI18n = LanguageAccessor.SetI18nList(place.SuitableForI18n, lang, draft.SuitableFor);
-                place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, lang, "draft");
+                place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, lang, "approved");
                 place.UpdatedAt = _clock.GetUtcNow();
 
-                _logger.LogInformation("Translation: entity=Place id={Id} lang={Lang} action=draft", place.Id, lang);
+                _logger.LogInformation("Translation: entity=Place id={Id} lang={Lang} action=approved", place.Id, lang);
                 translated++;
             }
 
