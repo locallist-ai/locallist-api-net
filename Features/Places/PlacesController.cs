@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Places;
 
@@ -18,11 +19,13 @@ public class PlacesController : ControllerBase
 
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlacesController> _logger;
+    private readonly LanguageAccessor _lang;
 
-    public PlacesController(LocalListDbContext db, ILogger<PlacesController> logger)
+    public PlacesController(LocalListDbContext db, ILogger<PlacesController> logger, LanguageAccessor lang)
     {
         _db = db;
         _logger = logger;
+        _lang = lang;
     }
 
     [HttpGet]
@@ -67,16 +70,18 @@ public class PlacesController : ControllerBase
 
         var total = await query.CountAsync(ct);
 
+        var lang = _lang.Language;
         var places = await query
             .OrderBy(p => p.Name)
             .Skip(offset)
             .Take(limit)
-            .Select(p => PlaceDto.FromEntity(p))
             .ToListAsync(ct);
+
+        var placeDtos = places.Select(p => PlaceDto.FromEntity(p, lang)).ToList();
 
         return Ok(new
         {
-            places,
+            places = placeDtos,
             total
         });
     }
@@ -96,6 +101,6 @@ public class PlacesController : ControllerBase
         if (isAnonymous && place.Status != "published")
             return NotFound(new { error = "Place not found" });
 
-        return Ok(PlaceDto.FromEntity(place));
+        return Ok(PlaceDto.FromEntity(place, _lang.Language));
     }
 }

@@ -30,6 +30,12 @@ public class Plan
     [Column("description")]
     public string? Description { get; set; }
 
+    [Column("name_i18n", TypeName = "jsonb")]
+    public JsonDocument? NameI18n { get; set; }
+
+    [Column("description_i18n", TypeName = "jsonb")]
+    public JsonDocument? DescriptionI18n { get; set; }
+
     [Column("image_url")]
     public string? ImageUrl { get; set; }
 

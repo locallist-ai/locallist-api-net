@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -14,11 +15,13 @@ public class PlanEditController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlanEditController> _logger;
+    private readonly LanguageAccessor _lang;
 
-    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger)
+    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang)
     {
         _db = db;
         _logger = logger;
+        _lang = lang;
     }
 
     [HttpPut("{id}/stops")]
@@ -81,7 +84,7 @@ public class PlanEditController : ControllerBase
             .ThenInclude(s => s.Place)
             .FirstAsync(p => p.Id == id, ct);
 
-        return Ok(PlanDetailDto.FromEntity(updatedPlan));
+        return Ok(PlanDetailDto.FromEntity(updatedPlan, _lang.Language));
     }
 
     [HttpDelete("{id}")]

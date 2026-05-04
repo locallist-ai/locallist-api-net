@@ -1,6 +1,7 @@
 using System.Text.Json;
 using LocalList.API.NET.Features.Places;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -20,11 +21,18 @@ public record PlanDto(
     DateTimeOffset UpdatedAt
 )
 {
-    public static PlanDto FromEntity(Plan p) => new(
-        p.Id, p.Name, p.City, p.Type, p.Description, p.ImageUrl,
-        p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
-        p.CreatedById, p.CreatedAt, p.UpdatedAt
-    );
+    public static PlanDto FromEntity(Plan p, string lang = "en")
+    {
+        var isCurated = p.Source == "curated";
+        return new(
+            p.Id,
+            LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
+            p.City, p.Type,
+            LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
+            p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+            p.CreatedById, p.CreatedAt, p.UpdatedAt
+        );
+    }
 }
 
 public record PlanStopResponseDto(
@@ -39,11 +47,11 @@ public record PlanStopResponseDto(
     PlaceDto? Place
 )
 {
-    public static PlanStopResponseDto FromEntity(PlanStop s) => new(
+    public static PlanStopResponseDto FromEntity(PlanStop s, string lang = "en") => new(
         s.Id, s.PlaceId, s.DayNumber, s.OrderIndex,
         s.TimeBlock, s.SuggestedArrival, s.SuggestedDurationMin,
         s.TravelFromPrevious,
-        s.Place is null ? null : PlaceDto.FromEntity(s.Place)
+        s.Place is null ? null : PlaceDto.FromEntity(s.Place, lang)
     );
 }
 
@@ -66,7 +74,7 @@ public record PlanDetailDto(
     List<PlanDayDto> Days
 )
 {
-    public static PlanDetailDto FromEntity(Plan plan)
+    public static PlanDetailDto FromEntity(Plan plan, string lang = "en")
     {
         var days = plan.Stops
             .OrderBy(s => s.DayNumber)
@@ -74,20 +82,20 @@ public record PlanDetailDto(
             .GroupBy(s => s.DayNumber)
             .Select(g => new PlanDayDto(
                 g.Key,
-                g.Select(PlanStopResponseDto.FromEntity).ToList()
+                g.Select(s => PlanStopResponseDto.FromEntity(s, lang)).ToList()
             ))
             .ToList();
-        return Build(plan, days);
+        return Build(plan, lang, days);
     }
 
-    public static PlanDetailDto FromEntityWithAllDays(Plan plan)
+    public static PlanDetailDto FromEntityWithAllDays(Plan plan, string lang = "en")
     {
         var stopsByDay = plan.Stops
             .GroupBy(s => s.DayNumber)
             .ToDictionary(
                 g => g.Key,
                 g => g.OrderBy(s => s.OrderIndex)
-                    .Select(PlanStopResponseDto.FromEntity)
+                    .Select(s => PlanStopResponseDto.FromEntity(s, lang))
                     .ToList());
 
         var days = Enumerable.Range(1, plan.DurationDays)
@@ -96,14 +104,21 @@ public record PlanDetailDto(
                 stopsByDay.TryGetValue(d, out var s) ? s : []
             ))
             .ToList();
-        return Build(plan, days);
+        return Build(plan, lang, days);
     }
 
-    private static PlanDetailDto Build(Plan p, List<PlanDayDto> days) => new(
-        p.Id, p.Name, p.City, p.Type, p.Description, p.ImageUrl,
-        p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
-        p.CreatedById, p.CreatedAt, p.UpdatedAt, days
-    );
+    private static PlanDetailDto Build(Plan p, string lang, List<PlanDayDto> days)
+    {
+        var isCurated = p.Source == "curated";
+        return new(
+            p.Id,
+            LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
+            p.City, p.Type,
+            LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
+            p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+            p.CreatedById, p.CreatedAt, p.UpdatedAt, days
+        );
+    }
 }
 
 public record PlansListResponse(List<PlanDto> Plans, int Total);
