@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace LocalList.API.NET.Shared.I18n;
 
@@ -57,6 +58,36 @@ public sealed class LanguageAccessor
 
         return GetList(i18nDoc, lang)
             ?? (isCurated ? GetList(i18nDoc, "en") ?? fallback : FirstAvailableList(i18nDoc) ?? fallback);
+    }
+
+    // Sets a string value for a language key in a jsonb i18n dict. Returns new JsonDocument.
+    public static JsonDocument SetI18nString(JsonDocument? current, string lang, string? value)
+    {
+        var node = current != null
+            ? JsonNode.Parse(current.RootElement.GetRawText()) as JsonObject ?? new JsonObject()
+            : new JsonObject();
+        if (value is null)
+            node.Remove(lang);
+        else
+            node[lang] = JsonValue.Create(value);
+        return JsonDocument.Parse(node.ToJsonString());
+    }
+
+    // Sets a List<string> value for a language key in a jsonb i18n dict.
+    public static JsonDocument SetI18nList(JsonDocument? current, string lang, List<string>? values)
+    {
+        var node = current != null
+            ? JsonNode.Parse(current.RootElement.GetRawText()) as JsonObject ?? new JsonObject()
+            : new JsonObject();
+        if (values is null)
+            node.Remove(lang);
+        else
+        {
+            var arr = new JsonArray();
+            foreach (var v in values) arr.Add(JsonValue.Create(v));
+            node[lang] = arr;
+        }
+        return JsonDocument.Parse(node.ToJsonString());
     }
 
     private static bool IsApproved(JsonDocument? statusDoc, string lang) =>

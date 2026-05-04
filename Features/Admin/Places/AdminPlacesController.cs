@@ -4,7 +4,9 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -18,6 +20,7 @@ public class AdminPlacesController : ControllerBase
     private readonly ILogger<AdminPlacesController> _logger;
     private readonly TimeProvider _clock;
     private readonly EmbeddingService _embeddings;
+    private readonly AiProviderService _ai;
 
     private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -33,12 +36,14 @@ public class AdminPlacesController : ControllerBase
         LocalListDbContext db,
         ILogger<AdminPlacesController> logger,
         TimeProvider clock,
-        EmbeddingService embeddings)
+        EmbeddingService embeddings,
+        AiProviderService ai)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
         _embeddings = embeddings;
+        _ai = ai;
     }
 
     [HttpGet("cities")]
@@ -303,6 +308,24 @@ public class AdminPlacesController : ControllerBase
         if (request.AiVibeScore.HasValue) place.AiVibeScore = request.AiVibeScore;
         if (request.Flags != null) place.Flags = request.Flags;
 
+        // i18n ES fields
+        if (request.NameEs != null)
+            place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, "es", request.NameEs);
+        if (request.WhyThisPlaceEs != null)
+            place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, "es", request.WhyThisPlaceEs);
+        if (request.BestTimeEs != null)
+            place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, "es", request.BestTimeEs);
+        if (request.NeighborhoodEs != null)
+            place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, "es", request.NeighborhoodEs);
+        if (request.SubcategoryEs != null)
+            place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, "es", request.SubcategoryEs);
+        if (request.BestForEs != null)
+            place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, "es", request.BestForEs);
+        if (request.SuitableForEs != null)
+            place.SuitableForI18n = LanguageAccessor.SetI18nList(place.SuitableForI18n, "es", request.SuitableForEs);
+        if (request.TranslationStatusEs != null)
+            place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, "es", request.TranslationStatusEs);
+
         place.UpdatedAt = _clock.GetUtcNow();
         await _db.SaveChangesAsync(ct);
 
@@ -424,5 +447,32 @@ public class AdminPlacesController : ControllerBase
             tracked.Count, tracked.Count, onlyMissing, limit);
 
         return Ok(new { reindexed = tracked.Count, failed = 0, total = tracked.Count });
+    }
+
+    [HttpPost("{id}/translate")]
+    public async Task<IActionResult> TranslatePlace(Guid id, CancellationToken ct)
+    {
+        var place = await _db.Places.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (place == null) return NotFound(new { error = "Place not found" });
+
+        if (place.Source != "curated")
+            return BadRequest(new { error = "Translation is only supported for curated places." });
+
+        var draft = await _ai.TranslatePlaceAsync(place, "es", ct);
+        if (draft == null)
+            return StatusCode(503, new { error = "Translation service unavailable." });
+
+        _logger.LogInformation("Translated place {PlaceId} to ES (draft, not saved)", place.Id);
+
+        return Ok(new
+        {
+            nameEs = draft.Name,
+            whyThisPlaceEs = draft.WhyThisPlace,
+            bestTimeEs = draft.BestTime,
+            neighborhoodEs = draft.Neighborhood,
+            subcategoryEs = draft.Subcategory,
+            bestForEs = draft.BestFor,
+            suitableForEs = draft.SuitableFor,
+        });
     }
 }

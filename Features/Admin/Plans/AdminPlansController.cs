@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Plans;
 
@@ -16,12 +18,14 @@ public class AdminPlansController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<AdminPlansController> _logger;
     private readonly TimeProvider _clock;
+    private readonly AiProviderService _ai;
 
-    public AdminPlansController(LocalListDbContext db, ILogger<AdminPlansController> logger, TimeProvider clock)
+    public AdminPlansController(LocalListDbContext db, ILogger<AdminPlansController> logger, TimeProvider clock, AiProviderService ai)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
+        _ai = ai;
     }
 
     [HttpGet]
@@ -259,12 +263,38 @@ public class AdminPlansController : ControllerBase
         if (request.IsPublic.HasValue) plan.IsPublic = request.IsPublic.Value;
         if (request.IsShowcase.HasValue) plan.IsShowcase = request.IsShowcase.Value;
 
+        // i18n ES fields
+        if (request.NameEs != null)
+            plan.NameI18n = LanguageAccessor.SetI18nString(plan.NameI18n, "es", request.NameEs);
+        if (request.DescriptionEs != null)
+            plan.DescriptionI18n = LanguageAccessor.SetI18nString(plan.DescriptionI18n, "es", request.DescriptionEs);
+        if (request.TranslationStatusEs != null)
+            plan.TranslationStatus = LanguageAccessor.SetI18nString(plan.TranslationStatus, "es", request.TranslationStatusEs);
+
         plan.UpdatedAt = _clock.GetUtcNow();
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Admin updated plan {PlanId}", plan.Id);
 
         return Ok(AdminPlanDto.FromEntity(plan));
+    }
+
+    [HttpPost("{id}/translate")]
+    public async Task<IActionResult> TranslatePlan(Guid id, CancellationToken ct)
+    {
+        var plan = await _db.Plans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (plan == null) return NotFound(new { error = "Plan not found" });
+
+        if (plan.Source != "curated")
+            return BadRequest(new { error = "Translation is only supported for curated plans." });
+
+        var draft = await _ai.TranslatePlanAsync(plan, "es", ct);
+        if (draft == null)
+            return StatusCode(503, new { error = "Translation service unavailable." });
+
+        _logger.LogInformation("Translated plan {PlanId} to ES (draft, not saved)", plan.Id);
+
+        return Ok(new { nameEs = draft.Name, descriptionEs = draft.Description });
     }
 
     [HttpPut("{id}/stops")]
