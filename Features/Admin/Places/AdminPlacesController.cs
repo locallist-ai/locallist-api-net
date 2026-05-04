@@ -462,7 +462,7 @@ public class AdminPlacesController : ControllerBase
         if (draft == null)
             return StatusCode(503, new { error = "Translation service unavailable." });
 
-        _logger.LogInformation("Translated place {PlaceId} to ES (draft, not saved)", place.Id);
+        _logger.LogInformation("Translation: entity=Place id={Id} lang=es action=draft", place.Id);
 
         return Ok(new
         {
@@ -473,6 +473,70 @@ public class AdminPlacesController : ControllerBase
             subcategoryEs = draft.Subcategory,
             bestForEs = draft.BestFor,
             suitableForEs = draft.SuitableFor,
+        });
+    }
+
+    /// <summary>
+    /// Backfill: translate all curated places without ES translation.
+    /// Idempotent — only processes places missing name_i18n.es.
+    /// Saves progress every 5 places so partial runs are resumable.
+    /// </summary>
+    [HttpPost("translate-batch")]
+    public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", CancellationToken ct = default)
+    {
+        var allCurated = await _db.Places
+            .Where(p => p.Source == "curated")
+            .ToListAsync(ct);
+
+        var toTranslate = allCurated
+            .Where(p => p.NameI18n == null
+                     || !p.NameI18n.RootElement.TryGetProperty(lang, out _))
+            .ToList();
+
+        if (toTranslate.Count == 0)
+            return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
+                message = $"All curated places already have '{lang}' translation." });
+
+        var translated = 0;
+        var failed = 0;
+
+        foreach (var chunk in toTranslate.Chunk(5))
+        {
+            foreach (var place in chunk)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                var draft = await _ai.TranslatePlaceAsync(place, lang, ct);
+                if (draft == null) { failed++; continue; }
+
+                place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, lang, draft.Name);
+                place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, lang, draft.WhyThisPlace);
+                place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, lang, draft.BestTime);
+                place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, lang, draft.Neighborhood);
+                place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, lang, draft.Subcategory);
+                place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, lang, draft.BestFor);
+                place.SuitableForI18n = LanguageAccessor.SetI18nList(place.SuitableForI18n, lang, draft.SuitableFor);
+                place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, lang, "draft");
+                place.UpdatedAt = _clock.GetUtcNow();
+
+                _logger.LogInformation("Translation: entity=Place id={Id} lang={Lang} action=draft", place.Id, lang);
+                translated++;
+            }
+
+            // Save progress after each chunk — allows partial resumption on timeout
+            if (!ct.IsCancellationRequested)
+                await _db.SaveChangesAsync(ct);
+        }
+
+        _logger.LogInformation("translate-batch places: translated={T} failed={F} skipped={S}",
+            translated, failed, allCurated.Count - toTranslate.Count);
+
+        return Ok(new
+        {
+            translated,
+            failed,
+            skipped = allCurated.Count - toTranslate.Count,
+            remaining = toTranslate.Count - translated - failed
         });
     }
 }

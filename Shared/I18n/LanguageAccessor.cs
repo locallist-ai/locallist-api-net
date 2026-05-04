@@ -23,6 +23,17 @@ public sealed class LanguageAccessor
         }
     }
 
+    public static string ResolveRequestLanguage(HttpRequest request)
+    {
+        var header = request.Headers["Accept-Language"].ToString();
+        if (!string.IsNullOrEmpty(header))
+        {
+            var first = header.Split(',')[0].Trim().Split('-')[0].ToLowerInvariant();
+            if (first == "es") return "es";
+        }
+        return "en";
+    }
+
     // Resolves a translated string from a jsonb i18n dict.
     // curated: requires translation_status[lang] == "approved" before serving non-EN.
     // user: serves whatever language exists, fallback to first available value.

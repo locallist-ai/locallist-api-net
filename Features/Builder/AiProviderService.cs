@@ -21,7 +21,7 @@ public class AiProviderService
         _logger = logger;
     }
 
-    public async Task<ExtractedPreferences> ExtractPreferencesAsync(string message, TripContextDto? context, CancellationToken ct = default)
+    public async Task<ExtractedPreferences> ExtractPreferencesAsync(string message, TripContextDto? context, string lang = "en", CancellationToken ct = default)
     {
         try
         {
@@ -32,7 +32,7 @@ public class AiProviderService
                 return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
             }
 
-            var prompt = BuildPrompt(message, context);
+            var prompt = BuildPrompt(message, context, lang);
 
             var requestBody = new
             {
@@ -93,7 +93,7 @@ public class AiProviderService
         }
     }
 
-    private string BuildPrompt(string message, TripContextDto? context)
+    private string BuildPrompt(string message, TripContextDto? context, string lang = "en")
     {
         // Sanitize user input to mitigate prompt injection.
         var sanitized = message.Replace("\"", "'").Replace("\\", "");
@@ -103,6 +103,9 @@ public class AiProviderService
         var categories = context?.Categories ?? new List<string>();
         var days = context?.Days?.ToString() ?? "";
         var city = context?.City ?? "";
+        var langNote = lang != "en"
+            ? $"\n- planName and description MUST be written in {lang} (not English)."
+            : "";
 
         // Prompt construido como constraints MANDATORY para que Gemini respete lo que el
         // usuario ya seleccionó en el wizard. El mensaje libre ("Hola", "lo que sea") solo
@@ -117,7 +120,7 @@ these MANDATORY constraints; you MUST respect them:
 
 User's free-text message: ""{sanitized}""
 
-Rules for planName:
+Rules for planName:{langNote}
 - MUST be a short descriptive phrase combining city + duration + 1-2 vibes (e.g. ""Family-friendly Miami weekend"", ""2-day adventure in Miami"").
 - DO NOT copy the user's message verbatim.
 - DO NOT use greetings like ""Hola"", ""Hi"", ""Hello"" as the plan name.
@@ -130,6 +133,7 @@ Return JSON only, no markdown. EXACT shape:
   ""vibes"": string[] (e.g. romantic, adventurous, relaxed, party, cultural),
   ""groupType"": string (solo/couple/friends/family-kids/family/group),
   ""planName"": string (following the rules above),
+  ""description"": string (one sentence describing the plan's mood and main activities),
   ""maxStopsPerDay"": number (3-6, based on pace)
 }}";
     }

@@ -19,6 +19,7 @@ public class ExtractedPreferences
     public List<string> Vibes { get; set; } = new();
     public string GroupType { get; set; } = "couple";
     public string PlanName { get; set; } = "My Plan";
+    public string? Description { get; set; }
     public int MaxStopsPerDay { get; set; } = 5;
 
     // Nuevos campos del wizard (Pablo 2026-04-25/27). Se merge desde

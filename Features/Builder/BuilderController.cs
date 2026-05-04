@@ -7,6 +7,7 @@ using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.I18n;
 using Pgvector;
 using Pgvector.EntityFrameworkCore;
 
@@ -83,7 +84,8 @@ public class BuilderController : ControllerBase
         {
             var message = request.Message ?? string.Empty;
 
-            var prefs = await _aiProvider.ExtractPreferencesAsync(message, request.TripContext, ct);
+            var lang = LanguageAccessor.ResolveRequestLanguage(Request);
+            var prefs = await _aiProvider.ExtractPreferencesAsync(message, request.TripContext, lang, ct);
 
             _logger.LogInformation(
                 "Builder: prefs days={Days} categories={Cats} vibes={Vibes} groupType={GT} planName='{Name}' maxStopsPerDay={Max}",
@@ -118,7 +120,9 @@ public class BuilderController : ControllerBase
                 string.Join(",", schedule.Warnings));
 
             var planName = BuildPlanName(prefs, city, message);
-            var planDescription = BuildPlanDescription(prefs);
+            var planDescription = !string.IsNullOrEmpty(prefs.Description)
+                ? prefs.Description
+                : BuildPlanDescription(prefs);
 
             if (isAnonymous)
             {
@@ -155,7 +159,9 @@ public class BuilderController : ControllerBase
                     ? JsonSerializer.SerializeToDocument(request.TripContext)
                     : JsonSerializer.SerializeToDocument(new {}),
                 IsPublic = false,
-                CreatedById = userId
+                CreatedById = userId,
+                NameI18n = LanguageAccessor.SetI18nString(null, lang, planName),
+                DescriptionI18n = LanguageAccessor.SetI18nString(null, lang, planDescription),
             };
 
             _db.Plans.Add(plan);

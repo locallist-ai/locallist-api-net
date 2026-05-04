@@ -292,9 +292,62 @@ public class AdminPlansController : ControllerBase
         if (draft == null)
             return StatusCode(503, new { error = "Translation service unavailable." });
 
-        _logger.LogInformation("Translated plan {PlanId} to ES (draft, not saved)", plan.Id);
+        _logger.LogInformation("Translation: entity=Plan id={Id} lang=es action=draft", plan.Id);
 
         return Ok(new { nameEs = draft.Name, descriptionEs = draft.Description });
+    }
+
+    /// <summary>
+    /// Backfill: translate all curated plans without ES translation.
+    /// Idempotent — only processes plans missing name_i18n.es.
+    /// </summary>
+    [HttpPost("translate-batch")]
+    public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", CancellationToken ct = default)
+    {
+        var allCurated = await _db.Plans
+            .Where(p => p.Source == "curated")
+            .ToListAsync(ct);
+
+        var toTranslate = allCurated
+            .Where(p => p.NameI18n == null
+                     || !p.NameI18n.RootElement.TryGetProperty(lang, out _))
+            .ToList();
+
+        if (toTranslate.Count == 0)
+            return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
+                message = $"All curated plans already have '{lang}' translation." });
+
+        var translated = 0;
+        var failed = 0;
+
+        foreach (var plan in toTranslate)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var draft = await _ai.TranslatePlanAsync(plan, lang, ct);
+            if (draft == null) { failed++; continue; }
+
+            plan.NameI18n = LanguageAccessor.SetI18nString(plan.NameI18n, lang, draft.Name);
+            plan.DescriptionI18n = LanguageAccessor.SetI18nString(plan.DescriptionI18n, lang, draft.Description);
+            plan.TranslationStatus = LanguageAccessor.SetI18nString(plan.TranslationStatus, lang, "draft");
+            plan.UpdatedAt = _clock.GetUtcNow();
+
+            _logger.LogInformation("Translation: entity=Plan id={Id} lang={Lang} action=draft", plan.Id, lang);
+            translated++;
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("translate-batch plans: translated={T} failed={F} skipped={S}",
+            translated, failed, allCurated.Count - toTranslate.Count);
+
+        return Ok(new
+        {
+            translated,
+            failed,
+            skipped = allCurated.Count - toTranslate.Count,
+            remaining = toTranslate.Count - translated - failed
+        });
     }
 
     [HttpPut("{id}/stops")]
