@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -15,12 +16,14 @@ public class PlansController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlansController> _logger;
     private readonly LanguageAccessor _lang;
+    private readonly RouteResolver _routeResolver;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, RouteResolver routeResolver)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
+        _routeResolver = routeResolver;
     }
 
     [HttpPost]
@@ -136,6 +139,7 @@ public class PlansController : ControllerBase
             return NotFound(new { error = "Plan not found" });
         }
 
-        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language));
+        var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
+        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments));
     }
 }

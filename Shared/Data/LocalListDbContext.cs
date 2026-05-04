@@ -15,6 +15,7 @@ public class LocalListDbContext : DbContext
     public DbSet<WaitlistEntry> WaitlistEntries { get; set; } = null!;
     public DbSet<RefreshToken> RefreshTokens { get; set; } = null!;
     public DbSet<City> Cities { get; set; } = null!;
+    public DbSet<RouteSegmentCache> RouteSegmentCaches { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -105,5 +106,21 @@ public class LocalListDbContext : DbContext
             .OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<RefreshToken>().HasIndex(rt => rt.TokenPrefix);
         modelBuilder.Entity<RefreshToken>().HasIndex(rt => rt.UserId);
+
+        modelBuilder.Entity<RouteSegmentCache>()
+            .HasOne(r => r.FromPlace)
+            .WithMany()
+            .HasForeignKey(r => r.FromPlaceId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<RouteSegmentCache>()
+            .HasOne(r => r.ToPlace)
+            .WithMany()
+            .HasForeignKey(r => r.ToPlaceId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<RouteSegmentCache>()
+            .HasIndex(r => new { r.FromPlaceId, r.ToPlaceId, r.Mode })
+            .IsUnique();
     }
 }

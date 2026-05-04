@@ -71,10 +71,11 @@ public record PlanDetailDto(
     Guid? CreatedById,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    List<PlanDayDto> Days
+    List<PlanDayDto> Days,
+    List<PlanRouteSegmentDto>? RouteSegments = null
 )
 {
-    public static PlanDetailDto FromEntity(Plan plan, string lang = "en")
+    public static PlanDetailDto FromEntity(Plan plan, string lang = "en", IReadOnlyList<PlanRouteSegmentDto>? routeSegments = null)
     {
         var days = plan.Stops
             .OrderBy(s => s.DayNumber)
@@ -85,7 +86,7 @@ public record PlanDetailDto(
                 g.Select(s => PlanStopResponseDto.FromEntity(s, lang)).ToList()
             ))
             .ToList();
-        return Build(plan, lang, days);
+        return Build(plan, lang, days, routeSegments);
     }
 
     public static PlanDetailDto FromEntityWithAllDays(Plan plan, string lang = "en")
@@ -104,10 +105,10 @@ public record PlanDetailDto(
                 stopsByDay.TryGetValue(d, out var s) ? s : []
             ))
             .ToList();
-        return Build(plan, lang, days);
+        return Build(plan, lang, days, null);
     }
 
-    private static PlanDetailDto Build(Plan p, string lang, List<PlanDayDto> days)
+    private static PlanDetailDto Build(Plan p, string lang, List<PlanDayDto> days, IReadOnlyList<PlanRouteSegmentDto>? routeSegments)
     {
         var isCurated = p.Source == "curated";
         return new(
@@ -116,9 +117,19 @@ public record PlanDetailDto(
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
             p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
-            p.CreatedById, p.CreatedAt, p.UpdatedAt, days
+            p.CreatedById, p.CreatedAt, p.UpdatedAt, days,
+            routeSegments?.Count > 0 ? routeSegments.ToList() : null
         );
     }
 }
+
+public record PlanRouteSegmentDto(
+    int DayNumber,
+    int FromOrderIndex,
+    int ToOrderIndex,
+    string EncodedPolyline,
+    int DistanceMeters,
+    int DurationSeconds
+);
 
 public record PlansListResponse(List<PlanDto> Plans, int Total);

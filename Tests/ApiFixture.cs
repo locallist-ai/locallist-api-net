@@ -20,6 +20,7 @@ using Testcontainers.PostgreSql;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data;
 
 namespace LocalList.API.Tests;
@@ -47,6 +48,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     public FakeGeminiHandler FakeGemini { get; } = new();
 
     /// <summary>
+    /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
+    /// Tests del routing configuran <see cref="FakeMapboxHandler.Responder"/> para definir
+    /// la respuesta (OK con polyline, 502, vacío, etc.). Por defecto devuelve una respuesta
+    /// Mapbox mínima válida con una polyline de prueba.
+    /// </summary>
+    public FakeMapboxHandler FakeMapbox { get; } = new();
+
+    /// <summary>
     /// Handler que intercepta llamadas de <see cref="EmbeddingService"/>
     /// a <c>:batchEmbedContents</c>. Por defecto devuelve embeddings
     /// deterministas (hash-based) de 768 dims, lo que permite a los tests
@@ -66,6 +75,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         // Gemini key inyectada como variable de entorno para que AiProviderService no tire
         // por "API Key missing" y siga el flujo HTTP (que atrapa nuestro FakeGeminiHandler).
         Environment.SetEnvironmentVariable("Gemini__ApiKey", "test-gemini-key");
+        // Mapbox key — valor no vacío para que MapboxRoutingService no cortocircuite.
+        Environment.SetEnvironmentVariable("Mapbox__AccessToken", "test-mapbox-token");
     }
 
     public async ValueTask InitializeAsync()
@@ -155,6 +166,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddHttpClient<EmbeddingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeEmbeddings);
+
+            services.AddHttpClient<IRoutingService, MapboxRoutingService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeMapbox);
 
             // Disable rate limiting in tests
             var rateLimiterDescriptors = services
@@ -344,6 +358,38 @@ public class FakeEmbeddingHandler : HttpMessageHandler
             Content = new StringContent(JsonSerializer.Serialize(new { embeddings }), Encoding.UTF8, "application/json")
         };
         return response;
+    }
+}
+
+/// <summary>
+/// Handler HTTP fake que intercepta las llamadas a Mapbox Directions desde
+/// <c>MapboxRoutingService</c>. Los tests ajustan <see cref="Responder"/> para
+/// devolver distintos cuerpos/estados. Por defecto devuelve una respuesta Mapbox
+/// mínima válida con una polyline de prueba para no bloquear tests no relacionados.
+/// </summary>
+public class FakeMapboxHandler : HttpMessageHandler
+{
+    public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
+    public List<HttpRequestMessage> Calls { get; } = new();
+
+    // Respuesta Mapbox mínima válida para tests que no configuran Responder.
+    private const string DefaultMapboxResponse = """
+        {"routes":[{"geometry":"test_polyline","legs":[{"distance":500.0,"duration":300.0}],"distance":500.0,"duration":300.0}],"code":"Ok"}
+        """;
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Calls.Add(request);
+        var responder = Responder;
+        if (responder is null)
+        {
+            var fallback = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(DefaultMapboxResponse, System.Text.Encoding.UTF8, "application/json")
+            };
+            return Task.FromResult(fallback);
+        }
+        return Task.FromResult(responder(request));
     }
 }
 

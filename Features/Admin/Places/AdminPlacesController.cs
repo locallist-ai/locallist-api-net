@@ -485,7 +485,7 @@ public class AdminPlacesController : ControllerBase
     public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", CancellationToken ct = default)
     {
         var allCurated = await _db.Places
-            .Where(p => p.Source == "curated")
+            .Where(p => p.Source == "curated" && p.Status == "published")
             .ToListAsync(ct);
 
         var toTranslate = allCurated
@@ -495,7 +495,7 @@ public class AdminPlacesController : ControllerBase
 
         if (toTranslate.Count == 0)
             return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
-                message = $"All curated places already have '{lang}' translation." });
+                message = $"All published curated places already have '{lang}' translation." });
 
         var translated = 0;
         var failed = 0;
