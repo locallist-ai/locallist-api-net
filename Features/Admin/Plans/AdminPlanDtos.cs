@@ -133,6 +133,9 @@ public class CreatePlanRequest
     public bool IsPublic { get; set; } = true;
     public bool IsShowcase { get; set; } = false;
 
+    [StringLength(20)]
+    public string Source { get; set; } = "curated";
+
     public List<CreatePlanStopRequest> Stops { get; set; } = [];
 }
 
