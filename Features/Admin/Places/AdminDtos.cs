@@ -194,3 +194,28 @@ public record BulkImportItemResult(
     string? Error,
     Guid? Id
 );
+
+public class GoogleSearchRequest
+{
+    [Required, StringLength(200, MinimumLength = 1)]
+    public required string Query { get; set; }
+
+    [StringLength(100)]
+    public string City { get; set; } = "Miami";
+}
+
+public record GooglePlacePreview(
+    string GooglePlaceId,
+    string Name,
+    string? FormattedAddress,
+    decimal? Lat,
+    decimal? Lng,
+    decimal? Rating,
+    int? ReviewCount,
+    string? PriceLevel,
+    List<string> Photos,
+    List<string> Types,
+    string? Website,
+    string? Phone,
+    bool ExistsInLib
+);
