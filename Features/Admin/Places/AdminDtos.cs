@@ -116,7 +116,7 @@ public class CreatePlaceRequest
 
 public class ReviewPlaceRequest
 {
-    [Required, RegularExpression("^(published|rejected)$", ErrorMessage = "Status must be 'published' or 'rejected'.")]
+    [Required, RegularExpression("^(published|rejected|in_review)$", ErrorMessage = "Status must be 'published', 'rejected', or 'in_review'.")]
     public required string Status { get; set; }
 
     [StringLength(1000)]
