@@ -519,8 +519,10 @@ public class AdminPlacesController : ControllerBase
     /// Saves progress every 5 places so partial runs are resumable.
     /// </summary>
     [HttpPost("translate-batch")]
-    public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", CancellationToken ct = default)
+    public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", [FromQuery] int limit = 10, CancellationToken ct = default)
     {
+        limit = Math.Clamp(limit, 1, 50);
+
         var allCurated = await _db.Places
             .Where(p => p.Source == "curated" && p.Status == "published")
             .ToListAsync(ct);
@@ -532,12 +534,15 @@ public class AdminPlacesController : ControllerBase
 
         if (toTranslate.Count == 0)
             return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
+                remaining = 0,
                 message = $"All published curated places already have '{lang}' translation." });
 
+        var totalPending = toTranslate.Count;
+        var batch = toTranslate.Take(limit).ToList();
         var translated = 0;
         var failed = 0;
 
-        foreach (var chunk in toTranslate.Chunk(5))
+        foreach (var chunk in batch.Chunk(5))
         {
             foreach (var place in chunk)
             {
@@ -565,15 +570,15 @@ public class AdminPlacesController : ControllerBase
                 await _db.SaveChangesAsync(ct);
         }
 
-        _logger.LogInformation("translate-batch places: translated={T} failed={F} skipped={S}",
-            translated, failed, allCurated.Count - toTranslate.Count);
+        _logger.LogInformation("translate-batch places: translated={T} failed={F} skipped={S} remaining={R}",
+            translated, failed, allCurated.Count - toTranslate.Count, totalPending - translated - failed);
 
         return Ok(new
         {
             translated,
             failed,
             skipped = allCurated.Count - toTranslate.Count,
-            remaining = toTranslate.Count - translated - failed
+            remaining = totalPending - translated - failed
         });
     }
 }

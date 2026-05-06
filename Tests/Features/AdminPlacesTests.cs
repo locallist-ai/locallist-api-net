@@ -158,7 +158,90 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task TranslateBatch_LimitSmallerThanPending_Returns_RemainingGreaterThanZero()
+    {
+        var db = fixture.GetDbContext();
+        for (var i = 0; i < 3; i++)
+        {
+            db.Places.Add(new Place
+            {
+                Id = Guid.NewGuid(),
+                Name = $"Translate Target {Guid.NewGuid():N}",
+                Category = "Food",
+                City = "Miami",
+                WhyThisPlace = "test",
+                Status = "published",
+                Source = "curated",
+            });
+        }
+        await db.SaveChangesAsync();
+
+        // Return a valid place translation for each Gemini call
+        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTime":"Tarde","neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync("/admin/places/translate-batch?lang=es&limit=1", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(1, body.GetProperty("translated").GetInt32());
+            Assert.True(body.GetProperty("remaining").GetInt32() > 0);
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+        }
+    }
+
+    [Fact]
+    public async Task TranslateBatch_AllFitWithinLimit_Returns_RemainingZero()
+    {
+        var db = fixture.GetDbContext();
+        var uniquePrefix = Guid.NewGuid().ToString("N");
+        for (var i = 0; i < 2; i++)
+        {
+            db.Places.Add(new Place
+            {
+                Id = Guid.NewGuid(),
+                Name = $"AllFit {uniquePrefix} {i}",
+                Category = "Food",
+                City = "Miami",
+                WhyThisPlace = "test",
+                Status = "published",
+                Source = "curated",
+            });
+        }
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTime":"Tarde","neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
+        try
+        {
+            var client = CreateAdminClient();
+            // limit=10 (default) > 2 seeded — all should be translated
+            var response = await client.PostAsync("/admin/places/translate-batch?lang=es", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(0, body.GetProperty("remaining").GetInt32());
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    private static HttpResponseMessage GeminiOk(string text)
+    {
+        var envelope = $"{{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":{System.Text.Json.JsonSerializer.Serialize(text)}}}]}}}}]}}";
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(envelope, System.Text.Encoding.UTF8, "application/json")
+        };
+    }
 
     private HttpClient CreateAdminClient()
     {
