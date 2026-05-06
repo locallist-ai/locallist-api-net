@@ -78,9 +78,6 @@ public class AppAuthController : ControllerBase
         if (claims.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
             return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
 
-        if (claims.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
-            return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
-
         var providerSub = claims.Sub;
         var user = request.Provider == "apple"
             ? await _db.Users.FirstOrDefaultAsync(
