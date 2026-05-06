@@ -7,6 +7,7 @@ using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Taxonomy;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -22,11 +23,6 @@ public class AdminPlacesController : ControllerBase
     private readonly EmbeddingService _embeddings;
     private readonly AiProviderService _ai;
     private readonly IGooglePlacesService _googlePlaces;
-
-    private static readonly HashSet<string> ValidCategories = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Food", "Nightlife", "Coffee", "Outdoors", "Wellness", "Culture"
-    };
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -142,8 +138,11 @@ public class AdminPlacesController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreatePlace([FromBody] CreatePlaceRequest request, CancellationToken ct)
     {
-        if (!ValidCategories.Contains(request.Category))
-            return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", ValidCategories)}" });
+        if (!PlaceTaxonomy.IsValidCategory(request.Category))
+            return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", PlaceTaxonomy.Categories)}" });
+
+        if (!PlaceTaxonomy.IsValidSubcategory(request.Category, request.Subcategory))
+            return BadRequest(new { error = $"Invalid subcategory '{request.Subcategory}' for category '{request.Category}'.", code = "subcategory_not_in_taxonomy" });
 
         var userId = await GetUserIdAsync(ct);
         var now = _clock.GetUtcNow();
@@ -233,9 +232,17 @@ public class AdminPlacesController : ControllerBase
         foreach (var request in requests)
         {
             // Validate category
-            if (!ValidCategories.Contains(request.Category))
+            if (!PlaceTaxonomy.IsValidCategory(request.Category))
             {
                 results.Add(new BulkImportItemResult(request.Name, "error", $"Invalid category: {request.Category}", null));
+                errors++;
+                continue;
+            }
+
+            // Validate subcategory against whitelist for this category
+            if (!PlaceTaxonomy.IsValidSubcategory(request.Category, request.Subcategory))
+            {
+                results.Add(new BulkImportItemResult(request.Name, "error", $"Invalid subcategory '{request.Subcategory}' for category '{request.Category}'", null));
                 errors++;
                 continue;
             }
@@ -313,8 +320,12 @@ public class AdminPlacesController : ControllerBase
         if (place == null)
             return NotFound(new { error = "Place not found" });
 
-        if (request.Category != null && !ValidCategories.Contains(request.Category))
-            return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", ValidCategories)}" });
+        if (request.Category != null && !PlaceTaxonomy.IsValidCategory(request.Category))
+            return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", PlaceTaxonomy.Categories)}" });
+
+        var effectiveCategory = request.Category ?? place.Category;
+        if (request.Subcategory != null && !PlaceTaxonomy.IsValidSubcategory(effectiveCategory, request.Subcategory))
+            return BadRequest(new { error = $"Invalid subcategory '{request.Subcategory}' for category '{effectiveCategory}'.", code = "subcategory_not_in_taxonomy" });
 
         // Apply non-null fields only (partial update)
         if (request.Name != null) place.Name = request.Name.Trim();
@@ -450,7 +461,7 @@ public class AdminPlacesController : ControllerBase
 
         var texts = tracked
             .Select(p => EmbeddingService.BuildPlaceIndexText(
-                p.Name, p.Category, p.Neighborhood, p.City, p.WhyThisPlace, p.BestFor, p.SuitableFor))
+                p.Name, p.Category, p.Subcategory, p.Neighborhood, p.City, p.WhyThisPlace, p.BestFor, p.SuitableFor))
             .ToList();
 
         var vectors = await _embeddings.EmbedBatchAsync(texts, ct);

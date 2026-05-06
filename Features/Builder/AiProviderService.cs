@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Taxonomy;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -11,7 +12,8 @@ public class AiProviderService
     private readonly IConfiguration _config;
     private readonly ILogger<AiProviderService> _logger;
 
-    private static readonly string[] AllowedCategories = { "food", "nightlife", "coffee", "outdoors", "wellness", "culture" };
+    private static readonly string[] AllowedCategories =
+        PlaceTaxonomy.Categories.Select(c => c.ToLowerInvariant()).ToArray();
     private static readonly string[] AllowedGroupTypes = { "solo", "couple", "friends", "family-kids", "family", "group" };
 
     public AiProviderService(HttpClient httpClient, IConfiguration config, ILogger<AiProviderService> logger)
@@ -129,7 +131,7 @@ Rules for planName:{langNote}
 Return JSON only, no markdown. EXACT shape:
 {{
   ""days"": number (1-7, default 1),
-  ""categories"": string[] (from: food, nightlife, coffee, outdoors, wellness, culture),
+  ""categories"": string[] (from: {string.Join(", ", AllowedCategories)}),
   ""vibes"": string[] (e.g. romantic, adventurous, relaxed, party, cultural),
   ""groupType"": string (solo/couple/friends/family-kids/family/group),
   ""planName"": string (following the rules above),
