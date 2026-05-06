@@ -6,7 +6,10 @@ using Microsoft.IdentityModel.Tokens;
 
 namespace LocalList.API.NET.Features.Auth.Services;
 
-public record OAuthClaims(string Sub, string? Email, string? Name, string? Picture);
+public record OAuthClaims(string Sub, string? Email, string? Name, string? Picture)
+{
+    public bool EmailVerified { get; init; } = true;
+}
 
 public interface IAppleIdTokenValidator
 {
@@ -77,11 +80,15 @@ public class AppleIdTokenValidator : IAppleIdTokenValidator
             var email = principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value
                         ?? principal.FindFirst(ClaimTypes.Email)?.Value;
 
-            return new OAuthClaims(
-                Sub: sub,
-                Email: email,
-                Name: null,
-                Picture: null);
+            var emailVerifiedRaw = principal.FindFirst("email_verified")?.Value;
+            var emailVerified = emailVerifiedRaw is null
+                || string.Equals(emailVerifiedRaw, "true", StringComparison.OrdinalIgnoreCase)
+                || emailVerifiedRaw == "1";
+
+            return new OAuthClaims(Sub: sub, Email: email, Name: null, Picture: null)
+            {
+                EmailVerified = emailVerified
+            };
         }
         catch (Exception ex)
         {

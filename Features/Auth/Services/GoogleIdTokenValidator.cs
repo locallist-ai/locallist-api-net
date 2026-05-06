@@ -89,11 +89,19 @@ public class GoogleIdTokenValidator : IGoogleIdTokenValidator
             var email = principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value
                         ?? principal.FindFirst(ClaimTypes.Email)?.Value;
 
+            var emailVerifiedRaw = principal.FindFirst("email_verified")?.Value;
+            var emailVerified = emailVerifiedRaw is null
+                || string.Equals(emailVerifiedRaw, "true", StringComparison.OrdinalIgnoreCase)
+                || emailVerifiedRaw == "1";
+
             return new OAuthClaims(
                 Sub: sub,
                 Email: email,
                 Name: principal.FindFirst("name")?.Value,
-                Picture: principal.FindFirst("picture")?.Value);
+                Picture: principal.FindFirst("picture")?.Value)
+            {
+                EmailVerified = emailVerified
+            };
         }
         catch (Exception ex)
         {

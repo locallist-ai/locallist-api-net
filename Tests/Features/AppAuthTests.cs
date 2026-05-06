@@ -236,6 +236,28 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Contains("Firebase", body);
     }
 
+    [Fact]
+    public async Task Signin_UnverifiedEmail_Returns401()
+    {
+        var idToken = $"google-unverified-{Guid.NewGuid():N}";
+        fixture.FakeGoogle.Tokens[idToken] = new OAuthClaims(
+            Sub: $"google-sub-{Guid.NewGuid():N}",
+            Email: $"unverified-{Guid.NewGuid():N}@test.com",
+            Name: null,
+            Picture: null)
+        {
+            EmailVerified = false
+        };
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/auth/signin",
+            new { provider = "google", idToken });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+        var body = await res.Content.ReadAsStringAsync();
+        Assert.Contains("not verified", body);
+    }
+
     // ─── Refresh ─────────────────────────────────────────
 
     [Fact]
