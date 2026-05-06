@@ -81,9 +81,10 @@ public class AppleIdTokenValidator : IAppleIdTokenValidator
                         ?? principal.FindFirst(ClaimTypes.Email)?.Value;
 
             var emailVerifiedRaw = principal.FindFirst("email_verified")?.Value;
-            var emailVerified = emailVerifiedRaw is null
-                || string.Equals(emailVerifiedRaw, "true", StringComparison.OrdinalIgnoreCase)
-                || emailVerifiedRaw == "1";
+            // Apple omits email_verified in re-auth tokens; treat absence as unverified.
+            var emailVerified = emailVerifiedRaw is not null
+                && (string.Equals(emailVerifiedRaw, "true", StringComparison.OrdinalIgnoreCase)
+                    || emailVerifiedRaw == "1");
 
             return new OAuthClaims(Sub: sub, Email: email, Name: null, Picture: null)
             {
