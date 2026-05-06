@@ -32,10 +32,11 @@ Required User Secrets / Environment Variables:
 - `Gemini__ApiKey`
 - `Gemini__EmbeddingModel` — por defecto `text-embedding-004` (768 dims). Se usa en `EmbeddingService` (RAG Fase 1) y en el pipeline de import reels (Fase 3).
 
-**Apify (import reels/TikTok — Fase 3)**
-- `Apify__Token` — API token de Apify. Pendiente de alta.
-- `Apify__InstagramActor` — slug del actor (p.ej. `apify/instagram-scraper`).
-- `Apify__TikTokActor` — slug del actor (p.ej. `clockworks/tiktok-scraper`).
+**Google Places (admin ingestion — Fase A)**
+- `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
+
+**Fase 3 — Video import (pendiente, plan en ~/.claude/plans/)**
+- Sin Apify. Arquitectura: video file → Gemini multimodal directo (File API). Ver plan `creo-que-lo-mejor-curious-fiddle.md`.
 
 ## Project Structure (VSA)
 

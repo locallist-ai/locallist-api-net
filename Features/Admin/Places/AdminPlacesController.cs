@@ -22,6 +22,7 @@ public class AdminPlacesController : ControllerBase
     private readonly TimeProvider _clock;
     private readonly EmbeddingService _embeddings;
     private readonly AiProviderService _ai;
+    private readonly IGooglePlacesService _googlePlaces;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -33,13 +34,15 @@ public class AdminPlacesController : ControllerBase
         ILogger<AdminPlacesController> logger,
         TimeProvider clock,
         EmbeddingService embeddings,
-        AiProviderService ai)
+        AiProviderService ai,
+        IGooglePlacesService googlePlaces)
     {
         _db = db;
         _logger = logger;
         _clock = clock;
         _embeddings = embeddings;
         _ai = ai;
+        _googlePlaces = googlePlaces;
     }
 
     [HttpGet("cities")]
@@ -53,6 +56,33 @@ public class AdminPlacesController : ControllerBase
             .ToListAsync(ct);
 
         return Ok(new { cities });
+    }
+
+    [HttpPost("google-search")]
+    public async Task<IActionResult> GoogleSearch([FromBody] GoogleSearchRequest request, CancellationToken ct)
+    {
+        var textQuery = $"{request.Query.Trim()} in {request.City.Trim()}";
+        var previews = await _googlePlaces.SearchAsync(textQuery, ct);
+
+        if (previews is null)
+            return NotFound(new { error = "google_places_unavailable", message = "Google Places API key not configured or service unavailable." });
+
+        if (previews.Count > 0)
+        {
+            var incomingIds = previews.Select(p => p.GooglePlaceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var existing = (await _db.Places.AsNoTracking()
+                .Where(p => p.GooglePlaceId != null && incomingIds.Contains(p.GooglePlaceId))
+                .Select(p => p.GooglePlaceId!)
+                .ToListAsync(ct))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            previews = previews
+                .Select(p => p with { ExistsInLib = existing.Contains(p.GooglePlaceId) })
+                .ToList();
+        }
+
+        _logger.LogInformation("GoogleSearch: query='{Query}' returned {Count} results", textQuery, previews.Count);
+        return Ok(new { results = previews });
     }
 
     [HttpGet]
