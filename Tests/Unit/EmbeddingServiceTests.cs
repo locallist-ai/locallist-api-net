@@ -10,6 +10,7 @@ public class EmbeddingServiceTests
         var text = EmbeddingService.BuildPlaceIndexText(
             name: "Enriqueta's Sandwich Shop",
             category: "Food",
+            subcategory: "Cuban",
             neighborhood: "Wynwood",
             city: "Miami",
             whyThisPlace: "Cuban breakfast sandwich",
@@ -20,6 +21,7 @@ public class EmbeddingServiceTests
         Assert.Contains("Miami", text);
         Assert.Contains("Wynwood", text);
         Assert.Contains("Food", text);
+        Assert.Contains("Cuban", text);
         Assert.Contains("Cuban breakfast sandwich", text);
         Assert.Contains("solo quick", text);
         Assert.Contains("couple", text);
@@ -31,6 +33,7 @@ public class EmbeddingServiceTests
         var text = EmbeddingService.BuildPlaceIndexText(
             name: "Solo Name",
             category: null,
+            subcategory: null,
             neighborhood: "",
             city: null,
             whyThisPlace: null,
@@ -44,10 +47,10 @@ public class EmbeddingServiceTests
     public void BuildPlaceIndexText_DifferentCitiesYieldDifferentText()
     {
         var miami = EmbeddingService.BuildPlaceIndexText(
-            name: "Joe's Pizza", category: "Food", neighborhood: "Downtown",
+            name: "Joe's Pizza", category: "Food", subcategory: "Pizza", neighborhood: "Downtown",
             city: "Miami", whyThisPlace: "slice", bestFor: null, suitableFor: null);
         var nyc = EmbeddingService.BuildPlaceIndexText(
-            name: "Joe's Pizza", category: "Food", neighborhood: "Downtown",
+            name: "Joe's Pizza", category: "Food", subcategory: "Pizza", neighborhood: "Downtown",
             city: "NYC", whyThisPlace: "slice", bestFor: null, suitableFor: null);
 
         Assert.NotEqual(miami, nyc);
@@ -61,6 +64,7 @@ public class EmbeddingServiceTests
         var text = EmbeddingService.BuildPlaceIndexText(
             name: "A",
             category: "B",
+            subcategory: null,
             neighborhood: null,
             city: null,
             whyThisPlace: "C",

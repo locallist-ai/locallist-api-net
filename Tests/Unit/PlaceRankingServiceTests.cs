@@ -251,7 +251,7 @@ public class PlaceRankingServiceTests
     public void ScoreSubcategoryMatch_NoSubcategoriesPref_ReturnsZero()
     {
         var svc = new PlaceRankingService();
-        var place = P("Sushi", category: "Food", subcategory: "Sushi / japanese");
+        var place = P("Sushi", category: "Food", subcategory: "Sushi");
         var prefs = new ExtractedPreferences
         {
             Categories = new List<string> { "food" },
@@ -266,7 +266,7 @@ public class PlaceRankingServiceTests
     public void ScoreSubcategoryMatch_BucketMatchesBySubstring_ReturnsOne()
     {
         var svc = new PlaceRankingService();
-        var place = P("Pasta", category: "Food", subcategory: "Coastal Italian / seafood");
+        var place = P("Pasta", category: "Food", subcategory: "Italian");
         var prefs = new ExtractedPreferences
         {
             Categories = new List<string> { "food" },
@@ -284,7 +284,7 @@ public class PlaceRankingServiceTests
     public void ScoreSubcategoryMatch_BucketWithoutMatch_ReturnsZero()
     {
         var svc = new PlaceRankingService();
-        var place = P("Mex", category: "Food", subcategory: "Tacos / mexican");
+        var place = P("Mex", category: "Food", subcategory: "Tacos");
         var prefs = new ExtractedPreferences
         {
             Categories = new List<string> { "food" },
