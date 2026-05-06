@@ -1,5 +1,3 @@
-﻿using System;
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -12,20 +10,17 @@ namespace LocalList.API.NET.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // route_segment_cache is covered by AddRouteSegmentCache migration (raw SQL, idempotent)
-            migrationBuilder.AddColumn<JsonDocument>(
-                name: "translation_status",
-                table: "plans",
-                type: "jsonb",
-                nullable: true);
+            migrationBuilder.Sql("""
+                ALTER TABLE plans ADD COLUMN IF NOT EXISTS translation_status jsonb;
+                """);
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropColumn(
-                name: "translation_status",
-                table: "plans");
+            migrationBuilder.Sql("""
+                ALTER TABLE plans DROP COLUMN IF EXISTS translation_status;
+                """);
         }
     }
 }

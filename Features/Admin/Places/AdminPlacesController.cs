@@ -144,7 +144,7 @@ public class AdminPlacesController : ControllerBase
         if (!PlaceTaxonomy.IsValidSubcategory(request.Category, request.Subcategory))
             return BadRequest(new { error = $"Invalid subcategory '{request.Subcategory}' for category '{request.Category}'.", code = "subcategory_not_in_taxonomy" });
 
-        var userId = await GetUserIdAsync(ct);
+        var userId = await User.GetUserIdAsync(_db, ct);
         var now = _clock.GetUtcNow();
 
         var place = new Place
@@ -193,7 +193,7 @@ public class AdminPlacesController : ControllerBase
         if (requests.Count > 500)
             return BadRequest(new { error = "Maximum 500 places per bulk import." });
 
-        var userId = await GetUserIdAsync(ct);
+        var userId = await User.GetUserIdAsync(_db, ct);
         var now = _clock.GetUtcNow();
         var results = new List<BulkImportItemResult>();
         int created = 0, skipped = 0, errors = 0;
@@ -387,7 +387,7 @@ public class AdminPlacesController : ControllerBase
 
         place.Status = request.Status;
         place.RejectionReason = request.Status == "rejected" ? request.RejectionReason?.Trim() : null;
-        place.ReviewedById = await GetUserIdAsync(ct);
+        place.ReviewedById = await User.GetUserIdAsync(_db, ct);
         place.UpdatedAt = _clock.GetUtcNow();
 
         await _db.SaveChangesAsync(ct);
@@ -427,10 +427,6 @@ public class AdminPlacesController : ControllerBase
         return NoContent();
     }
 
-    private async Task<Guid?> GetUserIdAsync(CancellationToken ct = default)
-    {
-        return await User.GetUserIdAsync(_db, ct);
-    }
 
     [HttpPost("reindex-embeddings")]
     public async Task<IActionResult> ReindexEmbeddings(

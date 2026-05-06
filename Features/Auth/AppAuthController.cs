@@ -73,7 +73,8 @@ public class AppAuthController : ControllerBase
         if (claims is null) return Unauthorized(new { error = "Invalid ID token" });
         if (string.IsNullOrEmpty(claims.Email))
             return BadRequest(new { error = "Email not provided by identity provider" });
-
+        if (!claims.EmailVerified)
+            return Unauthorized(new { error = "Email address is not verified by identity provider" });
         if (claims.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
             return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
 
