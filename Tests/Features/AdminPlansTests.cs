@@ -140,7 +140,51 @@ public class AdminPlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(body.TryGetProperty("plan", out _));
     }
 
+    [Fact]
+    public async Task TranslateBatch_Plans_LimitSmallerThanPending_Returns_RemainingGreaterThanZero()
+    {
+        var db = fixture.GetDbContext();
+        for (var i = 0; i < 3; i++)
+        {
+            db.Plans.Add(new Plan
+            {
+                Id = Guid.NewGuid(),
+                Name = $"Translate Plan {Guid.NewGuid():N}",
+                City = "Miami",
+                Type = "curated",
+                Source = "curated",
+                Description = "Test plan",
+            });
+        }
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","description":"Descripción ES"}""");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync("/admin/plans/translate-batch?lang=es&limit=1", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(1, body.GetProperty("translated").GetInt32());
+            Assert.True(body.GetProperty("remaining").GetInt32() > 0);
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    private static HttpResponseMessage GeminiOk(string text)
+    {
+        var envelope = $"{{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":{System.Text.Json.JsonSerializer.Serialize(text)}}}]}}}}]}}";
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(envelope, System.Text.Encoding.UTF8, "application/json")
+        };
+    }
 
     private HttpClient CreateAdminClient()
     {
