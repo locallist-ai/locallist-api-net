@@ -80,6 +80,17 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
     }
 
+    [Fact]
+    public async Task Register_AdminDomainEmail_Returns403()
+    {
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/auth/register",
+            new { email = $"attacker-{Guid.NewGuid():N}@locallist.ai", password = "Attack1!" });
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+        var body = await res.Content.ReadAsStringAsync();
+        Assert.Contains("Firebase", body);
+    }
+
     // ─── Login ───────────────────────────────────────────
 
     [Fact]
@@ -204,6 +215,25 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var res = await client.PostAsJsonAsync("/auth/signin",
             new { provider = "apple", idToken = "no-such-token-in-fake" });
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Signin_AdminDomainOAuthEmail_Returns403()
+    {
+        var idToken = $"google-admin-{Guid.NewGuid():N}";
+        fixture.FakeGoogle.Tokens[idToken] = new OAuthClaims(
+            Sub: $"google-sub-{Guid.NewGuid():N}",
+            Email: $"curator-{Guid.NewGuid():N}@locallist.ai",
+            Name: null,
+            Picture: null);
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/auth/signin",
+            new { provider = "google", idToken });
+
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+        var body = await res.Content.ReadAsStringAsync();
+        Assert.Contains("Firebase", body);
     }
 
     // ─── Refresh ─────────────────────────────────────────

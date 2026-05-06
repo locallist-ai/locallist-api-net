@@ -74,6 +74,9 @@ public class AppAuthController : ControllerBase
         if (string.IsNullOrEmpty(claims.Email))
             return BadRequest(new { error = "Email not provided by identity provider" });
 
+        if (claims.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
+            return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
+
         var providerSub = claims.Sub;
         var user = request.Provider == "apple"
             ? await _db.Users.FirstOrDefaultAsync(
@@ -88,7 +91,7 @@ public class AppAuthController : ControllerBase
                 Email = claims.Email,
                 Name = request.Name ?? claims.Name,
                 Image = claims.Picture,
-                Role = ResolveRole(claims.Email)
+                Role = "user"
             };
             if (request.Provider == "apple") user.AppleUserId = providerSub;
             else user.GoogleUserId = providerSub;
@@ -118,6 +121,9 @@ public class AppAuthController : ControllerBase
     {
         if (!ModelState.IsValid) return BadRequest(new { error = "Invalid request" });
 
+        if (request.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
+            return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
+
         var existing = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
         if (existing is not null) return Conflict(new { error = "Email already registered" });
 
@@ -126,7 +132,7 @@ public class AppAuthController : ControllerBase
             Email = request.Email,
             Name = request.Name,
             PasswordHash = _hasher.Hash(request.Password),
-            Role = ResolveRole(request.Email)
+            Role = "user"
         };
         _db.Users.Add(user);
         await _db.SaveChangesAsync(ct);
@@ -188,6 +194,4 @@ public class AppAuthController : ControllerBase
             User: new AppAuthUser(user.Id, user.Email, user.Name, user.Image, user.Tier));
     }
 
-    private static string ResolveRole(string email) =>
-        email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase) ? "admin" : "user";
 }
