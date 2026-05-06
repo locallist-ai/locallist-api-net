@@ -29,6 +29,25 @@ public class WaitlistTests : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task Post_WithUtmParams_Returns201()
+    {
+        var email = $"utm-{Guid.NewGuid():N}@example.com";
+
+        var response = await _client.PostAsJsonAsync("/waitlist", new
+        {
+            email,
+            utmSource = "tiktok",
+            utmMedium = "bio",
+            utmCampaign = "launch",
+            utmContent = "pablo",
+            referrer = "https://www.tiktok.com/@pablo.locallist",
+            landingPath = "/pablo",
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Post_DuplicateEmail_Returns201WithoutError()
     {
         var email = $"dup-{Guid.NewGuid():N}@example.com";
@@ -39,11 +58,15 @@ public class WaitlistTests : IClassFixture<ApiFixture>
 
         var countAfterFirst = await GetCount();
 
-        // Second signup with same email
-        var second = await _client.PostAsJsonAsync("/waitlist", new { email });
+        // Second signup — ON CONFLICT DO UPDATE updates last_touch_at, count stays same
+        var second = await _client.PostAsJsonAsync("/waitlist", new
+        {
+            email,
+            utmSource = "instagram",
+            utmMedium = "story",
+        });
         Assert.Equal(HttpStatusCode.Created, second.StatusCode);
 
-        // Count should NOT increase (ON CONFLICT DO NOTHING)
         var countAfterSecond = await GetCount();
         Assert.Equal(countAfterFirst, countAfterSecond);
     }

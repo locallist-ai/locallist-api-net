@@ -646,6 +646,74 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("email");
 
+                    b.Property<string?>("UtmSource")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("utm_source");
+
+                    b.Property<string?>("UtmMedium")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("utm_medium");
+
+                    b.Property<string?>("UtmCampaign")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("utm_campaign");
+
+                    b.Property<string?>("UtmContent")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("utm_content");
+
+                    b.Property<string?>("UtmTerm")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("utm_term");
+
+                    b.Property<string?>("Referrer")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("referrer");
+
+                    b.Property<string?>("LandingPath")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("landing_path");
+
+                    b.Property<string?>("IpHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("ip_hash");
+
+                    b.Property<string?>("UserAgent")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("user_agent");
+
+                    b.Property<string?>("Ttclid")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("ttclid");
+
+                    b.Property<string?>("Fbclid")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("fbclid");
+
+                    b.Property<string?>("Gclid")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("gclid");
+
+                    b.Property<DateTimeOffset?>("FirstTouchAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("first_touch_at");
+
+                    b.Property<DateTimeOffset?>("LastTouchAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_touch_at");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Email")
