@@ -69,7 +69,7 @@ public class AdminPlansController : ControllerBase
     public async Task<IActionResult> CreatePlan([FromBody] CreatePlanRequest request, CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
-        var userId = await GetUserIdAsync(ct);
+        var userId = await User.GetUserIdAsync(_db, ct);
 
         // Resolve place names to IDs
         var placeNames = request.Stops
@@ -153,7 +153,7 @@ public class AdminPlansController : ControllerBase
             return BadRequest(new { error = "Empty request list." });
 
         var now = _clock.GetUtcNow();
-        var userId = await GetUserIdAsync(ct);
+        var userId = await User.GetUserIdAsync(_db, ct);
 
         // Collect all place names to resolve in one query
         var allPlaceNames = requests
@@ -458,8 +458,4 @@ public class AdminPlansController : ControllerBase
         return NoContent();
     }
 
-    private async Task<Guid?> GetUserIdAsync(CancellationToken ct = default)
-    {
-        return await User.GetUserIdAsync(_db, ct);
-    }
 }
