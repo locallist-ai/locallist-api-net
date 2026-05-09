@@ -140,6 +140,35 @@ public class PlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task GetPlaces_AppHs256WithAdminEmail_DoesNotSeeDrafts()
+    {
+        // Defense-in-depth: an HS256 app token whose email happens to be @locallist.ai
+        // (e.g. a legacy user seeded directly in DB) must NOT see draft/in_review places.
+        // IsAdminCaller requires Firebase RS256 issuer — HS256 is always rejected.
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var db = fixture.GetDbContext();
+        db.Places.Add(MakePlace($"Pub {tag}", status: "published", city: $"CITY-{tag}"));
+        db.Places.Add(MakePlace($"Draft {tag}", status: "draft", city: $"CITY-{tag}"));
+
+        // Seed user with admin-domain email directly (bypasses /auth/register 403 block)
+        var userId = Guid.NewGuid();
+        db.Users.Add(new User { Id = userId, Email = $"hs256-admin-{tag}@locallist.ai" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var appToken = fixture.CreateAppToken(userId, $"hs256-admin-{tag}@locallist.ai");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", appToken);
+
+        var response = await client.GetAsync($"/places?status=draft&city=CITY-{tag}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var places = body.GetProperty("places");
+        Assert.Equal(1, places.GetArrayLength());
+        Assert.Equal("published", places[0].GetProperty("status").GetString());
+    }
+
+    [Fact]
     public async Task GetPlace_ReturnsDetail()
     {
         var place = MakePlace("Detail Spot");

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.Tests.Features;
@@ -156,6 +157,36 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var client = fixture.CreateClient();
         var response = await client.PostAsync("/admin/places/reindex-embeddings", content: null);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DbRoleAdmin_WithHs256_GetsForbiddenOnAdminEndpoint()
+    {
+        // The Role column in DB is decorative for authorization — AdminAuthorizationFilter
+        // checks JWT issuer (Firebase RS256) + email domain, not the DB Role value.
+        // A user with Role="admin" in DB but an HS256 token must still get 403.
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var email = $"role-admin-{tag}@test.com";
+        var client = fixture.CreateClient();
+
+        // Register via app flow to obtain a real HS256 token
+        var registerBody = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "TestPass1!" })).Content.ReadFromJsonAsync<JsonElement>();
+        var accessToken = registerBody.GetProperty("accessToken").GetString()!;
+
+        // Elevate Role in DB directly (simulates someone granted "admin" in DB without
+        // a Firebase account — must NOT be sufficient to access admin endpoints)
+        var db = fixture.GetDbContext();
+        var user = await db.Users.SingleAsync(u => u.Email == email);
+        user.Role = "admin";
+        await db.SaveChangesAsync();
+
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]

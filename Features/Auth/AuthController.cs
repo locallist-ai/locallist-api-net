@@ -34,7 +34,7 @@ public class AuthController : ControllerBase
     /// Creates a new user on first login, or links an existing user by email (migration).
     /// </summary>
     [HttpPost("sync")]
-    [Authorize]
+    [Authorize(AuthenticationSchemes = AuthSchemes.Firebase)]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         var firebaseUid = User.GetFirebaseUid();
