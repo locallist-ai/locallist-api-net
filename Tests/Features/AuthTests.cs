@@ -109,4 +109,25 @@ public class AuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
+
+    [Fact]
+    public async Task Sync_WithAppHs256Token_Returns401()
+    {
+        // /auth/sync must only accept Firebase RS256 tokens.
+        // An HS256 app token must be rejected — otherwise it could pollute User.FirebaseUid
+        // with a Guid sub, breaking the "FirebaseUid != null ⟹ Firebase-authenticated" invariant.
+        var userId = Guid.NewGuid();
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = $"hs256-sync-{userId:N}@test.com" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var appToken = fixture.CreateAppToken(userId, $"hs256-sync-{userId:N}@test.com");
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", appToken);
+
+        var response = await client.PostAsync("/auth/sync", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
 }

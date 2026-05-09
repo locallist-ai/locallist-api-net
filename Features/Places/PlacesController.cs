@@ -15,8 +15,6 @@ namespace LocalList.API.NET.Features.Places;
 [AllowAnonymous]
 public class PlacesController : ControllerBase
 {
-    private const string AdminEmailDomain = "@locallist.ai";
-
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlacesController> _logger;
     private readonly LanguageAccessor _lang;
@@ -41,16 +39,10 @@ public class PlacesController : ControllerBase
     {
         limit = Math.Clamp(limit, 1, 100);
 
-        // El filtro `status` solo lo honramos si el caller es admin (@locallist.ai).
-        // Cualquier otro caller —anónimo o usuario autenticado normal— ve únicamente
-        // places en "published" sin importar el valor que haya pedido.
-        // Igual que en AdminAuthorizationFilter: admin = autenticado + email bajo @locallist.ai.
-        var email = User.GetEmail();
-        var isAdmin = User.Identity?.IsAuthenticated == true
-            && !string.IsNullOrEmpty(email)
-            && email.EndsWith(AdminEmailDomain, StringComparison.OrdinalIgnoreCase);
-
-        var effectiveStatus = isAdmin ? (status ?? "published") : "published";
+        // El filtro `status` solo lo honramos si el caller es admin.
+        // Admin = Firebase RS256 + email @locallist.ai (via IsAdminCaller).
+        // Cualquier otro caller —anónimo o app HS256— ve únicamente "published".
+        var effectiveStatus = User.IsAdminCaller() ? (status ?? "published") : "published";
 
         var query = _db.Places.AsNoTracking().AsQueryable();
 
