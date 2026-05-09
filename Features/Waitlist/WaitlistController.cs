@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -20,12 +22,14 @@ public partial class WaitlistController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<WaitlistController> _logger;
     private readonly IEmailMarketingService _emailMarketing;
+    private readonly IConfiguration _configuration;
 
-    public WaitlistController(LocalListDbContext db, ILogger<WaitlistController> logger, IEmailMarketingService emailMarketing)
+    public WaitlistController(LocalListDbContext db, ILogger<WaitlistController> logger, IEmailMarketingService emailMarketing, IConfiguration configuration)
     {
         _db = db;
         _logger = logger;
         _emailMarketing = emailMarketing;
+        _configuration = configuration;
     }
 
     [HttpPost]
@@ -41,11 +45,53 @@ public partial class WaitlistController : ControllerBase
 
         try
         {
-            // Use raw SQL for INSERT ... ON CONFLICT DO NOTHING (EF Core doesn't support this natively)
-            await _db.Database.ExecuteSqlInterpolatedAsync(
-                $"INSERT INTO waitlist_entries (email, created_at) VALUES ({email}, NOW()) ON CONFLICT (email) DO NOTHING", ct);
+            var ipRaw = HttpContext.Connection.RemoteIpAddress?.ToString();
+            var ipHash = HashIp(ipRaw);
+            var userAgent = Request.Headers.UserAgent.ToString();
+            if (userAgent.Length > 500) userAgent = userAgent[..500];
 
-            // Same response for new or duplicate — prevents email enumeration
+            var utmSource = Truncate(request.UtmSource?.Trim(), 100);
+            var utmMedium = Truncate(request.UtmMedium?.Trim(), 100);
+            var utmCampaign = Truncate(request.UtmCampaign?.Trim(), 100);
+            var utmContent = Truncate(request.UtmContent?.Trim(), 100);
+            var utmTerm = Truncate(request.UtmTerm?.Trim(), 100);
+            var referrer = Truncate(request.Referrer?.Trim(), 500);
+            var landingPath = Truncate(request.LandingPath?.Trim(), 500);
+            var ttclid = Truncate(request.Ttclid?.Trim(), 200);
+            var fbclid = Truncate(request.Fbclid?.Trim(), 200);
+            var gclid = Truncate(request.Gclid?.Trim(), 200);
+
+            await _db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO waitlist_entries (
+                    email, created_at,
+                    utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+                    referrer, landing_path, ip_hash, user_agent,
+                    ttclid, fbclid, gclid,
+                    first_touch_at, last_touch_at
+                )
+                VALUES (
+                    {email}, NOW(),
+                    {utmSource}, {utmMedium}, {utmCampaign}, {utmContent}, {utmTerm},
+                    {referrer}, {landingPath}, {ipHash}, {userAgent},
+                    {ttclid}, {fbclid}, {gclid},
+                    NOW(), NOW()
+                )
+                ON CONFLICT (email) DO UPDATE SET
+                    last_touch_at = NOW(),
+                    utm_source = EXCLUDED.utm_source,
+                    utm_medium = EXCLUDED.utm_medium,
+                    utm_campaign = EXCLUDED.utm_campaign,
+                    utm_content = EXCLUDED.utm_content,
+                    utm_term = EXCLUDED.utm_term,
+                    referrer = EXCLUDED.referrer,
+                    landing_path = EXCLUDED.landing_path,
+                    ip_hash = EXCLUDED.ip_hash,
+                    user_agent = EXCLUDED.user_agent,
+                    ttclid = EXCLUDED.ttclid,
+                    fbclid = EXCLUDED.fbclid,
+                    gclid = EXCLUDED.gclid
+                """, ct);
+
             var count = await _db.WaitlistEntries.CountAsync(ct);
 
             _logger.LogInformation("Waitlist signup processed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
@@ -54,10 +100,10 @@ public partial class WaitlistController : ControllerBase
             try
             {
                 var utmData = new Dictionary<string, string>();
-                if (!string.IsNullOrEmpty(request.UtmSource)) utmData["source"] = request.UtmSource;
-                if (!string.IsNullOrEmpty(request.UtmMedium)) utmData["medium"] = request.UtmMedium;
-                if (!string.IsNullOrEmpty(request.UtmCampaign)) utmData["campaign"] = request.UtmCampaign;
-                if (!string.IsNullOrEmpty(request.UtmContent)) utmData["content"] = request.UtmContent;
+                if (!string.IsNullOrEmpty(utmSource)) utmData["source"] = utmSource;
+                if (!string.IsNullOrEmpty(utmMedium)) utmData["medium"] = utmMedium;
+                if (!string.IsNullOrEmpty(utmCampaign)) utmData["campaign"] = utmCampaign;
+                if (!string.IsNullOrEmpty(utmContent)) utmData["content"] = utmContent;
 
                 await _emailMarketing.AddToWaitlistAsync(email, utmData.Count > 0 ? utmData : null, CancellationToken.None);
             }
@@ -82,4 +128,16 @@ public partial class WaitlistController : ControllerBase
         var count = await _db.WaitlistEntries.CountAsync(ct);
         return Ok(new WaitlistCountResponse(count));
     }
+
+    private string HashIp(string? ip)
+    {
+        if (string.IsNullOrEmpty(ip)) return string.Empty;
+        var salt = _configuration["WAITLIST_IP_SALT"] ?? string.Empty;
+        var bytes = Encoding.UTF8.GetBytes($"{salt}:{ip}");
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string? Truncate(string? value, int maxLength) =>
+        value is { Length: > 0 } v && v.Length > maxLength ? v[..maxLength] : value;
 }
