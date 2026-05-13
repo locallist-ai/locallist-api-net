@@ -74,7 +74,30 @@ public class BuilderController : ControllerBase
             var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, ct);
 
             if (result == null)
-                return NotFound(new { error = "no_places_available", message = "No places found for this city yet." });
+            {
+                // Soft fallback: no places found — return empty ephemeral plan rather than 404
+                // so the wizard doesn't surface an error to the user.
+                var fallbackCity = request.TripContext?.City ?? "Miami";
+                return Ok(new
+                {
+                    plan = new
+                    {
+                        Id = Guid.NewGuid(),
+                        Name = $"Plan for {fallbackCity}",
+                        City = fallbackCity,
+                        Type = "ai",
+                        Description = "No places found matching your preferences in this city yet.",
+                        DurationDays = request.TripContext?.Days ?? 1,
+                        TripContext = request.TripContext,
+                        IsPublic = false,
+                        IsEphemeral = true
+                    },
+                    stops = Array.Empty<object>(),
+                    message = "No places found for this city yet.",
+                    warnings = new[] { "no_places_available" },
+                    appliedRefinements = Array.Empty<string>()
+                });
+            }
 
             var planStopsData = result.Schedule.Stops;
 
