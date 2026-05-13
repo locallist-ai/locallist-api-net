@@ -10,7 +10,7 @@ public interface IGooglePlacesService
     /// Returns null when the API key is not configured — callers should return 404/503.
     /// Returns empty list when the query yields no results.
     /// </summary>
-    Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct);
+    Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct, decimal? lat = null, decimal? lng = null);
 
     /// <summary>
     /// Fetches full place details by Place ID. Returns null on API error or missing key.
@@ -66,7 +66,7 @@ public class GooglePlacesService : IGooglePlacesService
         _logger = logger;
     }
 
-    public async Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct)
+    public async Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct, decimal? lat = null, decimal? lng = null)
     {
         var apiKey = _config["GooglePlaces:ApiKey"];
         if (string.IsNullOrEmpty(apiKey))
@@ -79,12 +79,25 @@ public class GooglePlacesService : IGooglePlacesService
             "https://places.googleapis.com/v1/places:searchText");
         request.Headers.Add("X-Goog-Api-Key", apiKey);
         request.Headers.Add("X-Goog-FieldMask", SearchFieldMask);
-        request.Content = JsonContent.Create(new
-        {
-            textQuery,
-            maxResultCount = 20,
-            languageCode = "en"
-        });
+
+        object body = (lat.HasValue && lng.HasValue)
+            ? new
+            {
+                textQuery,
+                maxResultCount = 20,
+                languageCode = "en",
+                locationBias = new
+                {
+                    circle = new
+                    {
+                        center = new { latitude = lat.Value, longitude = lng.Value },
+                        radius = 5000.0
+                    }
+                }
+            }
+            : (object)new { textQuery, maxResultCount = 20, languageCode = "en" };
+
+        request.Content = JsonContent.Create(body);
 
         try
         {
@@ -266,10 +279,9 @@ public class GooglePlacesService : IGooglePlacesService
         return current;
     }
 
-    // Extracts place name from a long Maps URL path and calls SearchAsync as a fallback.
+    // Extracts place name (and optionally coordinates) from a long Maps URL and calls SearchAsync.
     private async Task<string?> SearchByNameFromMapsUrl(string url, CancellationToken ct)
     {
-        // Decode URL and try to extract a human-readable name from /maps/place/NAME/@...
         var nameMatch = Regex.Match(url, @"/maps/place/([^/@?]+)", RegexOptions.IgnoreCase);
         if (!nameMatch.Success) return null;
 
@@ -279,7 +291,20 @@ public class GooglePlacesService : IGooglePlacesService
 
         if (string.IsNullOrWhiteSpace(rawName)) return null;
 
-        var results = await SearchAsync(rawName, ct);
+        // Extract coordinates for location bias so the text search is anchored to the right city.
+        decimal? lat = null, lng = null;
+        var coordMatch = Regex.Match(url, @"/@([-\d.]+),([-\d.]+)", RegexOptions.IgnoreCase);
+        if (coordMatch.Success
+            && decimal.TryParse(coordMatch.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsedLat)
+            && decimal.TryParse(coordMatch.Groups[2].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsedLng))
+        {
+            lat = parsedLat;
+            lng = parsedLng;
+        }
+
+        var results = await SearchAsync(rawName, ct, lat, lng);
         return results?.FirstOrDefault()?.GooglePlaceId;
     }
 

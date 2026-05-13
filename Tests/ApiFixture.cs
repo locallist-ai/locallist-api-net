@@ -427,7 +427,7 @@ public class FakeGooglePlacesService : IGooglePlacesService
     public Dictionary<string, GooglePlaceDetails> DetailsByPlaceId { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string?> ResolvedByUrl { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct) =>
+    public Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct, decimal? lat = null, decimal? lng = null) =>
         SearchResponder is not null ? SearchResponder(textQuery, ct) : Task.FromResult<List<GooglePlacePreview>?>(null);
 
     public Task<GooglePlaceDetails?> GetDetailsAsync(string placeId, CancellationToken ct) =>
