@@ -195,6 +195,38 @@ public record BulkImportItemResult(
     Guid? Id
 );
 
+public class ImportFromUrlsRequest
+{
+    [Required]
+    [MaxLength(500, ErrorMessage = "Maximum 500 URLs per request.")]
+    public List<string> Urls { get; set; } = new();
+
+    [StringLength(100)]
+    public string? DefaultCity { get; set; }
+
+    [RegularExpression("^(draft|in_review|published|rejected)$")]
+    public string DefaultStatus { get; set; } = "in_review";
+
+    [StringLength(50)]
+    public string Source { get; set; } = "curated";
+}
+
+public record ImportFromUrlsResponse(
+    int Resolved,
+    int Created,
+    int Skipped,
+    int Failed,
+    List<ImportRowResult> Rows
+);
+
+public record ImportRowResult(
+    string Input,
+    string? PlaceId,
+    string? Name,
+    string Status,   // created | skipped_duplicate | failed_resolve | failed_details
+    string? Error
+);
+
 public class GoogleSearchRequest
 {
     [Required, StringLength(200, MinimumLength = 1)]

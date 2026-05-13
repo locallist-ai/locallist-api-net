@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Features.Builder;
@@ -99,6 +100,17 @@ public class AdminPlansController : ControllerBase
         {
             var names = unresolvedStops.Select(s => s.PlaceName ?? "(no name)");
             return BadRequest(new { error = $"Could not resolve places: {string.Join(", ", names)}" });
+        }
+
+        // Validate max stops per day
+        foreach (var day in request.Stops.GroupBy(s => s.DayNumber))
+        {
+            if (day.Count() > PlanLimits.MaxStopsPerDay)
+                return BadRequest(new
+                {
+                    error = $"too_many_stops_day_{day.Key}",
+                    message = $"Maximum {PlanLimits.MaxStopsPerDay} stops per day (day {day.Key} has {day.Count()})."
+                });
         }
 
         var plan = new Plan
@@ -416,6 +428,17 @@ public class AdminPlansController : ControllerBase
         {
             var names = unresolvedStops.Select(s => s.PlaceName ?? "(no name)");
             return BadRequest(new { error = $"Could not resolve places: {string.Join(", ", names)}" });
+        }
+
+        // Validate max stops per day
+        foreach (var day in request.Stops.GroupBy(s => s.DayNumber))
+        {
+            if (day.Count() > PlanLimits.MaxStopsPerDay)
+                return BadRequest(new
+                {
+                    error = $"too_many_stops_day_{day.Key}",
+                    message = $"Maximum {PlanLimits.MaxStopsPerDay} stops per day (day {day.Key} has {day.Count()})."
+                });
         }
 
         // Atomic replace: delete all existing stops, insert new ones

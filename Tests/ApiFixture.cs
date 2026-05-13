@@ -17,6 +17,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Testcontainers.PostgreSql;
+using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
@@ -46,6 +47,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// (OK con JSON válido, 502, texto malformado, etc.) sin levantar un servidor HTTP real.
     /// </summary>
     public FakeGeminiHandler FakeGemini { get; } = new();
+
+    /// <summary>
+    /// In-process fake for <see cref="IGooglePlacesService"/>.
+    /// Tests configure <see cref="FakeGooglePlacesService.ResolveResponder"/> and
+    /// <see cref="FakeGooglePlacesService.DetailsResponder"/> to control resolution outcomes.
+    /// By default all methods return null (simulates missing API key).
+    /// </summary>
+    public FakeGooglePlacesService FakeGooglePlaces { get; } = new();
 
     /// <summary>
     /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
@@ -169,6 +178,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddHttpClient<IRoutingService, MapboxRoutingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeMapbox);
+
+            // Replace IGooglePlacesService with in-process fake — avoids real HTTP calls
+            // and lets tests control resolution + details results via FakeGooglePlaces.
+            var googlePlacesDesc = services.Where(d => d.ServiceType == typeof(IGooglePlacesService)).ToList();
+            foreach (var d in googlePlacesDesc) services.Remove(d);
+            services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
 
             // Disable rate limiting in tests
             var rateLimiterDescriptors = services
@@ -390,6 +405,34 @@ public class FakeMapboxHandler : HttpMessageHandler
             return Task.FromResult(fallback);
         }
         return Task.FromResult(responder(request));
+    }
+}
+
+/// <summary>
+/// In-process fake implementation of <see cref="IGooglePlacesService"/>.
+/// Configure <see cref="DetailsByPlaceId"/> and <see cref="ResolvedByUrl"/> dictionaries before
+/// each test. <see cref="SearchResponder"/> remains a Func since search has no natural key.
+/// </summary>
+public class FakeGooglePlacesService : IGooglePlacesService
+{
+    public Func<string, CancellationToken, Task<List<GooglePlacePreview>?>>? SearchResponder { get; set; }
+    public Dictionary<string, GooglePlaceDetails> DetailsByPlaceId { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string?> ResolvedByUrl { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<List<GooglePlacePreview>?> SearchAsync(string textQuery, CancellationToken ct) =>
+        SearchResponder is not null ? SearchResponder(textQuery, ct) : Task.FromResult<List<GooglePlacePreview>?>(null);
+
+    public Task<GooglePlaceDetails?> GetDetailsAsync(string placeId, CancellationToken ct) =>
+        Task.FromResult(DetailsByPlaceId.TryGetValue(placeId, out var d) ? d : (GooglePlaceDetails?)null);
+
+    public Task<string?> ResolvePlaceIdFromUrlAsync(string input, CancellationToken ct) =>
+        Task.FromResult(ResolvedByUrl.TryGetValue(input, out var id) ? id : null);
+
+    public void Reset()
+    {
+        SearchResponder = null;
+        DetailsByPlaceId.Clear();
+        ResolvedByUrl.Clear();
     }
 }
 

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Features.Builder;
@@ -196,21 +197,7 @@ public class AdminPlacesController : ControllerBase
         var userId = await User.GetUserIdAsync(_db, ct);
         var now = _clock.GetUtcNow();
         var results = new List<BulkImportItemResult>();
-        int created = 0, skipped = 0, errors = 0;
-
-        // Load existing GooglePlaceIds for dedup
-        var incomingGoogleIds = requests
-            .Where(r => !string.IsNullOrEmpty(r.GooglePlaceId))
-            .Select(r => r.GooglePlaceId!)
-            .ToHashSet();
-
-        var existingGoogleIds = incomingGoogleIds.Count > 0
-            ? (await _db.Places.AsNoTracking()
-                .Where(p => p.GooglePlaceId != null && incomingGoogleIds.Contains(p.GooglePlaceId))
-                .Select(p => p.GooglePlaceId!)
-                .ToListAsync(ct))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int errors = 0, skipped = 0;
 
         // Load existing Name+City combos for dedup (places without GooglePlaceId)
         var incomingNameCities = requests
@@ -227,11 +214,11 @@ public class AdminPlacesController : ControllerBase
                 .ToHashSet()
             : new HashSet<(string, string)>();
 
-        var placesToAdd = new List<Place>();
+        // Validate + Name+City dedup; GooglePlaceId dedup handled inside InsertWithDedupAsync
+        var validRequests = new List<CreatePlaceRequest>();
 
         foreach (var request in requests)
         {
-            // Validate category
             if (!PlaceTaxonomy.IsValidCategory(request.Category))
             {
                 results.Add(new BulkImportItemResult(request.Name, "error", $"Invalid category: {request.Category}", null));
@@ -239,7 +226,6 @@ public class AdminPlacesController : ControllerBase
                 continue;
             }
 
-            // Validate subcategory against whitelist for this category
             if (!PlaceTaxonomy.IsValidSubcategory(request.Category, request.Subcategory))
             {
                 results.Add(new BulkImportItemResult(request.Name, "error", $"Invalid subcategory '{request.Subcategory}' for category '{request.Category}'", null));
@@ -247,15 +233,6 @@ public class AdminPlacesController : ControllerBase
                 continue;
             }
 
-            // Dedup by GooglePlaceId
-            if (!string.IsNullOrEmpty(request.GooglePlaceId) && existingGoogleIds.Contains(request.GooglePlaceId))
-            {
-                results.Add(new BulkImportItemResult(request.Name, "skipped_duplicate", "GooglePlaceId already exists", null));
-                skipped++;
-                continue;
-            }
-
-            // Dedup by Name+City
             var nameKey = request.Name.Trim().ToLowerInvariant();
             var cityKey = (request.City?.Trim() ?? "Miami").ToLowerInvariant();
             if (string.IsNullOrEmpty(request.GooglePlaceId) && existingNameCities.Contains((nameKey, cityKey)))
@@ -264,53 +241,167 @@ public class AdminPlacesController : ControllerBase
                 skipped++;
                 continue;
             }
-
-            var place = new Place
-            {
-                Id = Guid.NewGuid(),
-                Name = request.Name.Trim(),
-                Category = request.Category,
-                WhyThisPlace = request.WhyThisPlace.Trim(),
-                Subcategory = request.Subcategory?.Trim(),
-                Neighborhood = request.Neighborhood?.Trim(),
-                City = request.City?.Trim() ?? "Miami",
-                Latitude = request.Latitude,
-                Longitude = request.Longitude,
-                BestFor = request.BestFor,
-                SuitableFor = request.SuitableFor,
-                BestTime = request.BestTime?.Trim(),
-                PriceRange = request.PriceRange?.Trim(),
-                Photos = request.Photos,
-                GooglePlaceId = request.GooglePlaceId?.Trim(),
-                GoogleRating = request.GoogleRating,
-                GoogleReviewCount = request.GoogleReviewCount,
-                Source = request.Source?.Trim() ?? "curated",
-                SourceUrl = request.SourceUrl?.Trim(),
-                Status = request.Status?.Trim() ?? "in_review",
-                AiVibeScore = request.AiVibeScore,
-                Flags = request.Flags,
-                SubmittedById = userId,
-                CreatedAt = now,
-                UpdatedAt = now
-            };
-
-            placesToAdd.Add(place);
-            existingGoogleIds.Add(request.GooglePlaceId ?? "");
             existingNameCities.Add((nameKey, cityKey));
-
-            results.Add(new BulkImportItemResult(request.Name, "created", null, place.Id));
-            created++;
+            validRequests.Add(request);
         }
 
-        if (placesToAdd.Count > 0)
+        var (created, skippedByGoogle, addedPlaces) = await InsertWithDedupAsync(validRequests, userId, now, ct);
+        skipped += skippedByGoogle;
+
+        // Build per-item results for valid requests by correlating with added places
+        foreach (var req in validRequests)
         {
-            _db.Places.AddRange(placesToAdd);
-            await _db.SaveChangesAsync(ct);
+            if (!string.IsNullOrEmpty(req.GooglePlaceId))
+            {
+                var placed = addedPlaces.FirstOrDefault(p =>
+                    string.Equals(p.GooglePlaceId, req.GooglePlaceId, StringComparison.OrdinalIgnoreCase));
+                if (placed != null)
+                    results.Add(new BulkImportItemResult(req.Name, "created", null, placed.Id));
+                else
+                    results.Add(new BulkImportItemResult(req.Name, "skipped_duplicate", "GooglePlaceId already exists", null));
+            }
+            else
+            {
+                var placed = addedPlaces.FirstOrDefault(p =>
+                    string.Equals(p.Name, req.Name.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(p.City, req.City?.Trim() ?? "Miami", StringComparison.OrdinalIgnoreCase));
+                results.Add(new BulkImportItemResult(req.Name, "created", null, placed?.Id));
+            }
         }
 
         _logger.LogInformation("Bulk import: {Created} created, {Skipped} skipped, {Errors} errors", created, skipped, errors);
 
         return Ok(new BulkImportResult(created, skipped, errors, results));
+    }
+
+    /// <summary>
+    /// Resolves Google Maps URLs / Place IDs to full place details and bulk-imports them.
+    /// Accepts up to 500 URLs per request. Deduplicates by GooglePlaceId.
+    /// </summary>
+    [HttpPost("import-from-urls")]
+    public async Task<IActionResult> ImportFromUrls([FromBody] ImportFromUrlsRequest request, CancellationToken ct)
+    {
+        if (request.Urls.Count == 0)
+            return BadRequest(new { error = "Empty URL list." });
+
+        if (request.Urls.Count > 500)
+            return BadRequest(new { error = "Maximum 500 URLs per request." });
+
+        var userId = await User.GetUserIdAsync(_db, ct);
+        var now = _clock.GetUtcNow();
+
+        var rows = new List<ImportRowResult>();
+        var toImport = new List<CreatePlaceRequest>();
+
+        foreach (var rawUrl in request.Urls)
+        {
+            // Step 1 — resolve URL → Place ID
+            var placeId = await _googlePlaces.ResolvePlaceIdFromUrlAsync(rawUrl, ct);
+            if (placeId is null)
+            {
+                rows.Add(new ImportRowResult(rawUrl, null, null, "failed_resolve",
+                    "Could not extract a Place ID from this URL."));
+                continue;
+            }
+
+            // Step 2 — fetch full details
+            var details = await _googlePlaces.GetDetailsAsync(placeId, ct);
+            if (details is null)
+            {
+                rows.Add(new ImportRowResult(rawUrl, placeId, null, "failed_details",
+                    "Google Places API returned no data for this Place ID."));
+                continue;
+            }
+
+            // Step 3 — map to CreatePlaceRequest
+            var category = PlaceTaxonomy.CategoryFromGoogleTypes(details.PrimaryType, details.Types);
+            var validCategory = category ?? "Culture";
+            var subcategory = PlaceTaxonomy.CanonicalSubcategoryFromGoogleTypes(validCategory, details.Types, details.Name);
+
+            toImport.Add(new CreatePlaceRequest
+            {
+                Name = details.Name,
+                Category = validCategory,
+                Subcategory = subcategory,
+                WhyThisPlace = details.EditorialSummary ?? "",
+                City = details.City ?? request.DefaultCity ?? "Miami",
+                Neighborhood = details.Neighborhood,
+                Latitude = details.Lat,
+                Longitude = details.Lng,
+                GooglePlaceId = details.Id,
+                GoogleRating = details.Rating,
+                GoogleReviewCount = details.ReviewCount,
+                PriceRange = details.PriceLevel,
+                Photos = details.Photos.Count > 0 ? details.Photos : null,
+                Source = request.Source,
+                Status = request.DefaultStatus,
+            });
+
+            rows.Add(new ImportRowResult(rawUrl, details.Id, details.Name, "pending", null));
+        }
+
+        if (toImport.Count == 0)
+        {
+            var failed = rows.Count;
+            return Ok(new ImportFromUrlsResponse(0, 0, 0, failed, rows));
+        }
+
+        // Step 4 — bulk insert with dedup
+        var (created, skipped, addedPlaces) = await InsertWithDedupAsync(toImport, userId, now, ct);
+
+        // Update row status based on what was actually inserted
+        var addedPlaceIds = addedPlaces
+            .Select(p => p.GooglePlaceId)
+            .Where(id => id != null)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (rows[i].Status != "pending") continue;
+            if (rows[i].PlaceId != null && addedPlaceIds.Contains(rows[i].PlaceId!))
+                rows[i] = rows[i] with { Status = "created" };
+            else
+                rows[i] = rows[i] with { Status = "skipped_duplicate", Error = "GooglePlaceId already in library." };
+        }
+
+        if (addedPlaces.Count > 0)
+        {
+            // Generate embeddings inline for newly created places
+            try
+            {
+                var texts = addedPlaces
+                    .Select(p => EmbeddingService.BuildPlaceIndexText(
+                        p.Name, p.Category, p.Subcategory, p.Neighborhood, p.City,
+                        p.WhyThisPlace, p.BestFor, p.SuitableFor))
+                    .ToList();
+
+                var vectors = await _embeddings.EmbedBatchAsync(texts, ct);
+                if (vectors.Count == addedPlaces.Count)
+                {
+                    for (var i = 0; i < addedPlaces.Count; i++)
+                    {
+                        addedPlaces[i].Embedding = vectors[i];
+                        addedPlaces[i].UpdatedAt = _clock.GetUtcNow();
+                    }
+                    await _db.SaveChangesAsync(ct);
+                }
+                else
+                {
+                    _logger.LogWarning("Embedding batch size mismatch: expected {E} got {G}. Embeddings skipped.",
+                        addedPlaces.Count, vectors.Count);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Inline embedding generation failed after import-from-urls. Run reindex-embeddings?onlyMissing=true to recover.");
+            }
+        }
+
+        var failedCount = rows.Count(r => r.Status.StartsWith("failed"));
+        _logger.LogInformation("import-from-urls: resolved={Res} created={C} skipped={S} failed={F}",
+            rows.Count - failedCount, created, skipped, failedCount);
+
+        return Ok(new ImportFromUrlsResponse(rows.Count - failedCount, created, skipped, failedCount, rows));
     }
 
     [HttpPatch("{id}")]
@@ -518,6 +609,86 @@ public class AdminPlacesController : ControllerBase
     /// Idempotent — only processes places missing name_i18n.es.
     /// Saves progress every 5 places so partial runs are resumable.
     /// </summary>
+    // ── Private helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Inserts already-validated CreatePlaceRequests, deduplicating by GooglePlaceId.
+    /// Name+City dedup and category validation must be done by the caller beforehand.
+    /// Returns (created, skipped, newly-added Place entities) for post-processing (e.g. embeddings).
+    /// </summary>
+    private async Task<(int created, int skipped, List<Place> added)> InsertWithDedupAsync(
+        IReadOnlyList<CreatePlaceRequest> requests,
+        Guid? userId,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var incomingGoogleIds = requests
+            .Where(r => !string.IsNullOrEmpty(r.GooglePlaceId))
+            .Select(r => r.GooglePlaceId!)
+            .ToHashSet();
+
+        var existingGoogleIds = incomingGoogleIds.Count > 0
+            ? (await _db.Places.AsNoTracking()
+                .Where(p => p.GooglePlaceId != null && incomingGoogleIds.Contains(p.GooglePlaceId))
+                .Select(p => p.GooglePlaceId!)
+                .ToListAsync(ct))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var placesToAdd = new List<Place>();
+        int created = 0, skipped = 0;
+
+        foreach (var req in requests)
+        {
+            if (!string.IsNullOrEmpty(req.GooglePlaceId) && existingGoogleIds.Contains(req.GooglePlaceId))
+            {
+                skipped++;
+                continue;
+            }
+
+            var place = new Place
+            {
+                Id = Guid.NewGuid(),
+                Name = req.Name.Trim(),
+                Category = req.Category,
+                WhyThisPlace = req.WhyThisPlace.Trim(),
+                Subcategory = req.Subcategory?.Trim(),
+                Neighborhood = req.Neighborhood?.Trim(),
+                City = req.City?.Trim() ?? "Miami",
+                Latitude = req.Latitude,
+                Longitude = req.Longitude,
+                BestFor = req.BestFor,
+                SuitableFor = req.SuitableFor,
+                BestTime = req.BestTime?.Trim(),
+                PriceRange = req.PriceRange?.Trim(),
+                Photos = req.Photos,
+                GooglePlaceId = req.GooglePlaceId?.Trim(),
+                GoogleRating = req.GoogleRating,
+                GoogleReviewCount = req.GoogleReviewCount,
+                Source = req.Source?.Trim() ?? "curated",
+                SourceUrl = req.SourceUrl?.Trim(),
+                Status = req.Status?.Trim() ?? "in_review",
+                AiVibeScore = req.AiVibeScore,
+                Flags = req.Flags,
+                SubmittedById = userId,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+
+            placesToAdd.Add(place);
+            existingGoogleIds.Add(req.GooglePlaceId ?? "");
+            created++;
+        }
+
+        if (placesToAdd.Count > 0)
+        {
+            _db.Places.AddRange(placesToAdd);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        return (created, skipped, placesToAdd);
+    }
+
     [HttpPost("translate-batch")]
     public async Task<IActionResult> TranslateBatch([FromQuery] string lang = "es", [FromQuery] int limit = 10, CancellationToken ct = default)
     {
