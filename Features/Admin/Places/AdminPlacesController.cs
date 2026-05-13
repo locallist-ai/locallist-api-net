@@ -295,6 +295,16 @@ public class AdminPlacesController : ControllerBase
 
         foreach (var rawUrl in request.Urls)
         {
+            // Reject short links up front — Google blocks server-side resolution for goo.gl/g.co
+            if (Uri.TryCreate(rawUrl, UriKind.Absolute, out var parsedUri) &&
+                (parsedUri.Host.EndsWith("goo.gl", StringComparison.OrdinalIgnoreCase) ||
+                 parsedUri.Host.EndsWith("g.co", StringComparison.OrdinalIgnoreCase)))
+            {
+                rows.Add(new ImportRowResult(rawUrl, null, null, "failed_resolve",
+                    "Short links no se resuelven. Abre el link en el navegador y pega la URL canónica (google.com/maps/place/...) o el Place ID directo."));
+                continue;
+            }
+
             // Step 1 — resolve URL → Place ID
             var placeId = await _googlePlaces.ResolvePlaceIdFromUrlAsync(rawUrl, ct);
             if (placeId is null)

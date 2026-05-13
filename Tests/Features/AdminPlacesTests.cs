@@ -285,6 +285,24 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task ImportFromUrls_ShortLink_ReturnsFailedResolveWithHelpMessage()
+    {
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls = new[] { "https://maps.app.goo.gl/2ZXNjvJRnFKKA39v7" }, defaultCity = "Miami" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, body.GetProperty("created").GetInt32());
+        Assert.Equal(1, body.GetProperty("failed").GetInt32());
+        var row = body.GetProperty("rows")[0];
+        Assert.Equal("failed_resolve", row.GetProperty("status").GetString());
+        // Message should guide the user — not the generic "Could not extract a Place ID"
+        var msg = row.GetProperty("error").GetString() ?? "";
+        Assert.Contains("navegador", msg);
+    }
+
+    [Fact]
     public async Task ImportFromUrls_UnresolvableUrl_ReturnsFailedResolveRow()
     {
         fixture.FakeGooglePlaces.Reset();
@@ -306,12 +324,12 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     {
         fixture.FakeGooglePlaces.Reset();
         var resolvedId = $"ChIJ-test-{Guid.NewGuid():N}";
-        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/abc"] = resolvedId;
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://www.google.com/maps/place/testplace-abc/"] = resolvedId;
         // DetailsByPlaceId has no entry → GetDetailsAsync returns null
 
         var client = CreateAdminClient();
         var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
-            new { urls = new[] { "https://maps.app.goo.gl/abc" }, defaultCity = "Miami" });
+            new { urls = new[] { "https://www.google.com/maps/place/testplace-abc/" }, defaultCity = "Miami" });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -329,7 +347,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var placeId = $"ChIJhappy-{Guid.NewGuid():N}";
         var placeName = $"Test Place {Guid.NewGuid():N}";
 
-        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/test"] = placeId;
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://www.google.com/maps/place/testplace-happy/"] = placeId;
         fixture.FakeGooglePlaces.DetailsByPlaceId[placeId] = new LocalList.API.NET.Features.Admin.Places.GooglePlaceDetails(
             Id: placeId, Name: placeName, FormattedAddress: "123 Test St, Miami, FL",
             City: "Miami", Neighborhood: "Wynwood",
@@ -343,7 +361,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         var client = CreateAdminClient();
         var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
-            new { urls = new[] { "https://maps.app.goo.gl/test" }, defaultCity = "Miami" });
+            new { urls = new[] { "https://www.google.com/maps/place/testplace-happy/" }, defaultCity = "Miami" });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -382,7 +400,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         });
         await db.SaveChangesAsync();
 
-        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/dup"] = placeId;
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://www.google.com/maps/place/testplace-dup/"] = placeId;
         fixture.FakeGooglePlaces.DetailsByPlaceId[placeId] = new LocalList.API.NET.Features.Admin.Places.GooglePlaceDetails(
             placeId, "Already Exists", null, "Miami", null,
             25.77m, -80.19m, "restaurant", ["restaurant"],
@@ -390,7 +408,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         var client = CreateAdminClient();
         var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
-            new { urls = new[] { "https://maps.app.goo.gl/dup" }, defaultCity = "Miami" });
+            new { urls = new[] { "https://www.google.com/maps/place/testplace-dup/" }, defaultCity = "Miami" });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -406,7 +424,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var placeId = $"ChIJemb-{Guid.NewGuid():N}";
         var placeName = $"Embed Fail Place {Guid.NewGuid():N}";
 
-        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/emb"] = placeId;
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://www.google.com/maps/place/testplace-emb/"] = placeId;
         fixture.FakeGooglePlaces.DetailsByPlaceId[placeId] = new LocalList.API.NET.Features.Admin.Places.GooglePlaceDetails(
             Id: placeId, Name: placeName, FormattedAddress: null,
             City: "Miami", Neighborhood: null,
@@ -421,7 +439,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         {
             var client = CreateAdminClient();
             var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
-                new { urls = new[] { "https://maps.app.goo.gl/emb" }, defaultCity = "Miami" });
+                new { urls = new[] { "https://www.google.com/maps/place/testplace-emb/" }, defaultCity = "Miami" });
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             var body = await response.Content.ReadFromJsonAsync<JsonElement>();
