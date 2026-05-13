@@ -81,14 +81,13 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Register_AdminDomainEmail_Returns403()
+    public async Task Register_AdminDomainEmail_Returns201()
     {
+        // @locallist.ai can register in the user app (co-founders, internal testers).
         var client = fixture.CreateClient();
         var res = await client.PostAsJsonAsync("/auth/register",
-            new { email = $"attacker-{Guid.NewGuid():N}@locallist.ai", password = "Attack1!" });
-        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
-        var body = await res.Content.ReadAsStringAsync();
-        Assert.Contains("Firebase", body);
+            new { email = $"internal-{Guid.NewGuid():N}@locallist.ai", password = "Test1234!" });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
     }
 
     // ─── Login ───────────────────────────────────────────
@@ -218,8 +217,10 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Signin_AdminDomainOAuthEmail_Returns403()
+    public async Task Signin_AdminDomainOAuthEmail_Returns200()
     {
+        // @locallist.ai accounts can sign in to the user app (e.g. co-founders testing).
+        // Admin access is gated by Firebase + /auth/sync, not by blocking OAuth in the app.
         var idToken = $"google-admin-{Guid.NewGuid():N}";
         fixture.FakeGoogle.Tokens[idToken] = new OAuthClaims(
             Sub: $"google-sub-{Guid.NewGuid():N}",
@@ -231,9 +232,7 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var res = await client.PostAsJsonAsync("/auth/signin",
             new { provider = "google", idToken });
 
-        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
-        var body = await res.Content.ReadAsStringAsync();
-        Assert.Contains("Firebase", body);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
     }
 
     [Fact]

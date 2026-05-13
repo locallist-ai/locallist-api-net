@@ -16,8 +16,6 @@ namespace LocalList.API.NET.Features.Auth;
 [EnableRateLimiting("AuthLimit")]
 public class AppAuthController : ControllerBase
 {
-    private const string AdminDomain = "@locallist.ai";
-
     // Timing-equalization dummy hash: generated once at type init with the same
     // bcrypt work factor as real passwords (12). Used in Login when the user
     // doesn't exist or is OAuth-only so every failed path pays the same ~300ms
@@ -75,9 +73,6 @@ public class AppAuthController : ControllerBase
             return BadRequest(new { error = "Email not provided by identity provider" });
         if (!claims.EmailVerified)
             return Unauthorized(new { error = "Email address is not verified by identity provider" });
-        if (claims.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
-            return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
-
         var providerSub = claims.Sub;
         var user = request.Provider == "apple"
             ? await _db.Users.FirstOrDefaultAsync(
@@ -121,9 +116,6 @@ public class AppAuthController : ControllerBase
     public async Task<IActionResult> Register([FromBody] RegisterRequest request, CancellationToken ct)
     {
         if (!ModelState.IsValid) return BadRequest(new { error = "Invalid request" });
-
-        if (request.Email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase))
-            return StatusCode(403, new { error = "Admin accounts use Firebase authentication" });
 
         var existing = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
         if (existing is not null) return Conflict(new { error = "Email already registered" });
