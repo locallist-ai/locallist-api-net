@@ -16,6 +16,8 @@ public class LocalListDbContext : DbContext
     public DbSet<RefreshToken> RefreshTokens { get; set; } = null!;
     public DbSet<City> Cities { get; set; } = null!;
     public DbSet<RouteSegmentCache> RouteSegmentCaches { get; set; } = null!;
+    public DbSet<ChatSession> ChatSessions { get; set; } = null!;
+    public DbSet<UserProfile> UserProfiles { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -122,5 +124,38 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<RouteSegmentCache>()
             .HasIndex(r => new { r.FromPlaceId, r.ToPlaceId, r.Mode })
             .IsUnique();
+
+        modelBuilder.Entity<ChatSession>()
+            .HasOne(cs => cs.User)
+            .WithMany()
+            .HasForeignKey(cs => cs.UserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<ChatSession>()
+            .HasIndex(cs => new { cs.UserId, cs.Status });
+
+        modelBuilder.Entity<ChatSession>()
+            .HasIndex(cs => cs.AnonymousIpHash);
+
+        modelBuilder.Entity<ChatSession>()
+            .HasIndex(cs => cs.LastTurnAt);
+
+        modelBuilder.Entity<ChatSession>()
+            .Property(cs => cs.LastOfferedChips)
+            .HasColumnType("text[]");
+
+        modelBuilder.Entity<UserProfile>()
+            .HasOne(up => up.User)
+            .WithOne()
+            .HasForeignKey<UserProfile>(up => up.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UserProfile>()
+            .Property(up => up.CompanionTags)
+            .HasColumnType("text[]");
+
+        modelBuilder.Entity<UserProfile>()
+            .Property(up => up.DietaryRestrictions)
+            .HasColumnType("text[]");
     }
 }

@@ -6,6 +6,7 @@ using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
@@ -112,12 +113,26 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<LanguageAccessor>();
 builder.Services.AddScoped<PlaceRankingService>();
 builder.Services.AddScoped<SchedulingService>();
+builder.Services.AddScoped<PlanGenerationService>();
 builder.Services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddHttpClient<IGooglePlacesService, GooglePlacesService>(c => c.Timeout = TimeSpan.FromSeconds(15))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<RouteResolver>();
 builder.Services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
+
+// Chat — slot-filling agent
+builder.Services.AddHttpClient<SlotExtractorService>(c => c.Timeout = TimeSpan.FromSeconds(20))
+    .AddStandardResilienceHandler(options =>
+    {
+        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
+        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(20);
+        options.Retry.MaxRetryAttempts = 1;
+        options.Retry.ShouldHandle = args => ValueTask.FromResult(
+            args.Outcome.Exception is HttpRequestException);
+    });
+builder.Services.AddScoped<ChatAgentService>();
+builder.Services.AddScoped<ChatSecLogger>();
 
 // Configure JSON formatting
 builder.Services.AddControllers().AddJsonOptions(options =>
@@ -347,6 +362,39 @@ builder.Services.AddRateLimiter(options =>
                 PermitLimit = 10,
                 QueueLimit = 0,
                 Window = TimeSpan.FromHours(1)
+            });
+    });
+
+    // ChatTurnLimit: sliding window 20/hr anonymous, 40/hr authenticated.
+    // Sliding window prevents boundary exploitation vs fixed window.
+    var chatLimitAnon = builder.Configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAnonymous") ?? 20;
+    options.AddPolicy("ChatTurnLimit", context =>
+    {
+        var userId = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                     ?? context.User?.FindFirst("sub")?.Value;
+        if (!string.IsNullOrEmpty(userId))
+        {
+            var authLimit = builder.Configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAuthenticated") ?? 40;
+            return RateLimitPartition.GetSlidingWindowLimiter(
+                partitionKey: $"chat_auth_{userId}",
+                factory: _ => new SlidingWindowRateLimiterOptions
+                {
+                    AutoReplenishment = true,
+                    PermitLimit = authLimit,
+                    QueueLimit = 0,
+                    Window = TimeSpan.FromHours(1),
+                    SegmentsPerWindow = 6,
+                });
+        }
+        return RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"chat_anon_{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = chatLimitAnon,
+                QueueLimit = 0,
+                Window = TimeSpan.FromHours(1),
+                SegmentsPerWindow = 6,
             });
     });
 

@@ -1,15 +1,12 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
-using Pgvector;
-using Pgvector.EntityFrameworkCore;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -18,27 +15,18 @@ namespace LocalList.API.NET.Features.Builder;
 public class BuilderController : ControllerBase
 {
     private readonly LocalListDbContext _db;
-    private readonly AiProviderService _aiProvider;
-    private readonly EmbeddingService _embeddings;
-    private readonly PlaceRankingService _ranker;
+    private readonly PlanGenerationService _planGen;
     private readonly SchedulingService _scheduler;
     private readonly ILogger<BuilderController> _logger;
 
-    private const int MinEmbeddedPlacesForRag = 3;
-    private const int RetrievalTopK = 50;
-
     public BuilderController(
         LocalListDbContext db,
-        AiProviderService aiProvider,
-        EmbeddingService embeddings,
-        PlaceRankingService ranker,
+        PlanGenerationService planGen,
         SchedulingService scheduler,
         ILogger<BuilderController> logger)
     {
         _db = db;
-        _aiProvider = aiProvider;
-        _embeddings = embeddings;
-        _ranker = ranker;
+        _planGen = planGen;
         _scheduler = scheduler;
         _logger = logger;
     }
@@ -82,86 +70,51 @@ public class BuilderController : ControllerBase
 
         try
         {
-            var message = request.Message ?? string.Empty;
-
             var lang = LanguageAccessor.ResolveRequestLanguage(Request);
-            var prefs = await _aiProvider.ExtractPreferencesAsync(message, request.TripContext, lang, ct);
+            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, ct);
 
-            _logger.LogInformation(
-                "Builder: prefs days={Days} categories={Cats} vibes={Vibes} groupType={GT} planName='{Name}' maxStopsPerDay={Max}",
-                prefs.Days,
-                prefs.Categories == null ? "(null)" : string.Join(",", prefs.Categories),
-                prefs.Vibes == null ? "(null)" : string.Join(",", prefs.Vibes),
-                prefs.GroupType,
-                prefs.PlanName,
-                prefs.MaxStopsPerDay);
+            if (result == null)
+                return NotFound(new { error = "no_places_available", message = "No places found for this city yet." });
 
-            var city = request.TripContext?.City ?? "Miami";
-            var filteredPlaces = await RetrieveCandidatesAsync(message, city, prefs, ct);
-
-            _logger.LogInformation("Builder: candidates count={Count}", filteredPlaces.Count);
-
-            var schedule = _scheduler.BuildPlanSchedule(filteredPlaces, prefs);
-            var planStopsData = schedule.Stops;
-
-            var pickedPlacesById = filteredPlaces.ToDictionary(p => p.Id);
-            var scheduleSummary = string.Join(" | ", planStopsData.Select(sd =>
-            {
-                pickedPlacesById.TryGetValue(sd.PlaceId, out var pl);
-                return $"d{sd.DayNumber}.{sd.TimeBlock}→{pl?.Name ?? "?"}({pl?.Category ?? "?"})";
-            }));
-            var categoryMix = string.Join(",", planStopsData
-                .Select(sd => pickedPlacesById.TryGetValue(sd.PlaceId, out var pl) ? pl.Category : "?")
-                .GroupBy(c => c)
-                .Select(g => $"{g.Key}:{g.Count()}"));
-            _logger.LogInformation(
-                "Builder: schedule days={Days} stops={N} categoryMix=[{Mix}] plan=[{Schedule}] warnings=[{Warnings}]",
-                prefs.Days, planStopsData.Count, categoryMix, scheduleSummary,
-                string.Join(",", schedule.Warnings));
-
-            var planName = BuildPlanName(prefs, city, message);
-            var planDescription = !string.IsNullOrEmpty(prefs.Description)
-                ? prefs.Description
-                : BuildPlanDescription(prefs);
+            var planStopsData = result.Schedule.Stops;
 
             if (isAnonymous)
             {
-                var ephemeralPlan = new
-                {
-                    Id = Guid.NewGuid(),
-                    Name = planName,
-                    City = city,
-                    Type = "ai",
-                    Description = planDescription,
-                    DurationDays = prefs.Days,
-                    TripContext = request.TripContext,
-                    IsPublic = false,
-                    IsEphemeral = true
-                };
-
                 return Ok(new
                 {
-                    plan = ephemeralPlan,
-                    stops = _scheduler.ResolveStopPlaces(planStopsData, filteredPlaces),
-                    message = $"Created a {prefs.Days}-day plan with {planStopsData.Count} stops!",
-                    warnings = schedule.Warnings
+                    plan = new
+                    {
+                        Id = Guid.NewGuid(),
+                        Name = result.PlanName,
+                        City = result.City,
+                        Type = "ai",
+                        Description = result.PlanDescription,
+                        DurationDays = result.Prefs.Days,
+                        TripContext = request.TripContext,
+                        IsPublic = false,
+                        IsEphemeral = true
+                    },
+                    stops = _scheduler.ResolveStopPlaces(planStopsData, result.FilteredPlaces),
+                    message = $"Created a {result.Prefs.Days}-day plan with {planStopsData.Count} stops!",
+                    warnings = result.Schedule.Warnings,
+                    appliedRefinements = result.Schedule.AppliedRefinements
                 });
             }
 
             var plan = new Plan
             {
-                Name = planName,
-                City = city,
+                Name = result.PlanName,
+                City = result.City,
                 Type = "ai",
-                Description = planDescription,
-                DurationDays = prefs.Days,
+                Description = result.PlanDescription,
+                DurationDays = result.Prefs.Days,
                 TripContext = request.TripContext != null
                     ? JsonSerializer.SerializeToDocument(request.TripContext)
                     : JsonSerializer.SerializeToDocument(new {}),
                 IsPublic = false,
                 CreatedById = userId,
-                NameI18n = LanguageAccessor.SetI18nString(null, lang, planName),
-                DescriptionI18n = LanguageAccessor.SetI18nString(null, lang, planDescription),
+                NameI18n = LanguageAccessor.SetI18nString(null, lang, result.PlanName),
+                DescriptionI18n = LanguageAccessor.SetI18nString(null, lang, result.PlanDescription),
             };
 
             _db.Plans.Add(plan);
@@ -186,9 +139,10 @@ public class BuilderController : ControllerBase
             return Ok(new
             {
                 plan,
-                stops = _scheduler.ResolveStopPlaces(planStopsData, filteredPlaces),
-                message = $"Created a {prefs.Days}-day plan with {planStopsData.Count} stops!",
-                warnings = schedule.Warnings
+                stops = _scheduler.ResolveStopPlaces(planStopsData, result.FilteredPlaces),
+                message = $"Created a {result.Prefs.Days}-day plan with {planStopsData.Count} stops!",
+                warnings = result.Schedule.Warnings,
+                appliedRefinements = result.Schedule.AppliedRefinements
             });
         }
         catch (OperationCanceledException)
@@ -205,102 +159,6 @@ public class BuilderController : ControllerBase
             _logger.LogError(ex, "Plan generation failed");
             return StatusCode(500, new { error = "Failed to generate plan" });
         }
-    }
-
-    // ── RAG retrieval (stays here: needs _db, _embeddings, _ranker) ──────────────
-
-    private async Task<List<Place>> RetrieveCandidatesAsync(
-        string rawMessage, string city, ExtractedPreferences prefs, CancellationToken ct)
-    {
-        var embeddedCount = await _db.Places.AsNoTracking()
-            .CountAsync(p => p.Status == "published" && p.City == city && p.Embedding != null, ct);
-
-        if (embeddedCount < MinEmbeddedPlacesForRag)
-        {
-            _logger.LogInformation(
-                "RAG fallback (keyword): city={City} embeddedCount={Count} < {Min}",
-                city, embeddedCount, MinEmbeddedPlacesForRag);
-            return await FallbackKeywordFilterAsync(city, prefs, ct);
-        }
-
-        var parts = new List<string> { rawMessage };
-        if (prefs.Categories != null && prefs.Categories.Count > 0)
-            parts.Add(string.Join(" ", prefs.Categories));
-        if (prefs.Vibes != null && prefs.Vibes.Count > 0)
-            parts.Add(string.Join(" ", prefs.Vibes));
-        if (!string.IsNullOrWhiteSpace(prefs.GroupType))
-            parts.Add(prefs.GroupType);
-        var queryText = string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
-
-        Vector? qvec;
-        try
-        {
-            qvec = await _embeddings.EmbedAsync(queryText, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Embedding provider failed — RAG fallback");
-            return await FallbackKeywordFilterAsync(city, prefs, ct);
-        }
-
-        if (qvec == null)
-        {
-            _logger.LogWarning("EmbedAsync returned null — RAG fallback");
-            return await FallbackKeywordFilterAsync(city, prefs, ct);
-        }
-
-        var candidates = await _db.Places.AsNoTracking()
-            .Where(p => p.Status == "published" && p.City == city && p.Embedding != null)
-            .OrderBy(p => p.Embedding!.CosineDistance(qvec))
-            .Take(RetrievalTopK)
-            .Select(p => new { Place = p, Distance = (float)p.Embedding!.CosineDistance(qvec) })
-            .ToListAsync(ct);
-
-        if (candidates.Count == 0)
-        {
-            _logger.LogInformation("RAG returned 0 candidates — city={City}, falling back", city);
-            return await FallbackKeywordFilterAsync(city, prefs, ct);
-        }
-
-        var rankedScored = _ranker.RankWithScores(
-            candidates.Select(c => (c.Place, c.Distance)).ToList(),
-            prefs);
-
-        _logger.LogInformation(
-            "RAG retrieval: city={City} query='{QueryPreview}' top-K={Count} top5=[{Top5}]",
-            city,
-            queryText.Length > 60 ? queryText[..60] + "…" : queryText,
-            rankedScored.Count,
-            string.Join(" | ", rankedScored.Take(5).Select(s =>
-                $"{s.Place.Name}({s.Place.Category}) total={s.Score:F3} " +
-                $"[sim={s.Breakdown.Similarity:F2} cat={s.Breakdown.CategoryMatch:F2} " +
-                $"bestFor={s.Breakdown.BestForMatch:F2} aiVibe={s.Breakdown.AiVibeNormalized:F2} " +
-                $"neighPen={s.Breakdown.NeighborhoodPenalty:F2}]")));
-
-        return rankedScored.Select(s => s.Place).ToList();
-    }
-
-    private const int FallbackKeywordHardCap = 500;
-
-    private async Task<List<Place>> FallbackKeywordFilterAsync(
-        string city, ExtractedPreferences prefs, CancellationToken ct)
-    {
-        var matching = await _db.Places.AsNoTracking()
-            .Where(p => p.Status == "published" && p.City == city)
-            .Take(FallbackKeywordHardCap)
-            .ToListAsync(ct);
-        return FilterPlaces(matching, prefs);
-    }
-
-    internal static List<Place> FilterPlaces(List<Place> allPlaces, ExtractedPreferences prefs)
-    {
-        if (prefs.Categories == null || !prefs.Categories.Any()) return allPlaces;
-
-        return allPlaces.Where(p =>
-            prefs.Categories.Any(c =>
-                string.Equals(p.Category, c, StringComparison.OrdinalIgnoreCase)
-                || p.Category.Contains(c, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
     }
 
     // ── Plan naming — test contract surface (BuilderPlanNameTests.cs calls these directly) ──

@@ -34,6 +34,11 @@ public class ExtractedPreferences
     public List<string>? StyleTags { get; set; }
     /// <summary>Presupuesto raw USD/día/persona (fuente para tier match más fino).</summary>
     public int? BudgetAmount { get; set; }
+
+    // ── Refinements — carried from TripContext through to SchedulingService ───
+    public string? Pace { get; set; }
+    public List<string>? Dietary { get; set; }
+    public List<string>? Exclusions { get; set; }
 }
 
 public class TripContextDto
@@ -83,4 +88,21 @@ public class TripContextDto
     [MaxLength(5)]
     public List<string>? CompanyTags { get; set; }
 
+    // ── Refinements (chat slots PR 3) ─────────────────────────────────────────
+
+    /// <summary>Trip pace: "slow" | "normal" | "fast". Affects MaxStopsPerDay clamp.</summary>
+    [MaxLength(10)]
+    public string? Pace { get; set; }
+
+    /// <summary>Dietary restrictions: vegetarian | vegan | halal | gluten_free | none.</summary>
+    [MaxLength(5)]
+    public List<string>? Dietary { get; set; }
+
+    /// <summary>Categories/vibes the user wants to avoid (e.g. "nightlife", "touristy").</summary>
+    [MaxLength(5)]
+    public List<string>? Exclusions { get; set; }
+
+    /// <summary>Primary vibe from chat slot-filling (e.g. "hidden_gems", "romantic").</summary>
+    [MaxLength(30)]
+    public string? VibesPrimary { get; set; }
 }

@@ -21,6 +21,7 @@ using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data;
 
@@ -173,6 +174,11 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             services.AddHttpClient<AiProviderService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
 
+            // SlotExtractorService también usa Gemini — usamos el mismo FakeGemini.
+            // Tests de /chat/turn configuran FakeGemini.Responder con el schema de slot extraction.
+            services.AddHttpClient<SlotExtractorService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
+
             services.AddHttpClient<EmbeddingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeEmbeddings);
 
@@ -206,6 +212,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 options.AddPolicy("CitySearchLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("CityCreateLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("ChatTurnLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
@@ -306,7 +314,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         var now = FakeTime.GetUtcNow().UtcDateTime;
         var token = new JwtSecurityToken(
             issuer: JwtTokenService.Issuer,
-            audience: null,
+            audience: JwtTokenService.Audience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),

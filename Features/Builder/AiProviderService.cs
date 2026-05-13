@@ -309,13 +309,44 @@ Return JSON only, no markdown. EXACT shape:
         if (context.BudgetAmount.HasValue && context.BudgetAmount.Value > 0)
             prefs.BudgetAmount = context.BudgetAmount.Value;
 
+        // ── Refinements (PR 3) ────────────────────────────────────────────────
+
+        // Pace clamp — authoritative over Gemini's MaxStopsPerDay suggestion
+        if (!string.IsNullOrWhiteSpace(context.Pace))
+        {
+            prefs.Pace = context.Pace.ToLowerInvariant();
+            prefs.MaxStopsPerDay = prefs.Pace switch
+            {
+                "slow" => Math.Min(prefs.MaxStopsPerDay, 3),
+                "fast" => Math.Max(prefs.MaxStopsPerDay, 5),
+                _      => prefs.MaxStopsPerDay
+            };
+        }
+
+        // Dietary restrictions — passed through to SchedulingService
+        if (context.Dietary != null && context.Dietary.Count > 0)
+            prefs.Dietary = context.Dietary.Take(5).ToList();
+
+        // Exclusions — passed through to SchedulingService
+        if (context.Exclusions != null && context.Exclusions.Count > 0)
+            prefs.Exclusions = context.Exclusions.Take(5).ToList();
+
+        // VibesPrimary → added to Vibes list for the RAG embedding query
+        if (!string.IsNullOrWhiteSpace(context.VibesPrimary))
+        {
+            if (!prefs.Vibes.Contains(context.VibesPrimary, StringComparer.OrdinalIgnoreCase))
+                prefs.Vibes.Add(context.VibesPrimary);
+        }
+
         _logger.LogInformation(
-            "Prefs after context merge: days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} maxStops={Max}",
+            "Prefs after context merge: days={Days} categories=[{Cats}] vibes=[{Vibes}] groupType={GT} maxStops={Max} pace={Pace} exclusions=[{Ex}]",
             prefs.Days,
             string.Join(",", prefs.Categories),
             string.Join(",", prefs.Vibes),
             prefs.GroupType,
-            prefs.MaxStopsPerDay);
+            prefs.MaxStopsPerDay,
+            prefs.Pace ?? "(none)",
+            prefs.Exclusions != null ? string.Join(",", prefs.Exclusions) : "(none)");
 
         return prefs;
     }
