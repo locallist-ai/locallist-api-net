@@ -83,6 +83,7 @@ public class ChatAgentService
         Guid? sessionId,
         string? rawMessage,
         string? quickReplyId,
+        PreSeededSlots? preSeededSlots,
         Guid? userId,
         string? rawIp,
         CancellationToken ct = default)
@@ -97,6 +98,37 @@ public class ChatAgentService
 
         var slots = DeserializeSlots(session.SlotsJson);
         var history = DeserializeHistory(session.HistoryJson);
+
+        // ── PreSeededSlots: honor client-supplied city on brand-new sessions only ──
+        if (session.TurnCount == 0 && !string.IsNullOrWhiteSpace(preSeededSlots?.City))
+        {
+            var normalizedCity = preSeededSlots.City.Trim().ToLowerInvariant();
+            var cityExists = await _db.Cities.AnyAsync(c => c.NormalizedName == normalizedCity, ct);
+            if (cityExists && string.IsNullOrEmpty(slots.City))
+            {
+                slots.City = preSeededSlots.City.Trim();
+                _logger.LogInformation("Chat: preSeeded city={City} sessionId={Session}", slots.City, session.Id);
+            }
+
+            // If client sent no message (city-only first turn), return greeting immediately
+            if (string.IsNullOrWhiteSpace(rawMessage) && string.IsNullOrWhiteSpace(quickReplyId))
+            {
+                var greeting = string.IsNullOrEmpty(slots.City)
+                    ? "What city are you visiting?"
+                    : $"Great — let's plan your {slots.City} trip! How many days?";
+                var greetingReplies = new List<ChatQuickReply>
+                {
+                    new() { Id = "days_1", Label = "1 day" },
+                    new() { Id = "days_2", Label = "2 days" },
+                    new() { Id = "days_3", Label = "3 days" },
+                    new() { Id = "days_4", Label = "4 days" },
+                    new() { Id = "days_7", Label = "1 week" },
+                };
+                history.Add(new HistoryEntry { Role = "assistant", Content = greeting, Timestamp = DateTimeOffset.UtcNow });
+                return await BuildResponseAsync(session, slots, history, suspicion, greeting, ct,
+                    geminiQuickReplies: greetingReplies);
+            }
+        }
 
         // ── Quick reply: deterministic slot update, no Gemini call ──
         if (!string.IsNullOrWhiteSpace(quickReplyId))

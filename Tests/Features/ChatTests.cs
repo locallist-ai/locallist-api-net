@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Features.Chat;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.Tests.Features;
@@ -271,6 +272,91 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(Miami, body.GetProperty("plan").GetProperty("city").GetString());
+    }
+
+    // ── POST /chat/turn — preSeededSlots ─────────────────────────────────────
+
+    [Fact]
+    public async Task Turn_PreSeededCity_FirstTurn_SeedsCitySlotAndReturnsGreeting()
+    {
+        // Seed Miami in Cities table so the validation accepts it
+        var db = fixture.GetDbContext();
+        if (!await db.Cities.AnyAsync(c => c.NormalizedName == "miami"))
+        {
+            db.Cities.Add(new LocalList.API.NET.Shared.Data.Entities.City
+            {
+                Name = Miami,
+                NormalizedName = "miami",
+                Source = "seed"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new
+        {
+            preSeededSlots = new { city = Miami }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(Miami, body.GetProperty("slots").GetProperty("city").GetString());
+        var aiMsg = body.GetProperty("aiMessage").GetString();
+        Assert.NotNull(aiMsg);
+        Assert.Contains(Miami, aiMsg, StringComparison.OrdinalIgnoreCase);
+        var qr = body.GetProperty("quickReplies");
+        Assert.True(qr.GetArrayLength() > 0);
+    }
+
+    [Fact]
+    public async Task Turn_PreSeededInvalidCity_FirstTurn_IgnoresCity()
+    {
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new
+        {
+            message = "I want food and culture",
+            preSeededSlots = new { city = "NonExistentCityXYZ" }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        // City must NOT be set (invalid city ignored) — null values are omitted via WhenWritingNull
+        var slots = body.GetProperty("slots");
+        var hasCity = slots.TryGetProperty("city", out var cityProp);
+        Assert.True(!hasCity || string.IsNullOrEmpty(cityProp.GetString()));
+    }
+
+    [Fact]
+    public async Task Turn_PreSeededCity_LaterTurn_IgnoresPreSeed()
+    {
+        // Arrange: create an active session with city already set
+        var db = fixture.GetDbContext();
+        var session = new ChatSession
+        {
+            Status = "active",
+            TurnCount = 2,
+            SlotsJson = JsonSerializer.Serialize(new ChatSlots { City = Miami, Days = 2 })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new
+        {
+            sessionId = session.Id,
+            message = "I like food",
+            preSeededSlots = new { city = "Tokyo" }  // must be ignored on later turns
+        });
+
+        var rawBody = await res.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = JsonSerializer.Deserialize<JsonElement>(rawBody);
+        // City must remain Miami (preSeeded ignored on later turns)
+        Assert.True(body.TryGetProperty("slots", out var slotsEl),
+            $"Response has no 'slots' property. Body: {rawBody}");
+        Assert.True(slotsEl.TryGetProperty("city", out var cityEl),
+            $"Slots has no 'city' property. Slots: {slotsEl}");
+        Assert.Equal(Miami, cityEl.GetString());
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
