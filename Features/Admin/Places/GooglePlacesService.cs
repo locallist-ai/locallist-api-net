@@ -239,7 +239,8 @@ public class GooglePlacesService : IGooglePlacesService
         {
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Head, current);
+                using var req = new HttpRequestMessage(HttpMethod.Get, current);
+                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (compatible; LocalList/1.0)");
                 using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
 
                 if (resp.StatusCode is System.Net.HttpStatusCode.MovedPermanently
