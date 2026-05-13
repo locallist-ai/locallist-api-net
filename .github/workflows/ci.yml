@@ -4,6 +4,10 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-security:
     name: Build & Security Audit
@@ -26,6 +30,12 @@ jobs:
 
       - name: Test
         run: dotnet test LocalList.API.slnx --no-build --verbosity normal
+
+      - name: EF — no pending model changes
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.*
+          dotnet ef migrations has-pending-model-changes \
+            --project LocalList.API.NET --startup-project LocalList.API.NET
 
       - name: Audit dependencies (vulnerable packages)
         run: |

@@ -6,7 +6,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 
 | | Details |
 |---|---|
-| **Tech** | .NET 9 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
+| **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:123-131`. |
