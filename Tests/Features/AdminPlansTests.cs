@@ -175,6 +175,71 @@ public class AdminPlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         }
     }
 
+    // ── Max 10 stops per day ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreatePlan_With11StopsOnOneDay_Returns400()
+    {
+        var db = fixture.GetDbContext();
+        var placeIds = new List<Guid>();
+        for (var i = 0; i < 11; i++)
+        {
+            var p = new Place
+            {
+                Id = Guid.NewGuid(), Name = $"MaxStops Place {i} {Guid.NewGuid():N}",
+                Category = "Food", City = "Miami", WhyThisPlace = "max test",
+                Status = "published"
+            };
+            db.Places.Add(p);
+            placeIds.Add(p.Id);
+        }
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var stops = placeIds.Select((id, idx) => new { placeId = id, dayNumber = 1, orderIndex = idx }).ToArray();
+        var payload = new { name = $"OverLimit {Guid.NewGuid():N}", city = "Miami", type = "curated", durationDays = 1, stops };
+
+        var response = await client.PostAsJsonAsync("/admin/plans", payload);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("too_many_stops_day_1", body.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task UpdateStops_With11StopsOnOneDay_Returns400()
+    {
+        var db = fixture.GetDbContext();
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Name = $"UpdateStops Plan {Guid.NewGuid():N}",
+            City = "Miami", Type = "curated", Source = "curated", DurationDays = 1
+        };
+        db.Plans.Add(plan);
+        var placeIds = new List<Guid>();
+        for (var i = 0; i < 11; i++)
+        {
+            var p = new Place
+            {
+                Id = Guid.NewGuid(), Name = $"UpdateMaxStops Place {i} {Guid.NewGuid():N}",
+                Category = "Food", City = "Miami", WhyThisPlace = "update max test",
+                Status = "published"
+            };
+            db.Places.Add(p);
+            placeIds.Add(p.Id);
+        }
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var stops = placeIds.Select((id, idx) => new { placeId = id, dayNumber = 1, orderIndex = idx }).ToArray();
+
+        var response = await client.PutAsJsonAsync($"/admin/plans/{plan.Id}/stops", new { stops });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("too_many_stops_day_1", body.GetProperty("error").GetString());
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string text)

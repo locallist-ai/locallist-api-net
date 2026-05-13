@@ -58,6 +58,7 @@ public class PlaceTaxonomyTests
     [InlineData("Food", new[] { "mexican_restaurant" }, "Taco Bros", "Tacos")] // name override
     [InlineData("Nightlife", new[] { "cocktail_bar" }, null, "Cocktail Bar")]
     [InlineData("Nightlife", new[] { "night_club" }, null, "Nightclub")]
+    [InlineData("Nightlife", new[] { "pub" }, null, "Pub")]
     [InlineData("Coffee", new[] { "coffee_shop" }, null, "Specialty Coffee")]
     [InlineData("Outdoors", new[] { "beach" }, null, "Beach")]
     [InlineData("Wellness", new[] { "spa" }, null, "Spa")]
@@ -68,4 +69,36 @@ public class PlaceTaxonomyTests
     public void CanonicalSubcategoryFromGoogleTypes_MapsCorrectly(
         string category, string[] types, string? name, string? expected) =>
         Assert.Equal(expected, PlaceTaxonomy.CanonicalSubcategoryFromGoogleTypes(category, types, name));
+
+    [Theory]
+    [InlineData("restaurant", null, "Food")]
+    [InlineData("bar", null, "Nightlife")]
+    [InlineData("pub", null, "Nightlife")]
+    [InlineData("cafe", null, "Coffee")]
+    [InlineData("museum", null, "Culture")]
+    [InlineData("park", null, "Outdoors")]
+    [InlineData("spa", null, "Wellness")]
+    [InlineData("clothing_store", null, "Shopping")]
+    [InlineData("unknown_type", null, null)]
+    public void CategoryFromGoogleTypes_MapsCorrectly(string primaryType, string[]? extraTypes, string? expected) =>
+        Assert.Equal(expected, PlaceTaxonomy.CategoryFromGoogleTypes(primaryType, extraTypes));
+
+    [Fact]
+    public void TaxonomyConsistency_GoogleTypeSubcategoryMustBeValidUnderItsCategory()
+    {
+        // Every key in _googleTypeToSubcategory must:
+        // 1. Also exist in _googleTypeToCategory
+        // 2. Its subcategory must be valid under that category
+        // This prevents silent drift between the two dictionaries.
+        foreach (var googleType in PlaceTaxonomy.SubcategoryMappingKeys)
+        {
+            var category = PlaceTaxonomy.CategoryFromGoogleTypes(googleType, null);
+            Assert.True(category != null,
+                $"Google type '{googleType}' has a subcategory mapping but no category mapping.");
+
+            var subcategory = PlaceTaxonomy.CanonicalSubcategoryFromGoogleTypes(category!, new[] { googleType });
+            Assert.True(PlaceTaxonomy.IsValidSubcategory(category!, subcategory),
+                $"Subcategory '{subcategory}' for type '{googleType}' is not valid under category '{category}'.");
+        }
+    }
 }

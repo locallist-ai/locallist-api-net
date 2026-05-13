@@ -263,6 +263,183 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         }
     }
 
+    // ── import-from-urls ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ImportFromUrls_EmptyList_Returns400()
+    {
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls = Array.Empty<string>() });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ImportFromUrls_Over500_Returns400()
+    {
+        var client = CreateAdminClient();
+        var urls = Enumerable.Range(0, 501).Select(i => $"https://maps.app.goo.gl/x{i}").ToArray();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ImportFromUrls_UnresolvableUrl_ReturnsFailedResolveRow()
+    {
+        fixture.FakeGooglePlaces.Reset();
+        // Resolve returns null → failed_resolve
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls = new[] { "https://not-google.com/foo" }, defaultCity = "Miami" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, body.GetProperty("created").GetInt32());
+        Assert.Equal(1, body.GetProperty("failed").GetInt32());
+        var row = body.GetProperty("rows")[0];
+        Assert.Equal("failed_resolve", row.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ImportFromUrls_PlaceIdResolvedButDetailsFail_ReturnsFailedDetailsRow()
+    {
+        fixture.FakeGooglePlaces.Reset();
+        var resolvedId = $"ChIJ-test-{Guid.NewGuid():N}";
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/abc"] = resolvedId;
+        // DetailsByPlaceId has no entry → GetDetailsAsync returns null
+
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls = new[] { "https://maps.app.goo.gl/abc" }, defaultCity = "Miami" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, body.GetProperty("created").GetInt32());
+        Assert.Equal(0, body.GetProperty("skipped").GetInt32());
+        Assert.Equal(1, body.GetProperty("failed").GetInt32());
+        var row = body.GetProperty("rows")[0];
+        Assert.Equal("failed_details", row.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ImportFromUrls_HappyPath_CreatesPlaceWithEmbedding()
+    {
+        fixture.FakeGooglePlaces.Reset();
+        var placeId = $"ChIJhappy-{Guid.NewGuid():N}";
+        var placeName = $"Test Place {Guid.NewGuid():N}";
+
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/test"] = placeId;
+        fixture.FakeGooglePlaces.DetailsByPlaceId[placeId] = new LocalList.API.NET.Features.Admin.Places.GooglePlaceDetails(
+            Id: placeId, Name: placeName, FormattedAddress: "123 Test St, Miami, FL",
+            City: "Miami", Neighborhood: "Wynwood",
+            Lat: 25.77m, Lng: -80.19m,
+            PrimaryType: "italian_restaurant", Types: ["italian_restaurant", "restaurant"],
+            PriceLevel: "$",
+            Photos: ["https://photos.example.com/photo1.jpg"],
+            Rating: 4.5m, ReviewCount: 200,
+            Website: null, Phone: null,
+            EditorialSummary: "A great test place");
+
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls = new[] { "https://maps.app.goo.gl/test" }, defaultCity = "Miami" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, body.GetProperty("created").GetInt32());
+        Assert.Equal(0, body.GetProperty("skipped").GetInt32());
+        Assert.Equal(0, body.GetProperty("failed").GetInt32());
+        Assert.Equal("created", body.GetProperty("rows")[0].GetProperty("status").GetString());
+
+        // Verify full taxonomy × price × rating × photo pipeline in DB
+        var freshDb = fixture.GetDbContext();
+        var saved = await freshDb.Places.FirstOrDefaultAsync(p => p.GooglePlaceId == placeId);
+        Assert.NotNull(saved);
+        Assert.Equal(placeName, saved!.Name);
+        Assert.Equal("Food", saved.Category);
+        Assert.Equal("Italian", saved.Subcategory);
+        Assert.Equal("$", saved.PriceRange);
+        Assert.Equal(4.5m, saved.GoogleRating);
+        Assert.NotNull(saved.Photos);
+        Assert.Equal(1, saved.Photos!.Count);
+        Assert.Equal(25.77m, saved.Latitude);
+        Assert.Equal(-80.19m, saved.Longitude);
+        Assert.NotNull(saved.Embedding);
+    }
+
+    [Fact]
+    public async Task ImportFromUrls_DuplicatePlaceId_Skipped()
+    {
+        fixture.FakeGooglePlaces.Reset();
+        var placeId = $"ChIJdup-{Guid.NewGuid():N}";
+        var db = fixture.GetDbContext();
+        db.Places.Add(new Place
+        {
+            Id = Guid.NewGuid(), Name = "Already Exists", Category = "Food",
+            City = "Miami", WhyThisPlace = "existing", Status = "published",
+            GooglePlaceId = placeId
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/dup"] = placeId;
+        fixture.FakeGooglePlaces.DetailsByPlaceId[placeId] = new LocalList.API.NET.Features.Admin.Places.GooglePlaceDetails(
+            placeId, "Already Exists", null, "Miami", null,
+            25.77m, -80.19m, "restaurant", ["restaurant"],
+            null, [], null, null, null, null, null);
+
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+            new { urls = new[] { "https://maps.app.goo.gl/dup" }, defaultCity = "Miami" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, body.GetProperty("created").GetInt32());
+        Assert.Equal(1, body.GetProperty("skipped").GetInt32());
+        Assert.Equal("skipped_duplicate", body.GetProperty("rows")[0].GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ImportFromUrls_EmbeddingProviderThrows_ReturnsCreatedWithoutEmbedding()
+    {
+        fixture.FakeGooglePlaces.Reset();
+        var placeId = $"ChIJemb-{Guid.NewGuid():N}";
+        var placeName = $"Embed Fail Place {Guid.NewGuid():N}";
+
+        fixture.FakeGooglePlaces.ResolvedByUrl["https://maps.app.goo.gl/emb"] = placeId;
+        fixture.FakeGooglePlaces.DetailsByPlaceId[placeId] = new LocalList.API.NET.Features.Admin.Places.GooglePlaceDetails(
+            Id: placeId, Name: placeName, FormattedAddress: null,
+            City: "Miami", Neighborhood: null,
+            Lat: 25.77m, Lng: -80.19m,
+            PrimaryType: "restaurant", Types: ["restaurant"],
+            PriceLevel: null, Photos: [],
+            Rating: null, ReviewCount: null,
+            Website: null, Phone: null, EditorialSummary: null);
+
+        fixture.FakeEmbeddings.Responder = _ => new HttpResponseMessage(System.Net.HttpStatusCode.BadGateway);
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsJsonAsync("/admin/places/import-from-urls",
+                new { urls = new[] { "https://maps.app.goo.gl/emb" }, defaultCity = "Miami" });
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(1, body.GetProperty("created").GetInt32());
+            Assert.Equal(0, body.GetProperty("failed").GetInt32());
+
+            // Place is created but embedding is null (resilience: embedding failure must not block insert)
+            var freshDb = fixture.GetDbContext();
+            var saved = await freshDb.Places.FirstOrDefaultAsync(p => p.GooglePlaceId == placeId);
+            Assert.NotNull(saved);
+            Assert.Null(saved!.Embedding);
+        }
+        finally
+        {
+            fixture.FakeEmbeddings.Responder = null;
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string text)
