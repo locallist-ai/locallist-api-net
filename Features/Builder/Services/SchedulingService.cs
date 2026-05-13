@@ -25,6 +25,7 @@ public sealed class ScheduleResult
 {
     public List<ScheduledStopDto> Stops { get; } = new();
     public List<string> Warnings { get; } = new();
+    public List<string> AppliedRefinements { get; } = new();
 }
 
 public class SchedulingService
@@ -69,7 +70,9 @@ public class SchedulingService
         var stops = result.Stops;
         var usedPlaceIds = new HashSet<Guid>();
 
-        var shuffled = filteredPlaces.OrderBy(_ => Random.Shared.Next()).ToList();
+        var shuffled = ApplyRefinements(
+            filteredPlaces.OrderBy(_ => Random.Shared.Next()).ToList(),
+            prefs, result);
 
         var dayTemplate = new[]
         {
@@ -80,9 +83,18 @@ public class SchedulingService
             new { TimeBlock = "evening",   Arrival = "21:00", Duration = 60 },
         };
 
+        // Pace clamp — enforce at scheduling time so the constraint holds even if
+        // MergeContextIntoPrefs wasn't called (e.g., in direct unit tests).
+        var effectiveMaxStops = prefs.Pace?.ToLowerInvariant() switch
+        {
+            "slow" => Math.Min(prefs.MaxStopsPerDay, 3),
+            "fast" => Math.Max(prefs.MaxStopsPerDay, 5),
+            _      => prefs.MaxStopsPerDay
+        };
+
         for (int day = 1; day <= prefs.Days; day++)
         {
-            var daySlots = dayTemplate.Take(prefs.MaxStopsPerDay).ToList();
+            var daySlots = dayTemplate.Take(effectiveMaxStops).ToList();
             double? prevLat = null;
             double? prevLon = null;
 
@@ -155,6 +167,63 @@ public class SchedulingService
         }
 
         return result;
+    }
+
+    internal List<Place> ApplyRefinements(List<Place> places, ExtractedPreferences prefs, ScheduleResult result)
+    {
+        var current = places;
+
+        // Exclusions — filter out categories the user wants to avoid
+        var exclusions = prefs.Exclusions;
+        if (exclusions != null && exclusions.Count > 0)
+        {
+            var filtered = current
+                .Where(p => !exclusions.Any(e =>
+                    string.Equals(p.Category, e, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+
+            if (filtered.Count == 0 && current.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Builder: exclusion_fallback exclusions=[{Ex}] totalPlaces={N} — using all",
+                    string.Join(",", exclusions), current.Count);
+                result.Warnings.Add("exclusion_fallback");
+            }
+            else
+            {
+                current = filtered;
+                result.AppliedRefinements.Add($"excluded:{string.Join(",", exclusions)}");
+            }
+        }
+
+        // Dietary — soft filter: places with SuitableFor data must match;
+        // places without SuitableFor data are always included (no-info = safe to include).
+        var dietary = prefs.Dietary;
+        if (dietary != null && dietary.Count > 0 &&
+            !dietary.Contains("none", StringComparer.OrdinalIgnoreCase))
+        {
+            var withDietary = current
+                .Where(p =>
+                    p.SuitableFor == null || p.SuitableFor.Count == 0 ||
+                    dietary.Any(d => p.SuitableFor.Any(sf =>
+                        sf.Contains(d, StringComparison.OrdinalIgnoreCase))))
+                .ToList();
+
+            if (withDietary.Count == 0 && current.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Builder: dietary_no_matches dietary=[{D}] — using all",
+                    string.Join(",", dietary));
+                result.Warnings.Add("dietary_no_matches");
+            }
+            else if (withDietary.Count < current.Count)
+            {
+                current = withDietary;
+                result.AppliedRefinements.Add($"dietary:{string.Join(",", dietary)}");
+            }
+        }
+
+        return current;
     }
 
     internal bool IsGoodTimeMatch(Place place, string timeBlock, ExtractedPreferences prefs, bool strict)

@@ -5,6 +5,7 @@ using System.Text.Json;
 using LocalList.API.NET.Shared.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -14,9 +15,11 @@ using Pgvector;
 namespace LocalList.API.NET.Migrations
 {
     [DbContext(typeof(LocalListDbContext))]
-    partial class LocalListDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260513120430_AddChatSession")]
+    partial class AddChatSession
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -47,11 +50,6 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("text")
                         .HasColumnName("history");
 
-                    b.PrimitiveCollection<string[]>("LastOfferedChips")
-                        .IsRequired()
-                        .HasColumnType("text[]")
-                        .HasColumnName("last_offered_chips");
-
                     b.Property<DateTimeOffset>("LastTurnAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_turn_at");
@@ -70,11 +68,6 @@ namespace LocalList.API.NET.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)")
                         .HasColumnName("status");
-
-                    b.Property<string>("SuspicionJson")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("suspicion");
 
                     b.Property<int>("TurnCount")
                         .HasColumnType("integer")
@@ -696,51 +689,6 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("users");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserProfile", b =>
-                {
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("user_id");
-
-                    b.PrimitiveCollection<List<string>>("CompanionTags")
-                        .IsRequired()
-                        .HasColumnType("text[]")
-                        .HasColumnName("companion_tags");
-
-                    b.Property<string>("DefaultBudgetTier")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("default_budget_tier");
-
-                    b.Property<string>("DefaultGroupType")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("default_group_type");
-
-                    b.PrimitiveCollection<List<string>>("DietaryRestrictions")
-                        .IsRequired()
-                        .HasColumnType("text[]")
-                        .HasColumnName("dietary_restrictions");
-
-                    b.Property<string>("FavoriteCity")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("favorite_city");
-
-                    b.Property<string>("PacePreference")
-                        .HasMaxLength(10)
-                        .HasColumnType("character varying(10)")
-                        .HasColumnName("pace_preference");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.HasKey("UserId");
-
-                    b.ToTable("user_profiles");
-                });
-
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.WaitlistEntry", b =>
                 {
                     b.Property<int>("Id")
@@ -939,17 +887,6 @@ namespace LocalList.API.NET.Migrations
                     b.Navigation("FromPlace");
 
                     b.Navigation("ToPlace");
-                });
-
-            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserProfile", b =>
-                {
-                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", "User")
-                        .WithOne()
-                        .HasForeignKey("LocalList.API.NET.Shared.Data.Entities.UserProfile", "UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.Place", b =>
