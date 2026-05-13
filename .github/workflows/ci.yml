@@ -35,7 +35,7 @@ jobs:
         run: |
           dotnet tool restore
           dotnet ef migrations has-pending-model-changes \
-            --project LocalList.API.NET --startup-project LocalList.API.NET
+            --project LocalList.API.NET.csproj
 
       - name: Audit dependencies (vulnerable packages)
         run: |
