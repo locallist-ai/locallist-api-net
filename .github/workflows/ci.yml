@@ -33,8 +33,7 @@ jobs:
 
       - name: EF — no pending model changes
         run: |
-          dotnet tool install --global dotnet-ef --version 10.0.*
-          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet tool restore
           dotnet ef migrations has-pending-model-changes \
             --project LocalList.API.NET --startup-project LocalList.API.NET
 
