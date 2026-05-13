@@ -52,7 +52,9 @@ public class ChatController : ControllerBase
     [EnableRateLimiting("ChatTurnLimit")]  // sliding-window hourly; burst covered by global 100/min
     public async Task<IActionResult> Turn([FromBody] ChatTurnRequest request, CancellationToken ct)
     {
-        if (request == null || (string.IsNullOrWhiteSpace(request.Message) && string.IsNullOrWhiteSpace(request.QuickReplyId)))
+        var hasContent = !string.IsNullOrWhiteSpace(request.Message) || !string.IsNullOrWhiteSpace(request.QuickReplyId);
+        var hasPreSeed = request.SessionId == null && !string.IsNullOrWhiteSpace(request.PreSeededSlots?.City);
+        if (request == null || (!hasContent && !hasPreSeed))
             return BadRequest(new { error = "message or quickReplyId is required" });
 
         // Validate quickReplyId length to prevent oversized forged chip IDs
@@ -67,6 +69,7 @@ public class ChatController : ControllerBase
             request.SessionId,
             request.Message,
             request.QuickReplyId,
+            request.PreSeededSlots,
             userId,
             rawIp,
             ct);

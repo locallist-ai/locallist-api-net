@@ -2,6 +2,12 @@ using System.ComponentModel.DataAnnotations;
 
 namespace LocalList.API.NET.Features.Chat;
 
+public class PreSeededSlots
+{
+    [MaxLength(60)]
+    public string? City { get; set; }
+}
+
 public class ChatTurnRequest
 {
     public Guid? SessionId { get; set; }
@@ -11,6 +17,12 @@ public class ChatTurnRequest
 
     [MaxLength(50)]
     public string? QuickReplyId { get; set; }
+
+    /// <summary>
+    /// Optional slots pre-filled by the client (e.g. city selected before opening chat).
+    /// Only honored on the very first turn (SessionId == null). Ignored on subsequent turns.
+    /// </summary>
+    public PreSeededSlots? PreSeededSlots { get; set; }
 }
 
 public class ChatQuickReply
