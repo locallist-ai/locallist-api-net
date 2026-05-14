@@ -114,8 +114,13 @@ public class AdminPlacesController : ControllerBase
 
         var total = await query.CountAsync(ct);
 
-        var places = await query
-            .OrderByDescending(p => p.CreatedAt)
+        var ordered = status == "in_review"
+            ? query.OrderBy(p => p.ReviewDeferredAt == null)
+                   .ThenByDescending(p => p.ReviewDeferredAt)
+                   .ThenByDescending(p => p.CreatedAt)
+            : query.OrderByDescending(p => p.CreatedAt);
+
+        var places = await ordered
             .Skip(offset)
             .Take(limit)
             .Select(p => AdminPlaceDto.FromEntity(p))
@@ -495,6 +500,21 @@ public class AdminPlacesController : ControllerBase
 
         _logger.LogInformation("Admin {Action} place {PlaceId}", request.Status, place.Id);
 
+        return Ok(AdminPlaceDto.FromEntity(place));
+    }
+
+    [HttpPatch("{id}/postpone")]
+    public async Task<IActionResult> PostponePlace(Guid id, CancellationToken ct)
+    {
+        var place = await _db.Places.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (place == null)
+            return NotFound(new { error = "Place not found" });
+
+        place.ReviewDeferredAt = _clock.GetUtcNow();
+        place.UpdatedAt = _clock.GetUtcNow();
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Admin postponed place {PlaceId}", place.Id);
         return Ok(AdminPlaceDto.FromEntity(place));
     }
 

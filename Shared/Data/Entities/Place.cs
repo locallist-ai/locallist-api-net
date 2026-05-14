@@ -120,6 +120,9 @@ public class Place
     [Column("ai_vibe_score")]
     public int? AiVibeScore { get; set; }
 
+    [Column("review_deferred_at")]
+    public DateTimeOffset? ReviewDeferredAt { get; set; }
+
     // Internal only — never returned by public/admin endpoints (DTOs excluyen el campo).
     // Defense-in-depth: JsonIgnore previene leaks accidentales si algún controller serializa Place directo.
     [Column("embedding")]

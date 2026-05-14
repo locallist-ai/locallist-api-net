@@ -458,6 +458,55 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         }
     }
 
+    // ── PostponePlace ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task PostponePlace_SetsReviewDeferredAt_AndPlacesItFirstInInReviewList()
+    {
+        var db = fixture.GetDbContext();
+        var tag = Guid.NewGuid().ToString("N")[..8];
+
+        // Seed 3 in_review places with staggered CreatedAt so ordering is deterministic
+        var baseTime = DateTimeOffset.UtcNow.AddMinutes(-30);
+        var idA = Guid.NewGuid();
+        var idB = Guid.NewGuid();
+        var idC = Guid.NewGuid();
+
+        db.Places.AddRange(
+            new Place { Id = idA, Name = $"Place A {tag}", Category = "Food", City = "Miami", WhyThisPlace = "a", Status = "in_review", CreatedAt = baseTime },
+            new Place { Id = idB, Name = $"Place B {tag}", Category = "Food", City = "Miami", WhyThisPlace = "b", Status = "in_review", CreatedAt = baseTime.AddMinutes(5) },
+            new Place { Id = idC, Name = $"Place C {tag}", Category = "Food", City = "Miami", WhyThisPlace = "c", Status = "in_review", CreatedAt = baseTime.AddMinutes(10) }
+        );
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+
+        // Postpone place B
+        var postponeRes = await client.PatchAsync($"/admin/places/{idB}/postpone", content: null);
+        Assert.Equal(HttpStatusCode.OK, postponeRes.StatusCode);
+
+        // Verify DB: review_deferred_at is set
+        var freshDb = fixture.GetDbContext();
+        var saved = await freshDb.Places.FirstAsync(p => p.Id == idB);
+        Assert.NotNull(saved.ReviewDeferredAt);
+
+        // GET in_review: postponed place must appear first (index 0)
+        var listRes = await client.GetAsync("/admin/places?status=in_review");
+        Assert.Equal(HttpStatusCode.OK, listRes.StatusCode);
+        var body = await listRes.Content.ReadFromJsonAsync<JsonElement>();
+        var placesArr = body.GetProperty("places");
+        Assert.True(placesArr.GetArrayLength() >= 3);
+        Assert.Equal(idB.ToString(), placesArr[0].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public async Task PostponePlace_NotFound_Returns404()
+    {
+        var client = CreateAdminClient();
+        var response = await client.PatchAsync($"/admin/places/{Guid.NewGuid()}/postpone", content: null);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private static HttpResponseMessage GeminiOk(string text)
