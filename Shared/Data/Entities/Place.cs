@@ -120,6 +120,9 @@ public class Place
     [Column("ai_vibe_score")]
     public int? AiVibeScore { get; set; }
 
+    [Column("visit_duration_min")]
+    public int? VisitDurationMin { get; set; }
+
     [Column("review_deferred_at")]
     public DateTimeOffset? ReviewDeferredAt { get; set; }
 

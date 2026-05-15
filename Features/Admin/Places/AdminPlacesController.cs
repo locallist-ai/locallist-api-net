@@ -176,6 +176,7 @@ public class AdminPlacesController : ControllerBase
             SourceUrl = request.SourceUrl?.Trim(),
             Status = request.Status?.Trim() ?? "in_review",
             AiVibeScore = request.AiVibeScore,
+            VisitDurationMin = request.VisitDurationMin,
             Flags = request.Flags,
             SubmittedById = userId,
             CreatedAt = now,
@@ -453,6 +454,7 @@ public class AdminPlacesController : ControllerBase
         if (request.Source != null) place.Source = request.Source.Trim();
         if (request.SourceUrl != null) place.SourceUrl = request.SourceUrl.Trim();
         if (request.AiVibeScore.HasValue) place.AiVibeScore = request.AiVibeScore;
+        if (request.VisitDurationMin.HasValue) place.VisitDurationMin = request.VisitDurationMin;
         if (request.Flags != null) place.Flags = request.Flags;
 
         // i18n ES fields
@@ -699,6 +701,7 @@ public class AdminPlacesController : ControllerBase
                 SourceUrl = req.SourceUrl?.Trim(),
                 Status = req.Status?.Trim() ?? "in_review",
                 AiVibeScore = req.AiVibeScore,
+                VisitDurationMin = req.VisitDurationMin,
                 Flags = req.Flags,
                 SubmittedById = userId,
                 CreatedAt = now,

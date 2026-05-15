@@ -357,13 +357,14 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     }
 
     [Fact]
-    public async Task Schedule_NightlifeWithAnyBestTime_DoesNotAppearInLunchSlot()
+    public async Task Schedule_Nightlife_AppearsLast_AfterOtherCategories()
     {
-        // nightlife con BestTime=any colaría en lunch por la regla BestTime legacy.
-        // La matrix categoría×timeBlock filtra: lunch solo admite food/coffee.
-        await SeedPlace("CoffeeA", "coffee", "any");
-        await SeedPlace("FoodA", "food", "any");
-        await SeedPlace("LatinBar", "nightlife", "any");
+        // AnchorNightlife ensures nightlife is always scheduled last in the day.
+        // Use an isolated city so accumulated places from other tests don't interfere.
+        const string city = "NightlifeTestCity";
+        await SeedPlace("CoffeeA", "coffee", "any", city: city);
+        await SeedPlace("FoodA",   "food",   "any", city: city);
+        await SeedPlace("LatinBar","nightlife","any", city: city);
 
         var extracted = new
         {
@@ -380,24 +381,24 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "a bit of everything",
-            tripContext = new { city = Miami, groupType = "couple", days = 1 },
+            tripContext = new { city, groupType = "couple", days = 1 },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
 
         var stops = body.GetProperty("stops").EnumerateArray().ToList();
-        var lunchStops = stops.Where(s =>
-            string.Equals(s.GetProperty("timeBlock").GetString(), "lunch", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        Assert.NotEmpty(stops);
 
-        // Si hubo un lunch slot, nightlife NO debe aparecer allí.
-        foreach (var ls in lunchStops)
+        // AnchorNightlife invariant: no nightlife stop may precede a non-nightlife stop.
+        bool seenNightlife = false;
+        foreach (var s in stops)
         {
-            var cat = ls.GetProperty("place").GetProperty("category").GetString() ?? "";
-            Assert.False(
-                string.Equals(cat, "nightlife", StringComparison.OrdinalIgnoreCase),
-                $"nightlife no debería aparecer en lunch, llegó {cat}");
+            var cat = s.GetProperty("place").GetProperty("category").GetString() ?? "";
+            bool isNightlife = string.Equals(cat, "nightlife", StringComparison.OrdinalIgnoreCase);
+            if (isNightlife) { seenNightlife = true; }
+            else Assert.False(seenNightlife,
+                $"'{cat}' aparece después de nightlife — AnchorNightlife debe mantener nightlife al final");
         }
     }
 
@@ -731,7 +732,8 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         string name,
         string category = "Food",
         string bestTime = "any",
-        List<string>? suitableFor = null)
+        List<string>? suitableFor = null,
+        string city = Miami)
     {
         var db = fixture.GetDbContext();
         var tag = Guid.NewGuid().ToString("N")[..8];
@@ -741,7 +743,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
             Id = id,
             Name = $"{name}-{tag}",
             Category = category,
-            City = Miami,
+            City = city,
             WhyThisPlace = $"Seed for {name}",
             Status = "published",
             BestTime = bestTime,

@@ -37,6 +37,8 @@ public class SchedulingService
         _logger = logger;
     }
 
+    // ── Time-block compatibility (kept for IsGoodTimeMatch) ───────────────────
+
     private static readonly Dictionary<string, HashSet<string>> TimeBlockCategories = new(StringComparer.OrdinalIgnoreCase)
     {
         ["morning"]   = new(StringComparer.OrdinalIgnoreCase) { "coffee", "wellness", "outdoors", "culture", "food" },
@@ -55,125 +57,363 @@ public class SchedulingService
         ["evening"]   = new[] { "evening" },
     };
 
-    private static readonly object[] DayTemplate =
-    {
-        new { TimeBlock = "morning",   Arrival = "09:00", Duration = 60 },
-        new { TimeBlock = "lunch",     Arrival = "12:00", Duration = 90 },
-        new { TimeBlock = "afternoon", Arrival = "14:30", Duration = 90 },
-        new { TimeBlock = "dinner",    Arrival = "19:00", Duration = 90 },
-        new { TimeBlock = "evening",   Arrival = "21:00", Duration = 60 },
-    };
+    // ── Visit durations by category ───────────────────────────────────────────
 
-    public ScheduleResult BuildPlanSchedule(List<Place> filteredPlaces, ExtractedPreferences prefs)
+    private static readonly Dictionary<string, int> CategoryDurationMin = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["coffee"]        = 45,
+        ["food"]          = 90,
+        ["culture"]       = 120,
+        ["outdoors"]      = 75,
+        ["wellness"]      = 90,
+        ["nightlife"]     = 120,
+        ["shopping"]      = 60,
+        ["entertainment"] = 105,
+    };
+    private const int DefaultDurationMin = 75;
+
+    // ── Day scheduling constants ──────────────────────────────────────────────
+
+    private static readonly TimeSpan DayStart       = TimeSpan.FromHours(9.5);   // 09:30
+    private static readonly TimeSpan DaySoftCap     = TimeSpan.FromHours(22);    // 22:00
+    private static readonly TimeSpan LunchIdeal     = TimeSpan.FromHours(13);    // 13:00
+    private static readonly TimeSpan LunchWinStart  = TimeSpan.FromHours(11.5);  // 11:30
+    private static readonly TimeSpan LunchWinEnd    = TimeSpan.FromHours(14.5);  // 14:30
+    private static readonly TimeSpan DinnerIdeal    = TimeSpan.FromHours(19.5);  // 19:30
+    private static readonly TimeSpan DinnerWinStart = TimeSpan.FromHours(18);    // 18:00
+    private static readonly TimeSpan DinnerWinEnd   = TimeSpan.FromHours(21.5);  // 21:30
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds a plan schedule from ranked places.
+    /// <paramref name="seed"/> makes the output reproducible — same seed, same plan.
+    /// Different seeds produce different but equally coherent plans.
+    /// </summary>
+    public ScheduleResult BuildPlanSchedule(
+        List<Place> filteredPlaces, ExtractedPreferences prefs, int? seed = null)
     {
         var result = new ScheduleResult();
-        var stops = result.Stops;
-        var usedPlaceIds = new HashSet<Guid>();
+        var rng = new Random(seed ?? Random.Shared.Next());
 
-        var shuffled = ApplyRefinements(
-            filteredPlaces.OrderBy(_ => Random.Shared.Next()).ToList(),
-            prefs, result);
+        var refined = ApplyRefinements(filteredPlaces, prefs, result);
+        var effectiveMaxStops = ResolveEffectiveMaxStops(prefs);
+        var dayPlaces = SelectPlacesForDays(refined, prefs, effectiveMaxStops, rng);
 
-        var dayTemplate = new[]
+        for (int day = 1; day <= prefs.Days; day++)
         {
-            new { TimeBlock = "morning",   Arrival = "09:00", Duration = 60 },
-            new { TimeBlock = "lunch",     Arrival = "12:00", Duration = 90 },
-            new { TimeBlock = "afternoon", Arrival = "14:30", Duration = 90 },
-            new { TimeBlock = "dinner",    Arrival = "19:00", Duration = 90 },
-            new { TimeBlock = "evening",   Arrival = "21:00", Duration = 60 },
-        };
+            if (!dayPlaces.TryGetValue(day, out var places) || places.Count == 0) continue;
+            ScheduleDay(places, result, day, rng);
+        }
 
-        // Pace clamp — enforce at scheduling time so the constraint holds even if
-        // MergeContextIntoPrefs wasn't called (e.g., in direct unit tests).
-        var effectiveMaxStops = prefs.Pace?.ToLowerInvariant() switch
+        return result;
+    }
+
+    // ── Step 1: pace clamp ────────────────────────────────────────────────────
+
+    internal static int ResolveEffectiveMaxStops(ExtractedPreferences prefs) =>
+        prefs.Pace?.ToLowerInvariant() switch
         {
             "slow" => Math.Min(prefs.MaxStopsPerDay, 3),
             "fast" => Math.Max(prefs.MaxStopsPerDay, 5),
             _      => prefs.MaxStopsPerDay
         };
 
-        for (int day = 1; day <= prefs.Days; day++)
+    // ── Step 2: weighted sampling across days ─────────────────────────────────
+
+    // filteredPlaces arrives pre-ranked desc by PlaceRankingService (index 0 = best).
+    private static Dictionary<int, List<Place>> SelectPlacesForDays(
+        List<Place> ranked, ExtractedPreferences prefs, int maxStops, Random rng)
+    {
+        var isFamily = GroupTypePolicy.IsFamilyContext(prefs.GroupType);
+
+        // Family groups never see nightlife
+        var eligible = isFamily
+            ? ranked.Where(p => !p.Category.Equals("nightlife", StringComparison.OrdinalIgnoreCase)).ToList()
+            : ranked;
+
+        int totalSlots = prefs.Days * maxStops;
+        int poolSize   = Math.Min(eligible.Count, Math.Max(totalSlots * 2, totalSlots + 5));
+        var pool       = eligible.Take(poolSize).ToList();
+
+        // Weighted sampling without replacement: weight = poolSize - index
+        var selected      = new List<Place>(totalSlots);
+        var availableIdxs = Enumerable.Range(0, pool.Count).ToList();
+        int needed        = Math.Min(totalSlots, pool.Count);
+
+        while (selected.Count < needed && availableIdxs.Count > 0)
         {
-            var daySlots = dayTemplate.Take(effectiveMaxStops).ToList();
-            double? prevLat = null;
-            double? prevLon = null;
-
-            for (int i = 0; i < daySlots.Count; i++)
+            double totalWeight = availableIdxs.Select(i => (double)(pool.Count - i)).Sum();
+            double pick        = rng.NextDouble() * totalWeight;
+            double cumul       = 0;
+            int chosenListPos  = availableIdxs.Count - 1;
+            for (int i = 0; i < availableIdxs.Count; i++)
             {
-                var slot = daySlots[i];
+                cumul += (double)(pool.Count - availableIdxs[i]);
+                if (pick <= cumul) { chosenListPos = i; break; }
+            }
+            selected.Add(pool[availableIdxs[chosenListPos]]);
+            availableIdxs.RemoveAt(chosenListPos);
+        }
 
-                var strictEligible = shuffled.Where(p =>
-                    !usedPlaceIds.Contains(p.Id) &&
-                    IsGoodTimeMatch(p, slot.TimeBlock, prefs, strict: true)).ToList();
+        // Round-robin distribution across days
+        var result = new Dictionary<int, List<Place>>(prefs.Days);
+        for (int d = 1; d <= prefs.Days; d++) result[d] = new List<Place>();
+        for (int i = 0; i < selected.Count; i++) result[(i % prefs.Days) + 1].Add(selected[i]);
 
-                var eligibleCount = strictEligible.Count;
-                var place = strictEligible.FirstOrDefault();
-                if (place == null)
+        // Best-effort: ensure ≥1 food per day
+        EnsureFoodPerDay(result, eligible, selected, prefs.Days);
+        return result;
+    }
+
+    private static void EnsureFoodPerDay(
+        Dictionary<int, List<Place>> dayPlaces,
+        IEnumerable<Place> eligible,
+        List<Place> alreadySelected,
+        int days)
+    {
+        var usedIds    = alreadySelected.Select(p => p.Id).ToHashSet();
+        var unusedFood = eligible
+            .Where(p => p.Category.Equals("food", StringComparison.OrdinalIgnoreCase) && !usedIds.Contains(p.Id))
+            .ToList();
+
+        for (int day = 1; day <= days; day++)
+        {
+            var places = dayPlaces[day];
+            if (places.Any(p => p.Category.Equals("food", StringComparison.OrdinalIgnoreCase))) continue;
+            if (unusedFood.Count == 0) break;
+
+            var food = unusedFood[0];
+            unusedFood.RemoveAt(0);
+            usedIds.Add(food.Id);
+            if (places.Count > 0)
+                places[^1] = food; // replace lowest-ranked (last) stop
+            else
+                places.Add(food);
+        }
+    }
+
+    // ── Step 3: schedule one day ──────────────────────────────────────────────
+
+    private void ScheduleDay(List<Place> places, ScheduleResult result, int day, Random rng)
+    {
+        var ordered = OrderByGeography(places, rng);
+        AnchorMeals(ordered);       // position food near meal windows first
+        AnchorNightlife(ordered);   // then push nightlife to end (always last)
+        WalkDayClock(ordered, result, day);
+    }
+
+    // ── Geographic ordering ───────────────────────────────────────────────────
+
+    private static List<Place> OrderByGeography(List<Place> places, Random rng)
+    {
+        var withCoords    = places.Where(p => p.Latitude.HasValue && p.Longitude.HasValue).ToList();
+        var withoutCoords = places.Where(p => !p.Latitude.HasValue || !p.Longitude.HasValue).ToList();
+
+        if (withCoords.Count == 0) return places.ToList();
+
+        // Anchor: sample among top 1-3 by rank (variety across seeds)
+        int anchorCandidates = Math.Min(3, withCoords.Count);
+        var anchor           = withCoords[rng.Next(anchorCandidates)];
+
+        var ordered   = new List<Place> { anchor };
+        var remaining = withCoords.Where(p => p.Id != anchor.Id).ToList();
+
+        // Nearest-neighbor greedy; tie-break by Id for determinism
+        while (remaining.Count > 0)
+        {
+            var last    = ordered[^1];
+            double lat1 = (double)last.Latitude!.Value;
+            double lon1 = (double)last.Longitude!.Value;
+
+            var nearest = remaining
+                .OrderBy(p => Haversine(lat1, lon1, (double)p.Latitude!.Value, (double)p.Longitude!.Value))
+                .ThenBy(p => p.Id)
+                .First();
+
+            ordered.Add(nearest);
+            remaining.Remove(nearest);
+        }
+
+        // Places without coords at the end, preserving their relative rank
+        ordered.AddRange(withoutCoords.OrderBy(p => places.IndexOf(p)));
+        return ordered;
+    }
+
+    // ── Nightlife anchoring ───────────────────────────────────────────────────
+
+    private static void AnchorNightlife(List<Place> places)
+    {
+        var nightlife = places
+            .Where(p => p.Category.Equals("nightlife", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (nightlife.Count == 0) return;
+
+        foreach (var nl in nightlife) { places.Remove(nl); places.Add(nl); }
+    }
+
+    // ── Meal anchoring ────────────────────────────────────────────────────────
+
+    private static void AnchorMeals(List<Place> places)
+    {
+        if (places.Count < 2) return;
+        TryAnchorFoodToSlot(places, LunchIdeal,  LunchWinStart,  LunchWinEnd);
+        TryAnchorFoodToSlot(places, DinnerIdeal, DinnerWinStart, DinnerWinEnd);
+    }
+
+    private static void TryAnchorFoodToSlot(
+        List<Place> places, TimeSpan ideal, TimeSpan winStart, TimeSpan winEnd)
+    {
+        var arrivals = SimulateArrivals(places);
+
+        // Only anchor when the day's schedule reaches the target window
+        if (!arrivals.Any(a => a >= winStart && a <= winEnd)) return;
+
+        // Target: position with arrival closest to ideal inside or nearest to the window
+        int targetPos = 0;
+        double bestDist = double.MaxValue;
+        for (int i = 0; i < arrivals.Length; i++)
+        {
+            double dist = Math.Abs((arrivals[i] - ideal).TotalMinutes);
+            if (dist < bestDist) { bestDist = dist; targetPos = i; }
+        }
+
+        // Already food at target → nothing to swap
+        if (places[targetPos].Category.Equals("food", StringComparison.OrdinalIgnoreCase)) return;
+
+        // Find food place nearest by position distance (not nightlife, already at end)
+        int foodIdx  = -1;
+        int minPDist = int.MaxValue;
+        for (int i = 0; i < places.Count; i++)
+        {
+            if (!places[i].Category.Equals("food", StringComparison.OrdinalIgnoreCase)) continue;
+            int d = Math.Abs(i - targetPos);
+            if (d < minPDist) { minPDist = d; foodIdx = i; }
+        }
+        if (foodIdx < 0) return;
+
+        // Simple swap: food place ↔ target place
+        (places[targetPos], places[foodIdx]) = (places[foodIdx], places[targetPos]);
+    }
+
+    // ── Clock walk ────────────────────────────────────────────────────────────
+
+    private void WalkDayClock(List<Place> places, ScheduleResult result, int day)
+    {
+        var clock      = DayStart;
+        bool overpacked = false;
+
+        for (int i = 0; i < places.Count; i++)
+        {
+            var place    = places[i];
+            int duration = VisitDurationFor(place);
+
+            // Accumulate travel from previous stop BEFORE emitting this stop's arrival
+            TravelInfoDto? travelInfo = null;
+            if (i > 0)
+            {
+                var prev = places[i - 1];
+                if (prev.Latitude.HasValue && prev.Longitude.HasValue &&
+                    place.Latitude.HasValue && place.Longitude.HasValue)
                 {
-                    var relaxed = shuffled.FirstOrDefault(p =>
-                        !usedPlaceIds.Contains(p.Id) &&
-                        IsGoodTimeMatch(p, slot.TimeBlock, prefs, strict: false));
-                    if (relaxed != null)
-                    {
-                        _logger.LogWarning(
-                            "Builder: schedule soft fallback day={Day} slot={Slot} strictCount=0 relaxedPick={Place}",
-                            day, slot.TimeBlock, relaxed.Name);
-                        place = relaxed;
-                        if (!result.Warnings.Contains("catalog_relaxed_fallback"))
-                            result.Warnings.Add("catalog_relaxed_fallback");
-                    }
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "Builder: schedule day={Day} slot={Slot} strictEligible={Count} pick={Place}",
-                        day, slot.TimeBlock, eligibleCount, place.Name);
-                }
-
-                if (place == null) continue;
-
-                usedPlaceIds.Add(place.Id);
-
-                TravelInfoDto? travelInfo = null;
-                if (prevLat.HasValue && prevLon.HasValue && place.Latitude.HasValue && place.Longitude.HasValue)
-                {
-                    var dist = Haversine(prevLat.Value, prevLon.Value, (double)place.Latitude.Value, (double)place.Longitude.Value);
-                    var mode = dist < 2 ? "walk" : "drive";
-                    travelInfo = new TravelInfoDto
+                    double dist  = Haversine(
+                        (double)prev.Latitude.Value, (double)prev.Longitude.Value,
+                        (double)place.Latitude.Value, (double)place.Longitude.Value);
+                    string mode  = dist < 2 ? "walk" : "drive";
+                    int travelMin = EstimateTravelTime(dist, mode);
+                    clock        += TimeSpan.FromMinutes(travelMin);
+                    travelInfo   = new TravelInfoDto
                     {
                         distance_km = Math.Round(dist, 1),
-                        duration_min = EstimateTravelTime(dist, mode),
+                        duration_min = travelMin,
                         mode = mode
                     };
                 }
+            }
 
-                stops.Add(new ScheduledStopDto
-                {
-                    PlaceId = place.Id,
-                    DayNumber = day,
-                    OrderIndex = i,
-                    TimeBlock = slot.TimeBlock,
-                    SuggestedArrival = slot.Arrival,
-                    SuggestedDurationMin = slot.Duration,
-                    TravelFromPrevious = travelInfo
-                });
+            if (!overpacked && clock > DaySoftCap)
+            {
+                AddWarningOnce(result.Warnings, "day_overpacked");
+                overpacked = true;
+            }
 
-                if (place.Latitude.HasValue && place.Longitude.HasValue)
+            int h       = Math.Min((int)Math.Floor(clock.TotalHours), 23);
+            int m       = h < 23 ? clock.Minutes : 59;
+            string arrival = $"{h:D2}:{m:D2}";
+
+            _logger.LogInformation(
+                "Builder: schedule day={Day} stop={I} place={Place} arrival={Arrival} block={Block} dur={Dur}",
+                day, i, place.Name, arrival, DeriveTimeBlock(clock), duration);
+
+            result.Stops.Add(new ScheduledStopDto
+            {
+                PlaceId             = place.Id,
+                DayNumber           = day,
+                OrderIndex          = i,
+                TimeBlock           = DeriveTimeBlock(clock),
+                SuggestedArrival    = arrival,
+                SuggestedDurationMin = duration,
+                TravelFromPrevious  = travelInfo
+            });
+
+            clock += TimeSpan.FromMinutes(duration);
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static string DeriveTimeBlock(TimeSpan clock)
+    {
+        double h = clock.TotalHours;
+        if (h < 11)   return "morning";
+        if (h < 14.5) return "lunch";
+        if (h < 17.5) return "afternoon";
+        if (h < 21)   return "dinner";
+        return "evening";
+    }
+
+    private static int VisitDurationFor(Place p) =>
+        p.VisitDurationMin ?? CategoryDurationMin.GetValueOrDefault(p.Category, DefaultDurationMin);
+
+    private static TimeSpan[] SimulateArrivals(List<Place> places)
+    {
+        var arrivals = new TimeSpan[places.Count];
+        var clock    = DayStart;
+        for (int i = 0; i < places.Count; i++)
+        {
+            arrivals[i] = clock;
+            int duration = VisitDurationFor(places[i]);
+            if (i < places.Count - 1)
+            {
+                var cur  = places[i];
+                var next = places[i + 1];
+                if (cur.Latitude.HasValue && cur.Longitude.HasValue &&
+                    next.Latitude.HasValue && next.Longitude.HasValue)
                 {
-                    prevLat = (double)place.Latitude.Value;
-                    prevLon = (double)place.Longitude.Value;
+                    double dist  = Haversine(
+                        (double)cur.Latitude.Value, (double)cur.Longitude.Value,
+                        (double)next.Latitude.Value, (double)next.Longitude.Value);
+                    string mode  = dist < 2 ? "walk" : "drive";
+                    duration    += EstimateTravelTime(dist, mode);
                 }
             }
+            clock += TimeSpan.FromMinutes(duration);
         }
-
-        return result;
+        return arrivals;
     }
+
+    private static void AddWarningOnce(List<string> warnings, string w)
+    {
+        if (!warnings.Contains(w)) warnings.Add(w);
+    }
+
+    // ── Legacy helpers (kept for existing tests and callers) ──────────────────
 
     internal List<Place> ApplyRefinements(List<Place> places, ExtractedPreferences prefs, ScheduleResult result)
     {
         var current = places;
 
-        // Exclusions — filter out categories the user wants to avoid
+        // Exclusions
         var exclusions = prefs.Exclusions;
         if (exclusions != null && exclusions.Count > 0)
         {
@@ -197,7 +437,7 @@ public class SchedulingService
         }
 
         // Dietary — soft filter: places with SuitableFor data must match;
-        // places without SuitableFor data are always included (no-info = safe to include).
+        // places without SuitableFor are always included (no info = safe to include).
         var dietary = prefs.Dietary;
         if (dietary != null && dietary.Count > 0 &&
             !dietary.Contains("none", StringComparer.OrdinalIgnoreCase))
@@ -283,13 +523,13 @@ public class SchedulingService
 
     private static double Haversine(double lat1, double lon1, double lat2, double lon2)
     {
-        const double R = 6371;
-        var dLat = ToRad(lat2 - lat1);
-        var dLon = ToRad(lon2 - lon1);
-        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
-                Math.Cos(ToRad(lat1)) * Math.Cos(ToRad(lat2)) *
-                Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
-        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        const double R  = 6371;
+        var dLat        = ToRad(lat2 - lat1);
+        var dLon        = ToRad(lon2 - lon1);
+        var a           = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                          Math.Cos(ToRad(lat1)) * Math.Cos(ToRad(lat2)) *
+                          Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        var c           = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
         return R * c;
     }
 
