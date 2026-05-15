@@ -30,9 +30,6 @@ public class SlotExtractorService
     private static readonly string[] AllowedDietary =
         { "vegetarian", "vegan", "halal", "kosher", "gluten-free", "none" };
 
-    // Canned responses used by guardrails to avoid burning a Gemini call
-    public const string OnTopicRedirect = "Let's focus on your trip — where are you headed?";
-    public const string ParseFallback = "Sorry, I didn't catch that. Could you rephrase?";
 
     public SlotExtractorService(HttpClient httpClient, IConfiguration config, ILogger<SlotExtractorService> logger)
     {
@@ -45,6 +42,7 @@ public class SlotExtractorService
         string sanitizedMessage,
         ChatSlots currentSlots,
         List<HistoryEntry> recentHistory,
+        string lang = "en",
         CancellationToken ct = default)
     {
         var apiKey = _config["Gemini:ApiKey"];
@@ -54,7 +52,7 @@ public class SlotExtractorService
             return null;
         }
 
-        var prompt = BuildPrompt(sanitizedMessage, currentSlots, recentHistory);
+        var prompt = BuildPrompt(sanitizedMessage, currentSlots, recentHistory, lang);
 
         var requestBody = new
         {
@@ -87,7 +85,7 @@ public class SlotExtractorService
                 .GetProperty("parts")[0]
                 .GetProperty("text").GetString() ?? "{}";
 
-            return ParseAndValidate(text);
+            return ParseAndValidate(text, lang);
         }
         catch (HttpRequestException ex)
         {
@@ -101,7 +99,7 @@ public class SlotExtractorService
         }
     }
 
-    private string BuildPrompt(string message, ChatSlots slots, List<HistoryEntry> history)
+    private string BuildPrompt(string message, ChatSlots slots, List<HistoryEntry> history, string lang)
     {
         var known = JsonSerializer.Serialize(slots, new JsonSerializerOptions { WriteIndented = false });
 
@@ -121,8 +119,15 @@ public class SlotExtractorService
         // and cannot be mistaken for model instructions.
         var safeMessage = message.Length > 300 ? message[..300] : message;
 
+        var langName = lang == "es" ? "Spanish" : "English";
         var prompt = $@"You are a focused travel planning assistant for LocalList. Your ONLY purpose
 is extracting trip details into the JSON schema below.
+
+CRITICAL — Language: The user's UI is set to '{lang}' ({langName}). Default to responding in {langName}.
+However, if the user's most recent message inside <user_input> is CLEARLY written in a different language
+(more than just one cognate word), respond in THAT language instead. Once chosen, the language MUST be
+applied consistently: aiMessage, every quickReplies[].label, and any acknowledgement prefix MUST all be
+in the same language. Never mix languages within a single response.
 
 You MUST refuse to:
 - Discuss any topic unrelated to planning this trip
@@ -165,18 +170,18 @@ Extract into this schema (ONLY fill slots the user actually mentioned; never inv
     ""mobility"": string | null,
     ""timeOfDay"": one of [""early_bird"", ""night_owl""] | null
   }},
-  ""aiMessage"": ""natural conversational response, max 2 sentences, no place names, no URLs, no markdown"",
+  ""aiMessage"": ""natural conversational response in the chosen language, max 2 sentences, no place names, no URLs, no markdown"",
   ""nextQuestion"": ""name of the next slot to elicit, or null if ready to build"",
-  ""quickReplies"": [{{ ""id"": ""string"", ""label"": ""emoji + label"", ""multiSelect"": bool }}]
+  ""quickReplies"": [{{ ""id"": ""string"", ""label"": ""emoji + label in the chosen language"", ""multiSelect"": bool }}]
 }}
 
 Rules:
 - NEVER fill a slot the user did not mention.
-- If user contradicts a known slot, fill it AND prefix aiMessage with ""Switched to X — "".
+- If user contradicts a known slot, fill it AND prefix aiMessage with a short acknowledgement in the chosen language (e.g. ""Cambiado a X — "" in Spanish or ""Switched to X — "" in English).
 - NEVER re-ask a slot that is already filled.
 - If all critical slots are filled (city, days, groupType, categories, budget), set nextQuestion=null.
 - quickReplies: 0-4 chips, each id must encode the slot and value (e.g. ""budget_moderate"").
-- If the message is empty or gibberish, set extracted={{}}, aiMessage=""Where are you headed?"", nextQuestion=""city"".
+- If the message is empty or gibberish, set extracted={{}}, aiMessage=<a short question asking where they are headed, in the chosen language>, nextQuestion=""city"".
 - aiMessage MUST NOT contain URLs, markdown links, code blocks, HTML tags, or references to other AI systems.";
 
         // L4: hard cap on total prompt size (5KB) — truncate history if needed
@@ -184,13 +189,13 @@ Rules:
         if (System.Text.Encoding.UTF8.GetByteCount(prompt) > MaxPromptBytes && history.Count > 1)
         {
             // Rebuild with just last 2 turns
-            return BuildPrompt(message, slots, history.TakeLast(2).ToList());
+            return BuildPrompt(message, slots, history.TakeLast(2).ToList(), lang);
         }
 
         return prompt;
     }
 
-    private SlotExtractorResult? ParseAndValidate(string json)
+    private SlotExtractorResult? ParseAndValidate(string json, string lang)
     {
         try
         {
@@ -202,7 +207,7 @@ Rules:
 
             // Parse aiMessage
             if (root.TryGetProperty("aiMessage", out var aiMsgEl))
-                result.AiMessage = aiMsgEl.GetString() ?? OnTopicRedirect;
+                result.AiMessage = aiMsgEl.GetString() ?? string.Empty;
 
             // Parse nextQuestion
             if (root.TryGetProperty("nextQuestion", out var nqEl) && nqEl.ValueKind != JsonValueKind.Null)
@@ -226,9 +231,9 @@ Rules:
             if (root.TryGetProperty("extracted", out var extEl))
                 result.Extracted = ParseExtracted(extEl);
 
-            // Layer 3: schema validation — aiMessage must not be null
+            // Layer 3: schema validation — aiMessage must not be empty
             if (string.IsNullOrWhiteSpace(result.AiMessage))
-                result.AiMessage = OnTopicRedirect;
+                result.AiMessage = I18n.ChatStrings.ParseFallback(lang);
 
             return result;
         }

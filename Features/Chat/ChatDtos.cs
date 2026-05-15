@@ -57,6 +57,7 @@ public class ChatTurnResponse
     public List<string> MissingCritical { get; set; } = new();
     public List<ChatQuickReply> QuickReplies { get; set; } = new();
     public bool Ready { get; set; }
+    public bool Quarantined { get; set; }
     public int TurnCount { get; set; }
     public int TurnLimit { get; set; } = 6;
 }

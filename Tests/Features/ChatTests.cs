@@ -359,6 +359,88 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         Assert.Equal(Miami, cityEl.GetString());
     }
 
+    // ── Localización (ES) ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Turn_SpanishLocale_PreSeededCity_GreetingInSpanish()
+    {
+        var db = fixture.GetDbContext();
+        if (!await db.Cities.AnyAsync(c => c.NormalizedName == "miami"))
+        {
+            db.Cities.Add(new LocalList.API.NET.Shared.Data.Entities.City
+            {
+                Name = Miami, NormalizedName = "miami", Source = "seed"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = fixture.CreateClient();
+        client.DefaultRequestHeaders.Add("Accept-Language", "es");
+
+        var res = await client.PostAsJsonAsync("/chat/turn", new
+        {
+            preSeededSlots = new { city = Miami }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        var aiMsg = body.GetProperty("aiMessage").GetString();
+        Assert.NotNull(aiMsg);
+        // Spanish greeting must contain the city and be different from English default
+        Assert.Contains(Miami, aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("let's plan", aiMsg, StringComparison.OrdinalIgnoreCase);
+        // Quick reply labels must be in Spanish
+        var qr = body.GetProperty("quickReplies");
+        Assert.True(qr.GetArrayLength() > 0);
+        var firstLabel = qr[0].GetProperty("label").GetString();
+        Assert.Contains("día", firstLabel, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Turn_SpanishLocale_GeminiFailure_ParseFallbackInSpanish()
+    {
+        // Force Gemini to return a non-JSON response → triggers ParseFallback
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.InternalServerError);
+
+        var client = fixture.CreateClient();
+        client.DefaultRequestHeaders.Add("Accept-Language", "es");
+
+        var res = await client.PostAsJsonAsync("/chat/turn", new { message = "Hola" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        var aiMsg = body.GetProperty("aiMessage").GetString();
+        Assert.NotNull(aiMsg);
+        // Spanish fallback must not be the English default
+        Assert.DoesNotContain("Sorry", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("didn't catch", aiMsg, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Turn_QuarantinedSession_ReturnsQuarantinedFlag()
+    {
+        var db = fixture.GetDbContext();
+        var session = new ChatSession
+        {
+            Status = "quarantined",
+            TurnCount = 3,
+            SlotsJson = "{}"
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new
+        {
+            sessionId = session.Id,
+            message = "hello"
+        });
+
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("quarantined").GetBoolean());
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private async Task<ChatSession> CreateReadySession()
