@@ -351,6 +351,7 @@ public class AdminPlacesController : ControllerBase
                 Photos = details.Photos.Count > 0 ? details.Photos : null,
                 Source = request.Source,
                 Status = request.DefaultStatus,
+                OpeningHours = details.OpeningHours,
             });
 
             rows.Add(new ImportRowResult(rawUrl, details.Id, details.Name, "pending", null));
@@ -609,6 +610,59 @@ public class AdminPlacesController : ControllerBase
         return Ok(new { reindexed = tracked.Count, failed = 0, total = tracked.Count });
     }
 
+    [HttpPost("backfill-opening-hours")]
+    public async Task<IActionResult> BackfillOpeningHours(
+        [FromQuery] bool onlyMissing = true,
+        [FromQuery] int limit = 100,
+        CancellationToken ct = default)
+    {
+        limit = Math.Clamp(limit, 1, 500);
+
+        var query = _db.Places.Where(p => p.GooglePlaceId != null);
+        if (onlyMissing) query = query.Where(p => p.OpeningHours == null);
+
+        var places = await query
+            .OrderBy(p => p.CreatedAt)
+            .Take(limit)
+            .ToListAsync(ct);
+
+        if (places.Count == 0)
+            return Ok(new { backfilled = 0, failed = 0, skipped = 0, total = 0 });
+
+        int backfilled = 0, failed = 0;
+        var now = _clock.GetUtcNow();
+
+        foreach (var chunk in places.Chunk(10))
+        {
+            foreach (var place in chunk)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                var details = await _googlePlaces.GetDetailsAsync(place.GooglePlaceId!, ct);
+                if (details?.OpeningHours is null) { failed++; continue; }
+
+                place.OpeningHours = details.OpeningHours.ToJsonDocument();
+                place.UpdatedAt = now;
+                backfilled++;
+            }
+
+            if (!ct.IsCancellationRequested)
+                await _db.SaveChangesAsync(ct);
+        }
+
+        _logger.LogInformation(
+            "backfill-opening-hours: backfilled={B} failed={F} total={T} onlyMissing={M}",
+            backfilled, failed, places.Count, onlyMissing);
+
+        return Ok(new
+        {
+            backfilled,
+            failed,
+            skipped = places.Count - backfilled - failed,
+            total = places.Count
+        });
+    }
+
     [HttpPost("{id}/translate")]
     public async Task<IActionResult> TranslatePlace(Guid id, CancellationToken ct)
     {
@@ -702,6 +756,7 @@ public class AdminPlacesController : ControllerBase
                 Status = req.Status?.Trim() ?? "in_review",
                 AiVibeScore = req.AiVibeScore,
                 VisitDurationMin = req.VisitDurationMin,
+                OpeningHours = req.OpeningHours?.ToJsonDocument(),
                 Flags = req.Flags,
                 SubmittedById = userId,
                 CreatedAt = now,
