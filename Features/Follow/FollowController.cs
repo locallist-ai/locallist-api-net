@@ -52,6 +52,12 @@ public class FollowController : ControllerBase
         _db.FollowSessions.Add(session);
         await _db.SaveChangesAsync(ct);
 
+        await _db.PlanMetrics
+            .Where(m => m.PlanId == request.PlanId && !m.WasFollowed)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.WasFollowed, true)
+                .SetProperty(m => m.FollowedAt, DateTimeOffset.UtcNow), ct);
+
         _logger.LogInformation("Follow session started: {SessionId} for plan {PlanId} by user {UserId}", session.Id, request.PlanId, userId.Value);
 
         _ = _posthog.CaptureAsync(userId.Value.ToString(), "follow_started", new()
