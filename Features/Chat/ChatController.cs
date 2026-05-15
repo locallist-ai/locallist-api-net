@@ -68,6 +68,7 @@ public class ChatController : ControllerBase
         var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
         Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
         var rawIp = HttpContext.Connection.RemoteIpAddress?.ToString();
+        var lang = LanguageAccessor.ResolveRequestLanguage(Request);
 
         var response = await _agent.ProcessTurnAsync(
             request.SessionId,
@@ -76,10 +77,10 @@ public class ChatController : ControllerBase
             request.PreSeededSlots,
             userId,
             rawIp,
+            lang,
             ct);
 
-        // 403 = quarantined session
-        if (response.AiMessage.Contains("reset for safety", StringComparison.OrdinalIgnoreCase))
+        if (response.Quarantined)
             return StatusCode(403, response);
 
         return Ok(response);

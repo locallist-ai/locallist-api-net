@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.PostHog;
@@ -90,6 +91,7 @@ public class ChatAgentService
         PreSeededSlots? preSeededSlots,
         Guid? userId,
         string? rawIp,
+        string lang = "en",
         CancellationToken ct = default)
     {
         var ipHash = HashIp(rawIp);
@@ -98,7 +100,7 @@ public class ChatAgentService
 
         // If already quarantined, refuse immediately
         if (session.Status == "quarantined")
-            return BuildQuarantineResponse(session, DeserializeSlots(session.SlotsJson));
+            return BuildQuarantineResponse(session, DeserializeSlots(session.SlotsJson), lang);
 
         var slots = DeserializeSlots(session.SlotsJson);
         var history = DeserializeHistory(session.HistoryJson);
@@ -118,18 +120,11 @@ public class ChatAgentService
             if (string.IsNullOrWhiteSpace(rawMessage) && string.IsNullOrWhiteSpace(quickReplyId))
             {
                 var greeting = string.IsNullOrEmpty(slots.City)
-                    ? "What city are you visiting?"
-                    : $"Great — let's plan your {slots.City} trip! How many days?";
-                var greetingReplies = new List<ChatQuickReply>
-                {
-                    new() { Id = "days_1", Label = "1 day" },
-                    new() { Id = "days_2", Label = "2 days" },
-                    new() { Id = "days_3", Label = "3 days" },
-                    new() { Id = "days_4", Label = "4 days" },
-                    new() { Id = "days_7", Label = "1 week" },
-                };
+                    ? ChatStrings.GreetingNoCity(lang)
+                    : ChatStrings.GreetingWithCity(lang, slots.City);
+                var greetingReplies = ChatStrings.GreetingDayChips(lang);
                 history.Add(new HistoryEntry { Role = "assistant", Content = greeting, Timestamp = DateTimeOffset.UtcNow });
-                return await BuildResponseAsync(session, slots, history, suspicion, greeting, ct,
+                return await BuildResponseAsync(session, slots, history, suspicion, greeting, lang, ct,
                     geminiQuickReplies: greetingReplies);
             }
         }
@@ -145,7 +140,7 @@ public class ChatAgentService
                 return new ChatTurnResponse
                 {
                     SessionId = session.Id,
-                    AiMessage = "Please select one of the available options.",
+                    AiMessage = ChatStrings.ChipForgeryReject(lang),
                     Slots = slots,
                     MissingCritical = GetMissingCritical(slots),
                     QuickReplies = new(),
@@ -157,7 +152,7 @@ public class ChatAgentService
 
             if (QuickReplyMap.TryGetValue(quickReplyId, out var chipSlots))
             {
-                MergeSlots(slots, chipSlots, acknowledge: false, out _);
+                MergeSlots(slots, chipSlots, acknowledge: false, lang, out _);
                 _logger.LogInformation("Chat: quickReply={Id} sessionId={Session}", quickReplyId, session.Id);
                 history.Add(new HistoryEntry
                 {
@@ -166,7 +161,7 @@ public class ChatAgentService
                     Timestamp = DateTimeOffset.UtcNow
                 });
                 suspicion.RecordCleanTurn();
-                return await BuildResponseAsync(session, slots, history, suspicion, aiMessage: null, ct);
+                return await BuildResponseAsync(session, slots, history, suspicion, aiMessage: null, lang, ct);
             }
         }
 
@@ -183,15 +178,15 @@ public class ChatAgentService
             _secLog.InjectionDetected(session.Id, suspicion.LastTrigger ?? "unknown", suspicion.Score);
 
             if (suspicion.ShouldQuarantine)
-                return await QuarantineSessionAsync(session, slots, suspicion, ct, "injection");
+                return await QuarantineSessionAsync(session, slots, suspicion, lang, ct, "injection");
 
             session.SuspicionJson = JsonSerializer.Serialize(suspicion);
             _db.Update(session);
             await _db.SaveChangesAsync(ct);
 
             return BuildCannedResponse(session, slots,
-                "I can only help plan your trip. Where are you headed?",
-                nextSlot: MostUrgentMissing(slots));
+                ChatStrings.InjectionRedirect(lang),
+                nextSlot: MostUrgentMissing(slots), lang);
         }
 
         if (JailbreakPatternLibrary.IsOffTopic(messageForDetection))
@@ -204,8 +199,8 @@ public class ChatAgentService
             await _db.SaveChangesAsync(ct);
 
             return BuildCannedResponse(session, slots,
-                $"Let's focus on your trip — {NextSlotQuestion(slots)}",
-                nextSlot: MostUrgentMissing(slots));
+                ChatStrings.OffTopicRedirect(lang, NextSlotQuestion(slots, lang)),
+                nextSlot: MostUrgentMissing(slots), lang);
         }
 
         history.Add(new HistoryEntry { Role = "user", Content = message, Timestamp = DateTimeOffset.UtcNow });
@@ -215,7 +210,7 @@ public class ChatAgentService
         {
             _logger.LogInformation("Chat: turn cap reached sessionId={Session}", session.Id);
             return await BuildResponseAsync(session, slots, history, suspicion,
-                aiMessage: "Ready to build your plan!", ct);
+                aiMessage: ChatStrings.ReadyToBuild(lang), lang, ct);
         }
 
         // L3 suspicion: if score ≥ 50, skip Gemini to avoid burning tokens on adversarial sessions
@@ -224,19 +219,19 @@ public class ChatAgentService
 
         if (suspicion.ShouldSuppressGemini)
         {
-            aiMessage = $"Let's focus on your trip — {NextSlotQuestion(slots)}";
+            aiMessage = ChatStrings.OffTopicRedirect(lang, NextSlotQuestion(slots, lang));
         }
         else
         {
-            extracted = await _extractor.ExtractAsync(message, slots, history, ct);
+            extracted = await _extractor.ExtractAsync(message, slots, history, lang, ct);
 
             if (extracted == null)
             {
-                aiMessage = SlotExtractorService.ParseFallback;
+                aiMessage = ChatStrings.ParseFallback(lang);
             }
             else
             {
-                bool hasContradiction = MergeSlots(slots, extracted.Extracted, acknowledge: true, out string? ackPrefix);
+                bool hasContradiction = MergeSlots(slots, extracted.Extracted, acknowledge: true, lang, out string? ackPrefix);
 
                 // L5: validate output
                 var drift = OutputValidator.Inspect(extracted.AiMessage);
@@ -244,13 +239,13 @@ public class ChatAgentService
                 {
                     suspicion.RecordCanaryLeak();
                     _secLog.CanaryLeak(session.Id);
-                    return await QuarantineSessionAsync(session, slots, suspicion, ct, "canary_leak");
+                    return await QuarantineSessionAsync(session, slots, suspicion, lang, ct, "canary_leak");
                 }
                 else if (drift != OutputValidator.DriftKind.None)
                 {
                     suspicion.RecordDrift(drift.ToString());
                     _secLog.DriftDetected(session.Id, drift.ToString(), suspicion.Score);
-                    aiMessage = $"Got it! {NextSlotQuestion(slots)}";
+                    aiMessage = ChatStrings.GotItPrefix(lang, NextSlotQuestion(slots, lang));
                 }
                 else
                 {
@@ -264,7 +259,7 @@ public class ChatAgentService
         suspicion.RecordCleanTurn();
         history.Add(new HistoryEntry { Role = "assistant", Content = aiMessage, Timestamp = DateTimeOffset.UtcNow });
 
-        return await BuildResponseAsync(session, slots, history, suspicion, aiMessage, ct,
+        return await BuildResponseAsync(session, slots, history, suspicion, aiMessage, lang, ct,
             geminiQuickReplies: extracted?.QuickReplies);
     }
 
@@ -276,6 +271,7 @@ public class ChatAgentService
         List<HistoryEntry> history,
         SuspicionTracker suspicion,
         string? aiMessage,
+        string lang,
         CancellationToken ct,
         List<ChatQuickReply>? geminiQuickReplies = null)
     {
@@ -286,18 +282,18 @@ public class ChatAgentService
 
         if (ready && !AreAllTier2Filled(slots) && quickReplies.Count == 0)
         {
-            (aiMessage, quickReplies) = BuildTier2Question(slots);
+            (aiMessage, quickReplies) = BuildTier2Question(slots, lang);
             ready = false;
         }
         else if (ready && quickReplies.Count == 0)
         {
-            aiMessage ??= "Ready to build your plan!";
+            aiMessage ??= ChatStrings.ReadyToBuild(lang);
         }
 
         if (session.TurnCount + 1 >= TurnLimit) ready = true;
 
         // L6: sanitize aiMessage before persisting and returning
-        aiMessage = OutputSanitizer.Sanitize(aiMessage ?? "What city are you visiting?");
+        aiMessage = OutputSanitizer.Sanitize(aiMessage ?? ChatStrings.GreetingNoCity(lang));
 
         var wasAlreadyReady = session.Status == "ready";
         session.TurnCount++;
@@ -343,7 +339,7 @@ public class ChatAgentService
     }
 
     private ChatTurnResponse BuildCannedResponse(
-        ChatSession session, ChatSlots slots, string message, string? nextSlot)
+        ChatSession session, ChatSlots slots, string message, string? nextSlot, string lang = "en")
     {
         return new ChatTurnResponse
         {
@@ -351,23 +347,24 @@ public class ChatAgentService
             AiMessage = OutputSanitizer.Sanitize(message),
             Slots = slots,
             MissingCritical = GetMissingCritical(slots),
-            QuickReplies = nextSlot != null ? QuickRepliesForSlot(nextSlot) : new(),
+            QuickReplies = nextSlot != null ? QuickRepliesForSlot(nextSlot, lang) : new(),
             Ready = false,
             TurnCount = session.TurnCount,
             TurnLimit = TurnLimit
         };
     }
 
-    private ChatTurnResponse BuildQuarantineResponse(ChatSession session, ChatSlots slots)
+    private ChatTurnResponse BuildQuarantineResponse(ChatSession session, ChatSlots slots, string lang = "en")
     {
         return new ChatTurnResponse
         {
             SessionId = session.Id,
-            AiMessage = "This conversation was reset for safety. Please try the wizard instead.",
+            AiMessage = ChatStrings.Quarantine(lang),
             Slots = slots,
             MissingCritical = GetMissingCritical(slots),
             QuickReplies = new(),
             Ready = false,
+            Quarantined = true,
             TurnCount = session.TurnCount,
             TurnLimit = TurnLimit
         };
@@ -375,7 +372,7 @@ public class ChatAgentService
 
     private async Task<ChatTurnResponse> QuarantineSessionAsync(
         ChatSession session, ChatSlots slots, SuspicionTracker suspicion,
-        CancellationToken ct, string reason)
+        string lang, CancellationToken ct, string reason)
     {
         suspicion.LastTrigger = reason;
         _secLog.Quarantined(session.Id, reason, suspicion.Score);
@@ -385,7 +382,7 @@ public class ChatAgentService
         _db.Update(session);
         await _db.SaveChangesAsync(ct);
 
-        return BuildQuarantineResponse(session, slots);
+        return BuildQuarantineResponse(session, slots, lang);
     }
 
     private async Task<ChatSession> LoadOrCreateSessionAsync(
@@ -396,7 +393,7 @@ public class ChatAgentService
             var existing = await _db.ChatSessions
                 .FirstOrDefaultAsync(s => s.Id == sessionId.Value, ct);
 
-            if (existing != null && existing.Status is "active" or "ready")
+            if (existing != null && existing.Status is "active" or "ready" or "quarantined")
             {
                 // L3: anon session ownership — verify IP hasn't changed
                 if (existing.UserId == null && ipHash != null &&
@@ -500,7 +497,7 @@ public class ChatAgentService
 
     /// <summary>Merges new slot values into current slots. Returns true if any slot was contradicted.</summary>
     private static bool MergeSlots(ChatSlots current, ChatSlots incoming, bool acknowledge,
-        out string? ackPrefix)
+        string lang, out string? ackPrefix)
     {
         ackPrefix = null;
         bool contradiction = false;
@@ -508,19 +505,19 @@ public class ChatAgentService
         if (incoming.City != null)
         {
             if (acknowledge && current.City != null && !current.City.Equals(incoming.City, StringComparison.OrdinalIgnoreCase))
-            { contradiction = true; ackPrefix = $"Switched city to {incoming.City}."; }
+            { contradiction = true; ackPrefix = ChatStrings.SwitchedCity(lang, incoming.City); }
             current.City = incoming.City;
         }
         if (incoming.Days.HasValue)
         {
             if (acknowledge && current.Days.HasValue && current.Days != incoming.Days)
-            { contradiction = true; ackPrefix = $"Switched to {incoming.Days} days."; }
+            { contradiction = true; ackPrefix = ChatStrings.SwitchedDays(lang, incoming.Days.Value); }
             current.Days = incoming.Days;
         }
         if (incoming.GroupType != null)
         {
             if (acknowledge && current.GroupType != null && current.GroupType != incoming.GroupType)
-            { contradiction = true; ackPrefix = $"Switched to {incoming.GroupType}."; }
+            { contradiction = true; ackPrefix = ChatStrings.SwitchedGroupType(lang, incoming.GroupType); }
             current.GroupType = incoming.GroupType;
         }
         if (incoming.Categories.Count > 0)
@@ -532,7 +529,7 @@ public class ChatAgentService
         if (incoming.Budget != null)
         {
             if (acknowledge && current.Budget != null && current.Budget != incoming.Budget)
-            { contradiction = true; ackPrefix = $"Switched budget to {incoming.Budget}."; }
+            { contradiction = true; ackPrefix = ChatStrings.SwitchedBudget(lang, incoming.Budget); }
             current.Budget = incoming.Budget;
         }
         if (incoming.Pace != null) current.Pace = incoming.Pace;
@@ -565,18 +562,8 @@ public class ChatAgentService
     private static bool AreAllTier2Filled(ChatSlots slots)
         => slots.Pace != null && slots.Dietary.Count > 0 && slots.VibesPrimary != null;
 
-    private static (string aiMessage, List<ChatQuickReply> chips) BuildTier2Question(ChatSlots slots)
-    {
-        var msg = "One last touch — any dietary restrictions, and what pace?";
-        var chips = new List<ChatQuickReply>
-        {
-            new() { Id = "diet_vegetarian", Label = "🥗 Vegetarian" },
-            new() { Id = "diet_none", Label = "✅ No restrictions" },
-            new() { Id = "pace_slow", Label = "🐢 Slow pace" },
-            new() { Id = "skip_refinements", Label = "⏭️ Skip" },
-        };
-        return (msg, chips);
-    }
+    private static (string aiMessage, List<ChatQuickReply> chips) BuildTier2Question(ChatSlots slots, string lang)
+        => (ChatStrings.Tier2Question(lang), ChatStrings.Tier2Chips(lang));
 
     private static string? MostUrgentMissing(ChatSlots slots)
     {
@@ -588,44 +575,11 @@ public class ChatAgentService
         return null;
     }
 
-    private static string NextSlotQuestion(ChatSlots slots)
-    {
-        var urgent = MostUrgentMissing(slots);
-        return urgent switch
-        {
-            "city"      => "Where are you headed?",
-            "days"      => "How many days?",
-            "groupType" => "Who are you travelling with?",
-            "categories"=> "What do you enjoy? (food, culture, outdoors...)",
-            "budget"    => "What's your budget vibe?",
-            _           => "Ready to build!"
-        };
-    }
+    private static string NextSlotQuestion(ChatSlots slots, string lang)
+        => ChatStrings.NextSlotQuestion(MostUrgentMissing(slots) ?? string.Empty, lang);
 
-    private static List<ChatQuickReply> QuickRepliesForSlot(string slot) => slot switch
-    {
-        "budget" => new List<ChatQuickReply>
-        {
-            new() { Id = "budget_budget",   Label = "💸 Tight" },
-            new() { Id = "budget_moderate", Label = "🍽️ Comfortable" },
-            new() { Id = "budget_premium",  Label = "✨ Splurge" },
-        },
-        "groupType" => new List<ChatQuickReply>
-        {
-            new() { Id = "group_solo",    Label = "🧍 Solo" },
-            new() { Id = "group_couple",  Label = "👫 Couple" },
-            new() { Id = "group_friends", Label = "👯 Friends" },
-            new() { Id = "group_family",  Label = "👨‍👩‍👧 Family" },
-        },
-        "days" => new List<ChatQuickReply>
-        {
-            new() { Id = "days_1", Label = "1 day" },
-            new() { Id = "days_2", Label = "2 days" },
-            new() { Id = "days_3", Label = "3 days" },
-            new() { Id = "days_4", Label = "4+ days" },
-        },
-        _ => new()
-    };
+    private static List<ChatQuickReply> QuickRepliesForSlot(string slot, string lang)
+        => ChatStrings.QuickRepliesForSlot(slot, lang);
 
     // ── Generate-flow helpers (used by ChatController.Generate) ──────────────
 

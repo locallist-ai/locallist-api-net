@@ -1,5 +1,6 @@
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Chat;
+using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Features.Chat.Services;
 
 namespace LocalList.API.Tests.Unit;
@@ -260,5 +261,57 @@ public class ChatAgentServiceTests
         if (slots.Categories.Count == 0) missing.Add("categories");
         if (string.IsNullOrWhiteSpace(slots.Budget)) missing.Add("budget");
         return missing;
+    }
+
+    // ── ChatStrings localización ──
+
+    [Theory]
+    [InlineData("en")]
+    [InlineData("es")]
+    [InlineData("fr")]  // unknown lang → EN fallback
+    public void ChatStrings_ParseFallback_ReturnsNonEmpty(string lang)
+    {
+        var msg = ChatStrings.ParseFallback(lang);
+        Assert.False(string.IsNullOrWhiteSpace(msg));
+    }
+
+    [Fact]
+    public void ChatStrings_ParseFallback_SpanishNotEnglish()
+    {
+        var en = ChatStrings.ParseFallback("en");
+        var es = ChatStrings.ParseFallback("es");
+        Assert.NotEqual(en, es);
+        Assert.DoesNotContain("Sorry", es, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ChatStrings_AllCannedStrings_SpanishDiffersFromEnglish()
+    {
+        Assert.NotEqual(ChatStrings.GreetingNoCity("en"),       ChatStrings.GreetingNoCity("es"));
+        Assert.NotEqual(ChatStrings.ReadyToBuild("en"),         ChatStrings.ReadyToBuild("es"));
+        Assert.NotEqual(ChatStrings.InjectionRedirect("en"),    ChatStrings.InjectionRedirect("es"));
+        Assert.NotEqual(ChatStrings.ChipForgeryReject("en"),    ChatStrings.ChipForgeryReject("es"));
+        Assert.NotEqual(ChatStrings.Quarantine("en"),           ChatStrings.Quarantine("es"));
+        Assert.NotEqual(ChatStrings.Tier2Question("en"),        ChatStrings.Tier2Question("es"));
+    }
+
+    [Fact]
+    public void ChatStrings_QuickRepliesForSlot_SpanishDaysLabelsDiffer()
+    {
+        var en = ChatStrings.QuickRepliesForSlot("days", "en");
+        var es = ChatStrings.QuickRepliesForSlot("days", "es");
+        Assert.Equal(en.Count, es.Count);
+        // IDs must be the same (backend-side semantics unchanged)
+        for (int i = 0; i < en.Count; i++)
+            Assert.Equal(en[i].Id, es[i].Id);
+        // Labels must differ
+        Assert.NotEqual(en[0].Label, es[0].Label);
+    }
+
+    [Fact]
+    public void ChatStrings_UnknownLang_FallsBackToEnglish()
+    {
+        Assert.Equal(ChatStrings.ParseFallback("en"), ChatStrings.ParseFallback("pt"));
+        Assert.Equal(ChatStrings.ReadyToBuild("en"),  ChatStrings.ReadyToBuild("zh"));
     }
 }
