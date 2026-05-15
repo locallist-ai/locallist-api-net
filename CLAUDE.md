@@ -1,6 +1,6 @@
 # LocalList.API.NET
 
-Parent context: see `../LocalList/CLAUDE.md` for brand, domain concepts, and conventions.
+Parent context: see `../CLAUDE.md` for brand, domain concepts, and conventions.
 
 When the user says "backend", "api", "net", ".net", or "c#", they mean this active project (`LocalList.API.NET`).
 
@@ -30,13 +30,13 @@ Required User Secrets / Environment Variables:
 
 **Gemini (Builder + RAG embeddings)**
 - `Gemini__ApiKey`
-- `Gemini__EmbeddingModel` — por defecto `text-embedding-004` (768 dims). Se usa en `EmbeddingService` (RAG Fase 1) y en el pipeline de import reels (Fase 3).
+- `Gemini__EmbeddingModel` — `gemini-embedding-001` (768 dims, L2-norm). **No** `text-embedding-004` (retirado 2026-01-14). Se usa en `EmbeddingService` para RAG.
 
-**Google Places (admin ingestion — Fase A)**
+**Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
 
-**Fase 3 — Video import (pendiente, plan en ~/.claude/plans/)**
-- Sin Apify. Arquitectura: video file → Gemini multimodal directo (File API). Ver plan `creo-que-lo-mejor-curious-fiddle.md`.
+**Fase 3 — Video import (pendiente, sin plan activo)**
+- Sin Apify. Arquitectura prevista: video file → Gemini multimodal File API directo.
 
 ## Project Structure (VSA)
 

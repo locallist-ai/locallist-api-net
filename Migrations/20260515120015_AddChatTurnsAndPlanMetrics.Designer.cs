@@ -5,6 +5,7 @@ using System.Text.Json;
 using LocalList.API.NET.Shared.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -14,9 +15,11 @@ using Pgvector;
 namespace LocalList.API.NET.Migrations
 {
     [DbContext(typeof(LocalListDbContext))]
-    partial class LocalListDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260515120015_AddChatTurnsAndPlanMetrics")]
+    partial class AddChatTurnsAndPlanMetrics
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -217,7 +220,6 @@ namespace LocalList.API.NET.Migrations
                     b.HasIndex("PromptVersion", "CreatedAt");
 
                     b.HasIndex("SessionId", "TurnIndex")
-                        .IsUnique()
                         .HasFilter("session_id IS NOT NULL");
 
                     b.HasIndex("UserId", "CreatedAt");
@@ -1012,11 +1014,6 @@ namespace LocalList.API.NET.Migrations
                     b.Property<DateTimeOffset?>("FirstTouchAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("first_touch_at");
-
-                    b.Property<string>("AnonymousId")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("anonymous_id");
 
                     b.Property<string>("Gclid")
                         .HasMaxLength(200)

@@ -18,6 +18,8 @@ public class LocalListDbContext : DbContext
     public DbSet<RouteSegmentCache> RouteSegmentCaches { get; set; } = null!;
     public DbSet<ChatSession> ChatSessions { get; set; } = null!;
     public DbSet<UserProfile> UserProfiles { get; set; } = null!;
+    public DbSet<ChatTurn> ChatTurns { get; set; } = null!;
+    public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -157,5 +159,55 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<UserProfile>()
             .Property(up => up.DietaryRestrictions)
             .HasColumnType("text[]");
+
+        // ChatTurn — FK to chat_sessions (nullable; builder legacy has no session)
+        modelBuilder.Entity<ChatTurn>()
+            .HasOne(ct => ct.Session)
+            .WithMany()
+            .HasForeignKey(ct => ct.SessionId)
+            .OnDelete(DeleteBehavior.Cascade)
+            .IsRequired(false);
+
+        modelBuilder.Entity<ChatTurn>()
+            .HasOne(ct => ct.User)
+            .WithMany()
+            .HasForeignKey(ct => ct.UserId)
+            .OnDelete(DeleteBehavior.SetNull)
+            .IsRequired(false);
+
+        modelBuilder.Entity<ChatTurn>()
+            .HasIndex(ct => ct.CreatedAt);
+
+        modelBuilder.Entity<ChatTurn>()
+            .HasIndex(ct => new { ct.UserId, ct.CreatedAt });
+
+        modelBuilder.Entity<ChatTurn>()
+            .HasIndex(ct => new { ct.PromptVersion, ct.CreatedAt });
+
+        // Partial unique index: (session_id, turn_index) only when session_id is not null
+        modelBuilder.Entity<ChatTurn>()
+            .HasIndex(ct => new { ct.SessionId, ct.TurnIndex })
+            .IsUnique()
+            .HasFilter("session_id IS NOT NULL");
+
+        // PlanMetric — one-to-one with plans
+        modelBuilder.Entity<PlanMetric>()
+            .HasOne(pm => pm.Plan)
+            .WithMany()
+            .HasForeignKey(pm => pm.PlanId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<PlanMetric>()
+            .HasIndex(pm => pm.PlanId)
+            .IsUnique();
+
+        modelBuilder.Entity<PlanMetric>()
+            .HasIndex(pm => pm.CreatedAt);
+
+        modelBuilder.Entity<PlanMetric>()
+            .HasIndex(pm => new { pm.GenerationSource, pm.CreatedAt });
+
+        modelBuilder.Entity<PlanMetric>()
+            .HasIndex(pm => new { pm.PromptVersion, pm.CreatedAt });
     }
 }

@@ -5,6 +5,7 @@ using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;
 using Microsoft.EntityFrameworkCore;
 
@@ -216,6 +217,8 @@ public class ChatAgentService
         // L3 suspicion: if score ≥ 50, skip Gemini to avoid burning tokens on adversarial sessions
         string aiMessage;
         SlotExtractorResult? extracted = null;
+        AiCallDiagnostics? aiDiagnostics = null;
+        var preTurnSlotsJson = session.SlotsJson; // capture before merge for context_signals
 
         if (suspicion.ShouldSuppressGemini)
         {
@@ -223,7 +226,7 @@ public class ChatAgentService
         }
         else
         {
-            extracted = await _extractor.ExtractAsync(message, slots, history, lang, ct);
+            (extracted, aiDiagnostics) = await _extractor.ExtractAsync(message, slots, history, lang, ct);
 
             if (extracted == null)
             {
@@ -258,6 +261,37 @@ public class ChatAgentService
 
         suspicion.RecordCleanTurn();
         history.Add(new HistoryEntry { Role = "assistant", Content = aiMessage, Timestamp = DateTimeOffset.UtcNow });
+
+        if (aiDiagnostics != null)
+        {
+            _db.ChatTurns.Add(new ChatTurn
+            {
+                SessionId = session.Id,
+                UserId = session.UserId,
+                TurnIndex = session.TurnCount,
+                AiProvider = "gemini",
+                PromptVersion = "slot-v1",
+                UserMessage = string.IsNullOrWhiteSpace(rawMessage) ? null
+                    : PiiRedactor.Redact(rawMessage.Length > 2000 ? rawMessage[..2000] : rawMessage),
+                ContextSignalsJson = preTurnSlotsJson,
+                PromptChars = aiDiagnostics.Prompt.Length,
+                PromptExcerpt = PiiRedactor.Redact(
+                    aiDiagnostics.Prompt.Length > 500 ? aiDiagnostics.Prompt[..500] : aiDiagnostics.Prompt),
+                ResponseRaw = aiDiagnostics.ResponseRaw != null
+                    ? PiiRedactor.Redact(aiDiagnostics.ResponseRaw) : null,
+                FinishReason = aiDiagnostics.FinishReason,
+                LatencyMs = aiDiagnostics.LatencyMs,
+                InputTokens = aiDiagnostics.InputTokens,
+                OutputTokens = aiDiagnostics.OutputTokens,
+                ThinkingTokens = aiDiagnostics.ThinkingTokens,
+                TotalTokens = aiDiagnostics.TotalTokens,
+                CostUsd = aiDiagnostics.CostUsd,
+                GeminiStatus = aiDiagnostics.GeminiStatus,
+                ErrorCode = aiDiagnostics.ErrorCode,
+                ErrorMessage = aiDiagnostics.ErrorMessage,
+                SlotCompleteness = (short)(CountFilledCriticalSlots(slots) * 20),
+            });
+        }
 
         return await BuildResponseAsync(session, slots, history, suspicion, aiMessage, lang, ct,
             geminiQuickReplies: extracted?.QuickReplies);
@@ -557,6 +591,17 @@ public class ChatAgentService
         if (slots.Categories.Count == 0) missing.Add("categories");
         if (string.IsNullOrWhiteSpace(slots.Budget)) missing.Add("budget");
         return missing;
+    }
+
+    private static short CountFilledCriticalSlots(ChatSlots slots)
+    {
+        short count = 0;
+        if (!string.IsNullOrWhiteSpace(slots.City)) count++;
+        if (slots.Days.HasValue) count++;
+        if (!string.IsNullOrWhiteSpace(slots.GroupType)) count++;
+        if (slots.Categories.Count > 0) count++;
+        if (!string.IsNullOrWhiteSpace(slots.Budget)) count++;
+        return count;
     }
 
     private static bool AreAllTier2Filled(ChatSlots slots)

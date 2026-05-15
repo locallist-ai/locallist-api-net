@@ -9,6 +9,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Chat;
@@ -168,6 +169,35 @@ public class ChatController : ControllerBase
         // Anonymous → ephemeral plan, still mark session generated
         if (isAnonymous)
         {
+            if (result.GeminiDiagnostics != null)
+            {
+                _db.ChatTurns.Add(new ChatTurn
+                {
+                    SessionId = session.Id,
+                    TurnIndex = session.TurnCount,
+                    AiProvider = "gemini",
+                    PromptVersion = "slot-v1",
+                    ContextSignalsJson = session.SlotsJson,
+                    PromptChars = result.GeminiDiagnostics.Prompt.Length,
+                    PromptExcerpt = PiiRedactor.Redact(
+                        result.GeminiDiagnostics.Prompt.Length > 500
+                            ? result.GeminiDiagnostics.Prompt[..500]
+                            : result.GeminiDiagnostics.Prompt),
+                    ResponseRaw = result.GeminiDiagnostics.ResponseRaw != null
+                        ? PiiRedactor.Redact(result.GeminiDiagnostics.ResponseRaw) : null,
+                    FinishReason = result.GeminiDiagnostics.FinishReason,
+                    LatencyMs = result.GeminiDiagnostics.LatencyMs,
+                    InputTokens = result.GeminiDiagnostics.InputTokens,
+                    OutputTokens = result.GeminiDiagnostics.OutputTokens,
+                    ThinkingTokens = result.GeminiDiagnostics.ThinkingTokens,
+                    TotalTokens = result.GeminiDiagnostics.TotalTokens,
+                    CostUsd = result.GeminiDiagnostics.CostUsd,
+                    GeminiStatus = result.GeminiDiagnostics.GeminiStatus,
+                    ErrorCode = result.GeminiDiagnostics.ErrorCode,
+                    ErrorMessage = result.GeminiDiagnostics.ErrorMessage,
+                });
+            }
+
             session.Status = "generated";
             _db.Update(session);
             await _db.SaveChangesAsync(ct);
@@ -225,6 +255,54 @@ public class ChatController : ControllerBase
         if (stopsToInsert.Any())
             _db.PlanStops.AddRange(stopsToInsert);
 
+        var generateTurn = result.GeminiDiagnostics != null ? new ChatTurn
+        {
+            SessionId = session.Id,
+            UserId = userId,
+            TurnIndex = session.TurnCount,
+            AiProvider = "gemini",
+            PromptVersion = "slot-v1",
+            ContextSignalsJson = session.SlotsJson,
+            PromptChars = result.GeminiDiagnostics.Prompt.Length,
+            PromptExcerpt = PiiRedactor.Redact(
+                result.GeminiDiagnostics.Prompt.Length > 500
+                    ? result.GeminiDiagnostics.Prompt[..500]
+                    : result.GeminiDiagnostics.Prompt),
+            ResponseRaw = result.GeminiDiagnostics.ResponseRaw != null
+                ? PiiRedactor.Redact(result.GeminiDiagnostics.ResponseRaw) : null,
+            FinishReason = result.GeminiDiagnostics.FinishReason,
+            LatencyMs = result.GeminiDiagnostics.LatencyMs,
+            InputTokens = result.GeminiDiagnostics.InputTokens,
+            OutputTokens = result.GeminiDiagnostics.OutputTokens,
+            ThinkingTokens = result.GeminiDiagnostics.ThinkingTokens,
+            TotalTokens = result.GeminiDiagnostics.TotalTokens,
+            CostUsd = result.GeminiDiagnostics.CostUsd,
+            GeminiStatus = result.GeminiDiagnostics.GeminiStatus,
+            ErrorCode = result.GeminiDiagnostics.ErrorCode,
+            ErrorMessage = result.GeminiDiagnostics.ErrorMessage,
+        } : null;
+
+        if (generateTurn != null) _db.ChatTurns.Add(generateTurn);
+
+        _db.PlanMetrics.Add(new PlanMetric
+        {
+            PlanId = plan.Id,
+            ChatSessionId = session.Id,
+            GenerateTurnId = generateTurn?.Id,
+            GenerationSource = "chat",
+            SignalsFilled = CountFilledSlots(slots),
+            NumDays = result.Prefs.Days,
+            NumStops = stopsToInsert.Count,
+            NumCategories = result.Prefs.Categories.Count,
+            GroupType = result.Prefs.GroupType,
+            Budget = slots.Budget,
+            VibesJson = result.Prefs.Vibes.Count > 0
+                ? System.Text.Json.JsonSerializer.Serialize(result.Prefs.Vibes) : null,
+            PromptVersion = "slot-v1",
+            LatencyMs = result.GeminiDiagnostics?.LatencyMs ?? 0,
+            CostUsd = result.GeminiDiagnostics?.CostUsd,
+        });
+
         session.Status = "generated";
         session.GeneratedPlanId = plan.Id;
         _db.Update(session);
@@ -253,6 +331,17 @@ public class ChatController : ControllerBase
             warnings = result.Schedule.Warnings,
             appliedRefinements = result.Schedule.AppliedRefinements
         });
+    }
+
+    private static short CountFilledSlots(ChatSlots slots)
+    {
+        short count = 0;
+        if (!string.IsNullOrWhiteSpace(slots.City)) count++;
+        if (slots.Days.HasValue) count++;
+        if (!string.IsNullOrWhiteSpace(slots.GroupType)) count++;
+        if (slots.Categories.Count > 0) count++;
+        if (!string.IsNullOrWhiteSpace(slots.Budget)) count++;
+        return count;
     }
 
     /// <summary>

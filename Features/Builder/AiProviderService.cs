@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
 
 namespace LocalList.API.NET.Features.Builder;
@@ -23,45 +25,80 @@ public class AiProviderService
         _logger = logger;
     }
 
-    public async Task<ExtractedPreferences> ExtractPreferencesAsync(string message, TripContextDto? context, string lang = "en", CancellationToken ct = default)
+    public async Task<(ExtractedPreferences Prefs, AiCallDiagnostics? Diagnostics)> ExtractPreferencesAsync(string message, TripContextDto? context, string lang = "en", CancellationToken ct = default)
     {
+        var apiKey = _config["Gemini:ApiKey"];
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            _logger.LogWarning("Gemini API Key missing. Falling back to keywords.");
+            var missingKeyDiag = new AiCallDiagnostics(
+                Prompt: string.Empty, ResponseRaw: null, FinishReason: null,
+                LatencyMs: 0, InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
+                CostUsd: null, GeminiStatus: null, ErrorCode: "missing_key", ErrorMessage: "Gemini API key not configured");
+            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), missingKeyDiag);
+        }
+
+        var prompt = BuildPrompt(message, context, lang);
+
+        var requestBody = new
+        {
+            contents = new[]
+            {
+                new { parts = new[] { new { text = prompt } } }
+            },
+            generationConfig = new
+            {
+                temperature = 0.3,
+                maxOutputTokens = 300,
+                responseMimeType = "application/json"
+            }
+        };
+
+        var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+        var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+
+        var requestMessage = new HttpRequestMessage(HttpMethod.Post, url);
+        requestMessage.Headers.Add("x-goog-api-key", apiKey);
+        requestMessage.Content = content;
+
+        var sw = Stopwatch.StartNew();
         try
         {
-            var apiKey = _config["Gemini:ApiKey"];
-            if (string.IsNullOrEmpty(apiKey))
-            {
-                _logger.LogWarning("Gemini API Key missing. Falling back to keywords.");
-                return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
-            }
-
-            var prompt = BuildPrompt(message, context, lang);
-
-            var requestBody = new
-            {
-                contents = new[]
-                {
-                    new { parts = new[] { new { text = prompt } } }
-                },
-                generationConfig = new
-                {
-                    temperature = 0.3,
-                    maxOutputTokens = 300,
-                    responseMimeType = "application/json"
-                }
-            };
-
-            var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-            var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-
-            var requestMessage = new HttpRequestMessage(HttpMethod.Post, url);
-            requestMessage.Headers.Add("x-goog-api-key", apiKey); // A6: Secure key transit
-            requestMessage.Content = content;
-
             var response = await _httpClient.SendAsync(requestMessage, ct);
-            response.EnsureSuccessStatusCode();
+            sw.Stop();
+            var latencyMs = (int)sw.ElapsedMilliseconds;
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("Builder: Gemini API returned {Status}", (int)response.StatusCode);
+                var httpErrDiag = new AiCallDiagnostics(
+                    Prompt: TruncatePrompt(prompt),
+                    ResponseRaw: TruncateResponse(responseJson),
+                    FinishReason: null, LatencyMs: latencyMs,
+                    InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
+                    CostUsd: null, GeminiStatus: (int)response.StatusCode,
+                    ErrorCode: "http_error", ErrorMessage: $"HTTP {(int)response.StatusCode}");
+                return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), httpErrDiag);
+            }
+
             using var doc = JsonDocument.Parse(responseJson);
+
+            int? inputTokens = null, outputTokens = null, thinkingTokens = null;
+            string? finishReason = null;
+            if (doc.RootElement.TryGetProperty("usageMetadata", out var usage))
+            {
+                if (usage.TryGetProperty("promptTokenCount", out var ptc)) inputTokens = ptc.GetInt32();
+                if (usage.TryGetProperty("candidatesTokenCount", out var ctc)) outputTokens = ctc.GetInt32();
+                if (usage.TryGetProperty("thoughtsTokenCount", out var ttc)) thinkingTokens = ttc.GetInt32();
+            }
+            if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.GetArrayLength() > 0)
+            {
+                if (cands[0].TryGetProperty("finishReason", out var fr)) finishReason = fr.GetString();
+            }
+
+            var totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (thinkingTokens ?? 0);
 
             var textResult = doc.RootElement
                 .GetProperty("candidates")[0]
@@ -73,27 +110,63 @@ public class AiProviderService
                 "Gemini raw extracted text: {Preview}",
                 textResult.Length > 500 ? textResult[..500] + "…" : textResult);
 
+            var diag = new AiCallDiagnostics(
+                Prompt: TruncatePrompt(prompt),
+                ResponseRaw: TruncateResponse(responseJson),
+                FinishReason: finishReason,
+                LatencyMs: latencyMs,
+                InputTokens: inputTokens,
+                OutputTokens: outputTokens,
+                ThinkingTokens: thinkingTokens,
+                TotalTokens: totalTokens > 0 ? totalTokens : null,
+                CostUsd: GeminiCostCalculator.Calculate(inputTokens, outputTokens),
+                GeminiStatus: (int)response.StatusCode,
+                ErrorCode: null,
+                ErrorMessage: null);
+
             var parsed = ParseAiResponse(textResult);
-            return MergeContextIntoPrefs(parsed, context);
+            return (MergeContextIntoPrefs(parsed, context), diag);
         }
         catch (HttpRequestException ex)
         {
+            sw.Stop();
             _logger.LogError(ex, "Gemini API call failed. Falling back to keywords.");
-            return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
+            var exDiag = new AiCallDiagnostics(
+                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
+                LatencyMs: (int)sw.ElapsedMilliseconds,
+                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
+                CostUsd: null, GeminiStatus: null, ErrorCode: "http_error", ErrorMessage: ex.Message);
+            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), exDiag);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            // Polly/resilience canceló por timeout (AttemptTimeout o TotalRequestTimeout),
-            // no el cliente. Caemos al fallback keyword igual que en error transitorio.
+            sw.Stop();
             _logger.LogError("Gemini API call timed out. Falling back to keywords.");
-            return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
+            var toDiag = new AiCallDiagnostics(
+                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
+                LatencyMs: (int)sw.ElapsedMilliseconds,
+                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
+                CostUsd: null, GeminiStatus: null, ErrorCode: "timeout", ErrorMessage: "Gemini API call timed out");
+            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), toDiag);
         }
         catch (JsonException ex)
         {
+            sw.Stop();
             _logger.LogError(ex, "Failed to parse Gemini response. Falling back to keywords.");
-            return MergeContextIntoPrefs(ExtractWithKeywords(message, context), context);
+            var jsonDiag = new AiCallDiagnostics(
+                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
+                LatencyMs: (int)sw.ElapsedMilliseconds,
+                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
+                CostUsd: null, GeminiStatus: null, ErrorCode: "parse_error", ErrorMessage: ex.Message);
+            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), jsonDiag);
         }
     }
+
+    private static string TruncatePrompt(string prompt) =>
+        prompt.Length <= 4096 ? prompt : prompt[..4096];
+
+    private static string TruncateResponse(string response) =>
+        response.Length <= 8192 ? response : response[..8192];
 
     private string BuildPrompt(string message, TripContextDto? context, string lang = "en")
     {

@@ -152,6 +152,12 @@ public class PlansController : ControllerBase
             });
         }
 
+        await _db.PlanMetrics
+            .Where(m => m.PlanId == id && !m.WasOpened)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.WasOpened, true)
+                .SetProperty(m => m.OpenedAt, DateTimeOffset.UtcNow), ct);
+
         var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
         return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments));
     }

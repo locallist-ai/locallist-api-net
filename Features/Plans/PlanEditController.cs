@@ -77,6 +77,12 @@ public class PlanEditController : ControllerBase
         plan.UpdatedAt = DateTimeOffset.UtcNow;
 
         await _db.SaveChangesAsync(ct);
+
+        await _db.PlanMetrics
+            .Where(m => m.PlanId == id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.EditedCount, m => m.EditedCount + 1), ct);
+
         await transaction.CommitAsync(ct);
 
         _logger.LogInformation("User {UserId} updated stops for plan {PlanId} ({StopCount} stops)", userId, id, newStops.Count);

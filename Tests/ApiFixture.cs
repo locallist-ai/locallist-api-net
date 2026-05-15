@@ -511,7 +511,10 @@ public class FakeGeminiHandler : HttpMessageHandler
             // no ven 500 del HttpClient.
             var fallback = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
             {
-                Content = new StringContent("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{}\"}]}}]}", System.Text.Encoding.UTF8, "application/json")
+                Content = new StringContent(
+                    "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{}\"}]},\"finishReason\":\"STOP\"}]," +
+                    "\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":50,\"thoughtsTokenCount\":10}}",
+                    System.Text.Encoding.UTF8, "application/json")
             };
             return Task.FromResult(fallback);
         }

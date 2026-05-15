@@ -1,6 +1,7 @@
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Observability;
 using Microsoft.EntityFrameworkCore;
 using Pgvector;
 using Pgvector.EntityFrameworkCore;
@@ -65,7 +66,7 @@ public class PlanGenerationService
             tripContext.Categories == null ? "(null)" : string.Join(",", tripContext.Categories),
             tripContext.Budget, msg.Length);
 
-        var prefs = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
+        var (prefs, geminiDiag) = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
 
         _logger.LogInformation(
             "PlanGen: prefs days={Days} cats={Cats} vibes={Vibes} maxStops={Max} name='{Name}'",
@@ -107,6 +108,7 @@ public class PlanGenerationService
             PlanDescription = planDescription,
             City = city,
             Lang = lang,
+            GeminiDiagnostics = geminiDiag,
         };
     }
 
@@ -215,4 +217,5 @@ public class PlanGenerationResult
     public required string PlanDescription { get; init; }
     public required string City { get; init; }
     public required string Lang { get; init; }
+    public AiCallDiagnostics? GeminiDiagnostics { get; init; }
 }
