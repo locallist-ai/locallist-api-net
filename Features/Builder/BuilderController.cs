@@ -7,6 +7,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -18,17 +19,20 @@ public class BuilderController : ControllerBase
     private readonly PlanGenerationService _planGen;
     private readonly SchedulingService _scheduler;
     private readonly ILogger<BuilderController> _logger;
+    private readonly PostHogService _posthog;
 
     public BuilderController(
         LocalListDbContext db,
         PlanGenerationService planGen,
         SchedulingService scheduler,
-        ILogger<BuilderController> logger)
+        ILogger<BuilderController> logger,
+        PostHogService posthog)
     {
         _db = db;
         _planGen = planGen;
         _scheduler = scheduler;
         _logger = logger;
+        _posthog = posthog;
     }
 
     [HttpPost("chat")]
@@ -158,6 +162,15 @@ public class BuilderController : ControllerBase
                 _db.PlanStops.AddRange(stopsToInsert);
 
             await _db.SaveChangesAsync(ct);
+
+            _ = _posthog.CaptureAsync(userId!.Value.ToString(), "plan_generated", new()
+            {
+                ["plan_id"] = plan.Id.ToString(),
+                ["city"] = result.City,
+                ["days"] = result.Prefs.Days,
+                ["stops"] = planStopsData.Count,
+                ["source"] = "builder",
+            });
 
             return Ok(new
             {

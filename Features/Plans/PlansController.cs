@@ -6,6 +6,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -17,13 +18,15 @@ public class PlansController : ControllerBase
     private readonly ILogger<PlansController> _logger;
     private readonly LanguageAccessor _lang;
     private readonly RouteResolver _routeResolver;
+    private readonly PostHogService _posthog;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, RouteResolver routeResolver)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, RouteResolver routeResolver, PostHogService posthog)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
         _routeResolver = routeResolver;
+        _posthog = posthog;
     }
 
     [HttpPost]
@@ -137,6 +140,16 @@ public class PlansController : ControllerBase
         {
             _logger.LogWarning("User {UserId} attempted to access private plan {PlanId}", userId, id);
             return NotFound(new { error = "Plan not found" });
+        }
+
+        if (userId.HasValue)
+        {
+            _ = _posthog.CaptureAsync(userId.Value.ToString(), "plan_opened", new()
+            {
+                ["plan_id"] = id.ToString(),
+                ["city"] = plan.City,
+                ["plan_type"] = plan.Type,
+            });
         }
 
         var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);

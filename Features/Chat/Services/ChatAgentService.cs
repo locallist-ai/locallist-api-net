@@ -4,6 +4,7 @@ using System.Text.Json;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.PostHog;
 using Microsoft.EntityFrameworkCore;
 
 namespace LocalList.API.NET.Features.Chat.Services;
@@ -64,19 +65,22 @@ public class ChatAgentService
     private readonly ILogger<ChatAgentService> _logger;
     private readonly ChatSecLogger _secLog;
     private readonly IConfiguration _config;
+    private readonly PostHogService _posthog;
 
     public ChatAgentService(
         LocalListDbContext db,
         SlotExtractorService extractor,
         ILogger<ChatAgentService> logger,
         ChatSecLogger secLog,
-        IConfiguration config)
+        IConfiguration config,
+        PostHogService posthog)
     {
         _db = db;
         _extractor = extractor;
         _logger = logger;
         _secLog = secLog;
         _config = config;
+        _posthog = posthog;
     }
 
     public async Task<ChatTurnResponse> ProcessTurnAsync(
@@ -295,6 +299,7 @@ public class ChatAgentService
         // L6: sanitize aiMessage before persisting and returning
         aiMessage = OutputSanitizer.Sanitize(aiMessage ?? "What city are you visiting?");
 
+        var wasAlreadyReady = session.Status == "ready";
         session.TurnCount++;
         session.LastTurnAt = DateTimeOffset.UtcNow;
         session.Status = ready ? "ready" : "active";
@@ -311,6 +316,18 @@ public class ChatAgentService
         _logger.LogInformation(
             "Chat: turn={Turn} sessionId={Session} missing=[{Missing}] ready={Ready} suspicion={Score}",
             session.TurnCount, session.Id, string.Join(",", missing), ready, suspicion.Score);
+
+        if (ready && !wasAlreadyReady)
+        {
+            var readyDistinctId = session.UserId?.ToString() ?? session.AnonymousIpHash ?? session.Id.ToString();
+            _ = _posthog.CaptureAsync(readyDistinctId, "chat_ready", new()
+            {
+                ["session_id"] = session.Id.ToString(),
+                ["turn_count"] = session.TurnCount,
+                ["city"] = slots.City,
+                ["days"] = (object?)slots.Days,
+            });
+        }
 
         return new ChatTurnResponse
         {
@@ -430,6 +447,14 @@ public class ChatAgentService
 
         _logger.LogInformation("Chat: new session={Session} userId={UserId} profilePrefilled={Prefilled}",
             session.Id, userId?.ToString() ?? "anon", prefilledSlots != null);
+
+        var sessionDistinctId = userId?.ToString() ?? ipHash ?? session.Id.ToString();
+        _ = _posthog.CaptureAsync(sessionDistinctId, "chat_session_started", new()
+        {
+            ["session_id"] = session.Id.ToString(),
+            ["authenticated"] = userId.HasValue,
+        });
+
         return session;
     }
 

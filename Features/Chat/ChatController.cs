@@ -9,6 +9,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Chat;
 
@@ -21,19 +22,22 @@ public class ChatController : ControllerBase
     private readonly PlanGenerationService _planGen;
     private readonly SchedulingService _scheduler;
     private readonly ILogger<ChatController> _logger;
+    private readonly PostHogService _posthog;
 
     public ChatController(
         ChatAgentService agent,
         LocalListDbContext db,
         PlanGenerationService planGen,
         SchedulingService scheduler,
-        ILogger<ChatController> logger)
+        ILogger<ChatController> logger,
+        PostHogService posthog)
     {
         _agent = agent;
         _db = db;
         _planGen = planGen;
         _scheduler = scheduler;
         _logger = logger;
+        _posthog = posthog;
     }
 
     /// <summary>
@@ -229,6 +233,16 @@ public class ChatController : ControllerBase
         _logger.LogInformation(
             "Chat: generated planId={Plan} stops={N} sessionId={Session}",
             plan.Id, stopsToInsert.Count, session.Id);
+
+        _ = _posthog.CaptureAsync(userId!.Value.ToString(), "plan_generated", new()
+        {
+            ["plan_id"] = plan.Id.ToString(),
+            ["city"] = result.City,
+            ["days"] = result.Prefs.Days,
+            ["stops"] = stopsToInsert.Count,
+            ["source"] = "chat",
+            ["session_id"] = session.Id.ToString(),
+        });
 
         return Ok(new
         {

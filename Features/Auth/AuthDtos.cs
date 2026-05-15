@@ -15,7 +15,8 @@ public record AppAuthResponse(string AccessToken, string RefreshToken, AppAuthUs
 public record SigninRequest(
     [Required, RegularExpression("^(apple|google)$")] string Provider,
     [Required, StringLength(8192, MinimumLength = 1)] string IdToken,
-    [StringLength(255)] string? Name);
+    [StringLength(255)] string? Name,
+    [StringLength(64)] string? AnonymousId = null);
 
 public record RegisterRequest(
     [Required, EmailAddress, StringLength(254)] string Email,
@@ -24,11 +25,13 @@ public record RegisterRequest(
      RegularExpression(@"^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$",
         ErrorMessage = "Password must include uppercase, lowercase, digit and special character")]
     string Password,
-    [StringLength(255, MinimumLength = 1)] string? Name);
+    [StringLength(255, MinimumLength = 1)] string? Name,
+    [StringLength(64)] string? AnonymousId = null);
 
 public record LoginRequest(
     [Required, EmailAddress, StringLength(254)] string Email,
-    [Required, StringLength(128, MinimumLength = 1)] string Password);
+    [Required, StringLength(128, MinimumLength = 1)] string Password,
+    [StringLength(64)] string? AnonymousId = null);
 
 public record RefreshRequest(
     [Required, StringLength(256, MinimumLength = 16)] string RefreshToken);

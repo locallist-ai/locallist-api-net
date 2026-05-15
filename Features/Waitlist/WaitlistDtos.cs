@@ -11,7 +11,8 @@ public record JoinWaitlistRequest(
     string? LandingPath = null,
     string? Ttclid = null,
     string? Fbclid = null,
-    string? Gclid = null);
+    string? Gclid = null,
+    string? AnonymousId = null);
 
 public record JoinWaitlistResponse(string Message, int Position);
 

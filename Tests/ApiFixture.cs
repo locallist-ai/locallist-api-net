@@ -17,6 +17,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Testcontainers.PostgreSql;
+using System.Collections.Concurrent;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
@@ -24,6 +25,7 @@ using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.Tests;
 
@@ -48,6 +50,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// (OK con JSON válido, 502, texto malformado, etc.) sin levantar un servidor HTTP real.
     /// </summary>
     public FakeGeminiHandler FakeGemini { get; } = new();
+    public FakePostHogHandler FakePostHog { get; } = new();
 
     /// <summary>
     /// In-process fake for <see cref="IGooglePlacesService"/>.
@@ -87,6 +90,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("Gemini__ApiKey", "test-gemini-key");
         // Mapbox key — valor no vacío para que MapboxRoutingService no cortocircuite.
         Environment.SetEnvironmentVariable("Mapbox__AccessToken", "test-mapbox-token");
+        // PostHog key — no vacío para que PostHogService no cortocircuite con el guard de API key.
+        Environment.SetEnvironmentVariable("PostHog__ApiKey", "test-posthog-key");
     }
 
     public async ValueTask InitializeAsync()
@@ -184,6 +189,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddHttpClient<IRoutingService, MapboxRoutingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeMapbox);
+
+            services.AddHttpClient<PostHogService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakePostHog);
 
             // Replace IGooglePlacesService with in-process fake — avoids real HTTP calls
             // and lets tests control resolution + details results via FakeGooglePlaces.
@@ -441,6 +449,42 @@ public class FakeGooglePlacesService : IGooglePlacesService
         SearchResponder = null;
         DetailsByPlaceId.Clear();
         ResolvedByUrl.Clear();
+    }
+}
+
+/// <summary>
+/// Handler HTTP fake que intercepta llamadas de <see cref="PostHogService"/> a /capture/.
+/// Recoge los cuerpos de las peticiones en <see cref="CapturedBodies"/> para que los tests
+/// puedan verificar qué eventos fueron disparados. Responde siempre 200 OK.
+/// </summary>
+public class FakePostHogHandler : HttpMessageHandler
+{
+    private readonly ConcurrentBag<string> _bodies = new();
+
+    public IReadOnlyCollection<string> CapturedBodies => _bodies;
+
+    public void Reset() => _bodies.Clear();
+
+    /// <summary>Returns all captured bodies deserialized as JSON documents (caller must dispose).</summary>
+    public List<JsonDocument> ParsedEvents()
+        => _bodies.Select(b => JsonDocument.Parse(b)).ToList();
+
+    public bool HasEvent(string eventName) =>
+        _bodies.Any(b =>
+        {
+            using var doc = JsonDocument.Parse(b);
+            return doc.RootElement.TryGetProperty("event", out var e) &&
+                   e.GetString() == eventName;
+        });
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var body = await (request.Content?.ReadAsStringAsync(cancellationToken) ?? Task.FromResult("{}"));
+        _bodies.Add(body);
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"status\":1}", System.Text.Encoding.UTF8, "application/json")
+        };
     }
 }
 
