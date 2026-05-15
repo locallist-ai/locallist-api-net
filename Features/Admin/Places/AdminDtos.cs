@@ -28,6 +28,7 @@ public record AdminPlaceDto(
     string Status,
     string? RejectionReason,
     int? AiVibeScore,
+    int? VisitDurationMin,
     List<string>? Flags,
     Guid? SubmittedById,
     Guid? ReviewedById,
@@ -49,7 +50,7 @@ public record AdminPlaceDto(
         p.Latitude, p.Longitude, p.WhyThisPlace, p.BestFor, p.SuitableFor,
         p.BestTime, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
         p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
-        p.RejectionReason, p.AiVibeScore, p.Flags,
+        p.RejectionReason, p.AiVibeScore, p.VisitDurationMin, p.Flags,
         p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
         NameEs: LanguageAccessor.ResolveString(p.NameI18n, "es", null, isCurated: false),
         WhyThisPlaceEs: LanguageAccessor.ResolveString(p.WhyThisPlaceI18n, "es", null, isCurated: false),
@@ -111,6 +112,7 @@ public class CreatePlaceRequest
     public string? Status { get; set; }
 
     public int? AiVibeScore { get; set; }
+    public int? VisitDurationMin { get; set; }
     public List<string>? Flags { get; set; }
 }
 
@@ -167,6 +169,7 @@ public class UpdatePlaceRequest
     public string? SourceUrl { get; set; }
 
     public int? AiVibeScore { get; set; }
+    public int? VisitDurationMin { get; set; }
     public List<string>? Flags { get; set; }
 
     // i18n ES fields — null means "no change", empty string clears the field

@@ -83,7 +83,9 @@ public class PlanGenerationService
             return null;
         }
 
-        var schedule = _scheduler.BuildPlanSchedule(places, prefs);
+        var seed = Random.Shared.Next();
+        _logger.LogInformation("PlanGen: schedule seed={Seed}", seed);
+        var schedule = _scheduler.BuildPlanSchedule(places, prefs, seed);
 
         // Sanitize Gemini-generated text before returning (L6 defense)
         var planName = Sanitize(PlanNamingService.BuildPlanName(prefs, city, msg), MaxPlanNameLength);
