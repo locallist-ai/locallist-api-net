@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using LocalList.API.NET.Features.Places;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -45,7 +46,8 @@ public class GooglePlacesService : IGooglePlacesService
     private const string DetailsFieldMask =
         "id,displayName,formattedAddress,location,types,primaryType," +
         "photos,priceLevel,rating,userRatingCount,websiteUri," +
-        "internationalPhoneNumber,editorialSummary,addressComponents";
+        "internationalPhoneNumber,editorialSummary,addressComponents," +
+        "regularOpeningHours";
 
     // Matches Place IDs: ChIJ... (most common) or other formats starting with upper+lower letters
     private static readonly Regex PlaceIdRegex =
@@ -172,6 +174,18 @@ public class GooglePlacesService : IGooglePlacesService
             var neighborhood = p.AddressComponents?
                 .FirstOrDefault(c => c.Types?.Contains("sublocality_level_1") == true)?.LongText;
 
+            OpeningHoursData? openingHours = null;
+            if (p.RegularOpeningHours?.Periods is { Count: > 0 } gPeriods)
+            {
+                openingHours = new OpeningHoursData(
+                    Periods: gPeriods
+                        .Select(gp => new OpeningPeriod(
+                            Open:  gp.Open  is null ? null : new OpeningTime(gp.Open.Day,  gp.Open.Hour,  gp.Open.Minute),
+                            Close: gp.Close is null ? null : new OpeningTime(gp.Close.Day, gp.Close.Hour, gp.Close.Minute)))
+                        .ToList(),
+                    WeekdayDescriptions: p.RegularOpeningHours.WeekdayDescriptions ?? []);
+            }
+
             return new GooglePlaceDetails(
                 Id: p.Id ?? placeId,
                 Name: p.DisplayName?.Text ?? placeId,
@@ -188,7 +202,8 @@ public class GooglePlacesService : IGooglePlacesService
                 ReviewCount: p.UserRatingCount,
                 Website: p.WebsiteUri,
                 Phone: p.InternationalPhoneNumber,
-                EditorialSummary: p.EditorialSummary?.Text
+                EditorialSummary: p.EditorialSummary?.Text,
+                OpeningHours: openingHours
             );
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -347,6 +362,26 @@ public class GooglePlacesService : IGooglePlacesService
         public string? InternationalPhoneNumber { get; set; }
         public GoogleLocalizedText? EditorialSummary { get; set; }
         public List<GoogleAddressComponent>? AddressComponents { get; set; }
+        public GoogleOpeningHours? RegularOpeningHours { get; set; }
+    }
+
+    private sealed class GoogleOpeningHours
+    {
+        public List<GooglePeriod>? Periods { get; set; }
+        public List<string>? WeekdayDescriptions { get; set; }
+    }
+
+    private sealed class GooglePeriod
+    {
+        public GoogleTimeOfDay? Open { get; set; }
+        public GoogleTimeOfDay? Close { get; set; }
+    }
+
+    private sealed class GoogleTimeOfDay
+    {
+        public int Day { get; set; }
+        public int Hour { get; set; }
+        public int Minute { get; set; }
     }
 
     private sealed class GoogleLocalizedText
@@ -389,5 +424,6 @@ public record GooglePlaceDetails(
     int? ReviewCount,
     string? Website,
     string? Phone,
-    string? EditorialSummary
+    string? EditorialSummary,
+    OpeningHoursData? OpeningHours = null
 );

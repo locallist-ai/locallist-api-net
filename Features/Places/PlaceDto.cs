@@ -28,7 +28,8 @@ public record PlaceDto(
     string Source,
     string? SourceUrl,
     string Status,
-    DateTimeOffset CreatedAt
+    DateTimeOffset CreatedAt,
+    OpeningHoursData? OpeningHours = null
 )
 {
     public static PlaceDto FromEntity(Place p, string lang = "en")
@@ -56,7 +57,8 @@ public record PlaceDto(
             p.Source,
             p.SourceUrl,
             p.Status,
-            p.CreatedAt
+            p.CreatedAt,
+            OpeningHours: OpeningHoursData.FromJsonDocument(p.OpeningHours)
         );
     }
 }

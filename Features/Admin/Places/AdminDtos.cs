@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
+using LocalList.API.NET.Features.Places;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
 
@@ -42,7 +43,8 @@ public record AdminPlaceDto(
     string? SubcategoryEs,
     List<string>? BestForEs,
     List<string>? SuitableForEs,
-    string? TranslationStatusEs
+    string? TranslationStatusEs,
+    OpeningHoursData? OpeningHours = null
 )
 {
     public static AdminPlaceDto FromEntity(Place p) => new(
@@ -60,7 +62,8 @@ public record AdminPlaceDto(
         BestForEs: LanguageAccessor.ResolveStringList(p.BestForI18n, "es", null, isCurated: false),
         SuitableForEs: LanguageAccessor.ResolveStringList(p.SuitableForI18n, "es", null, isCurated: false),
         TranslationStatusEs: p.TranslationStatus?.RootElement.TryGetProperty("es", out var tsEs) == true
-            && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null
+            && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null,
+        OpeningHours: OpeningHoursData.FromJsonDocument(p.OpeningHours)
     );
 }
 
@@ -114,6 +117,7 @@ public class CreatePlaceRequest
     public int? AiVibeScore { get; set; }
     public int? VisitDurationMin { get; set; }
     public List<string>? Flags { get; set; }
+    public OpeningHoursData? OpeningHours { get; set; }
 }
 
 public class ReviewPlaceRequest

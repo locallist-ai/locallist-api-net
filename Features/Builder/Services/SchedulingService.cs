@@ -1,4 +1,5 @@
 using LocalList.API.NET.Features.Builder.Shared;
+using LocalList.API.NET.Features.Places;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Builder.Services;
@@ -302,22 +303,28 @@ public class SchedulingService
     {
         var clock      = DayStart;
         bool overpacked = false;
+        int orderIndex  = 0;
 
         for (int i = 0; i < places.Count; i++)
         {
             var place    = places[i];
             int duration = VisitDurationFor(place);
 
-            // Accumulate travel from previous stop BEFORE emitting this stop's arrival
+            // Accumulate travel from previous emitted stop BEFORE checking opening hours
             TravelInfoDto? travelInfo = null;
-            if (i > 0)
+            if (orderIndex > 0)
             {
-                var prev = places[i - 1];
-                if (prev.Latitude.HasValue && prev.Longitude.HasValue &&
+                // Find the last emitted stop to compute travel from
+                var prevStop = result.Stops.LastOrDefault(s => s.DayNumber == day);
+                var prevPlace = prevStop is not null
+                    ? places.FirstOrDefault(p => p.Id == prevStop.PlaceId)
+                    : null;
+
+                if (prevPlace?.Latitude.HasValue == true && prevPlace.Longitude.HasValue &&
                     place.Latitude.HasValue && place.Longitude.HasValue)
                 {
                     double dist  = Haversine(
-                        (double)prev.Latitude.Value, (double)prev.Longitude.Value,
+                        (double)prevPlace.Latitude.Value, (double)prevPlace.Longitude.Value,
                         (double)place.Latitude.Value, (double)place.Longitude.Value);
                     string mode  = dist < 2 ? "walk" : "drive";
                     int travelMin = EstimateTravelTime(dist, mode);
@@ -328,6 +335,28 @@ public class SchedulingService
                         duration_min = travelMin,
                         mode = mode
                     };
+                }
+            }
+
+            // Opening hours check — shift clock forward if needed, skip if no window fits
+            var openingHours = OpeningHoursData.FromJsonDocument(place.OpeningHours);
+            if (openingHours is not null)
+            {
+                if (!openingHours.IsOpenAt(clock))
+                {
+                    var next = openingHours.NextOpenAt(clock);
+                    if (next is null)
+                    {
+                        // No window left in the day — skip this place
+                        AddWarningOnce(result.Warnings, "place_closed_skipped");
+                        _logger.LogInformation(
+                            "Builder: schedule day={Day} place={Place} skipped (closed, no later window)",
+                            day, place.Name);
+                        continue;
+                    }
+                    // Advance clock to next opening — travel info absorbed into the shift
+                    clock = next.Value;
+                    travelInfo = null; // gap absorbed by opening wait
                 }
             }
 
@@ -343,20 +372,21 @@ public class SchedulingService
 
             _logger.LogInformation(
                 "Builder: schedule day={Day} stop={I} place={Place} arrival={Arrival} block={Block} dur={Dur}",
-                day, i, place.Name, arrival, DeriveTimeBlock(clock), duration);
+                day, orderIndex, place.Name, arrival, DeriveTimeBlock(clock), duration);
 
             result.Stops.Add(new ScheduledStopDto
             {
-                PlaceId             = place.Id,
-                DayNumber           = day,
-                OrderIndex          = i,
-                TimeBlock           = DeriveTimeBlock(clock),
-                SuggestedArrival    = arrival,
+                PlaceId              = place.Id,
+                DayNumber            = day,
+                OrderIndex           = orderIndex,
+                TimeBlock            = DeriveTimeBlock(clock),
+                SuggestedArrival     = arrival,
                 SuggestedDurationMin = duration,
-                TravelFromPrevious  = travelInfo
+                TravelFromPrevious   = travelInfo
             });
 
             clock += TimeSpan.FromMinutes(duration);
+            orderIndex++;
         }
     }
 
