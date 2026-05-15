@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Waitlist;
 
@@ -23,13 +24,15 @@ public partial class WaitlistController : ControllerBase
     private readonly ILogger<WaitlistController> _logger;
     private readonly IEmailMarketingService _emailMarketing;
     private readonly IConfiguration _configuration;
+    private readonly PostHogService _posthog;
 
-    public WaitlistController(LocalListDbContext db, ILogger<WaitlistController> logger, IEmailMarketingService emailMarketing, IConfiguration configuration)
+    public WaitlistController(LocalListDbContext db, ILogger<WaitlistController> logger, IEmailMarketingService emailMarketing, IConfiguration configuration, PostHogService posthog)
     {
         _db = db;
         _logger = logger;
         _emailMarketing = emailMarketing;
         _configuration = configuration;
+        _posthog = posthog;
     }
 
     [HttpPost]
@@ -60,20 +63,21 @@ public partial class WaitlistController : ControllerBase
             var ttclid = Truncate(request.Ttclid?.Trim(), 200);
             var fbclid = Truncate(request.Fbclid?.Trim(), 200);
             var gclid = Truncate(request.Gclid?.Trim(), 200);
+            var anonymousId = Truncate(request.AnonymousId?.Trim(), 64);
 
             await _db.Database.ExecuteSqlInterpolatedAsync($"""
                 INSERT INTO waitlist_entries (
                     email, created_at,
                     utm_source, utm_medium, utm_campaign, utm_content, utm_term,
                     referrer, landing_path, ip_hash, user_agent,
-                    ttclid, fbclid, gclid,
+                    ttclid, fbclid, gclid, anonymous_id,
                     first_touch_at, last_touch_at
                 )
                 VALUES (
                     {email}, NOW(),
                     {utmSource}, {utmMedium}, {utmCampaign}, {utmContent}, {utmTerm},
                     {referrer}, {landingPath}, {ipHash}, {userAgent},
-                    {ttclid}, {fbclid}, {gclid},
+                    {ttclid}, {fbclid}, {gclid}, {anonymousId},
                     NOW(), NOW()
                 )
                 ON CONFLICT (email) DO UPDATE SET
@@ -89,12 +93,26 @@ public partial class WaitlistController : ControllerBase
                     user_agent = EXCLUDED.user_agent,
                     ttclid = EXCLUDED.ttclid,
                     fbclid = EXCLUDED.fbclid,
-                    gclid = EXCLUDED.gclid
+                    gclid = EXCLUDED.gclid,
+                    anonymous_id = COALESCE(waitlist_entries.anonymous_id, EXCLUDED.anonymous_id)
                 """, ct);
 
             var count = await _db.WaitlistEntries.CountAsync(ct);
 
             _logger.LogInformation("Waitlist signup processed for {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
+
+            _ = _posthog.CaptureAsync(
+                distinctId: anonymousId ?? ipHash ?? email,
+                eventName: "waitlist_joined",
+                properties: new()
+                {
+                    ["utm_source"] = utmSource,
+                    ["utm_medium"] = utmMedium,
+                    ["utm_campaign"] = utmCampaign,
+                    ["ttclid"] = ttclid,
+                    ["referrer"] = referrer,
+                    ["position"] = count,
+                });
 
             // Send to Klaviyo (failure must not block signup)
             try

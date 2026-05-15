@@ -777,6 +777,11 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("first_touch_at");
 
+                    b.Property<string>("AnonymousId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("anonymous_id");
+
                     b.Property<string>("Gclid")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)")

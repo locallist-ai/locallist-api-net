@@ -5,6 +5,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -16,12 +17,14 @@ public class PlanEditController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlanEditController> _logger;
     private readonly LanguageAccessor _lang;
+    private readonly PostHogService _posthog;
 
-    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang)
+    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang, PostHogService posthog)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
+        _posthog = posthog;
     }
 
     [HttpPut("{id}/stops")]
@@ -77,6 +80,12 @@ public class PlanEditController : ControllerBase
         await transaction.CommitAsync(ct);
 
         _logger.LogInformation("User {UserId} updated stops for plan {PlanId} ({StopCount} stops)", userId, id, newStops.Count);
+
+        _ = _posthog.CaptureAsync(userId.Value.ToString(), "plan_edited", new()
+        {
+            ["plan_id"] = id.ToString(),
+            ["stop_count"] = newStops.Count,
+        });
 
         // Re-fetch with Place includes for the response
         var updatedPlan = await _db.Plans.AsNoTracking()

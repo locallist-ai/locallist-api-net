@@ -72,4 +72,8 @@ public class WaitlistEntry
 
     [Column("last_touch_at")]
     public DateTimeOffset? LastTouchAt { get; set; }
+
+    [Column("anonymous_id")]
+    [StringLength(64)]
+    public string? AnonymousId { get; set; }
 }

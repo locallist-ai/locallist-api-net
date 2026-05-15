@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Follow;
 
@@ -15,12 +16,14 @@ public class FollowController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly TimeProvider _clock;
     private readonly ILogger<FollowController> _logger;
+    private readonly PostHogService _posthog;
 
-    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger)
+    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog)
     {
         _db = db;
         _clock = clock;
         _logger = logger;
+        _posthog = posthog;
     }
 
     /// <summary>Creates a new follow session (state: active). Rejects if user already has an active session. Requires auth.</summary>
@@ -50,6 +53,13 @@ public class FollowController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Follow session started: {SessionId} for plan {PlanId} by user {UserId}", session.Id, request.PlanId, userId.Value);
+
+        _ = _posthog.CaptureAsync(userId.Value.ToString(), "follow_started", new()
+        {
+            ["plan_id"] = request.PlanId.ToString(),
+            ["session_id"] = session.Id.ToString(),
+        });
+
         return CreatedAtAction(nameof(GetActiveSession), new { }, session);
     }
 
@@ -145,6 +155,17 @@ public class FollowController : ControllerBase
 
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation("Follow session {SessionId}: {Action}", id, "complete");
+
+        var uid = await GetUserIdAsync(ct);
+        if (uid.HasValue)
+        {
+            _ = _posthog.CaptureAsync(uid.Value.ToString(), "follow_completed", new()
+            {
+                ["plan_id"] = session.PlanId.ToString(),
+                ["session_id"] = id.ToString(),
+            });
+        }
+
         return Ok(session);
     }
 

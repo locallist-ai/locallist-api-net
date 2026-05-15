@@ -10,6 +10,7 @@ using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
+using LocalList.API.NET.Shared.PostHog;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Pgvector.EntityFrameworkCore;
@@ -133,6 +134,11 @@ builder.Services.AddHttpClient<SlotExtractorService>(c => c.Timeout = TimeSpan.F
     });
 builder.Services.AddScoped<ChatAgentService>();
 builder.Services.AddScoped<ChatSecLogger>();
+builder.Services.AddHttpClient<PostHogService>(c =>
+{
+    c.BaseAddress = new Uri(builder.Configuration["PostHog:Host"] ?? "https://eu.i.posthog.com");
+    c.Timeout = TimeSpan.FromSeconds(5);
+});
 
 // Configure JSON formatting
 builder.Services.AddControllers().AddJsonOptions(options =>

@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Auth;
 
@@ -35,6 +36,7 @@ public class AppAuthController : ControllerBase
     private readonly IAppleIdTokenValidator _apple;
     private readonly IGoogleIdTokenValidator _google;
     private readonly ILogger<AppAuthController> _logger;
+    private readonly PostHogService _posthog;
 
     public AppAuthController(
         LocalListDbContext db,
@@ -44,7 +46,8 @@ public class AppAuthController : ControllerBase
         IRefreshTokenService refresh,
         IAppleIdTokenValidator apple,
         IGoogleIdTokenValidator google,
-        ILogger<AppAuthController> logger)
+        ILogger<AppAuthController> logger,
+        PostHogService posthog)
     {
         _db = db;
         _clock = clock;
@@ -54,6 +57,7 @@ public class AppAuthController : ControllerBase
         _apple = apple;
         _google = google;
         _logger = logger;
+        _posthog = posthog;
     }
 
     [HttpPost("signin")]
@@ -80,6 +84,7 @@ public class AppAuthController : ControllerBase
             : await _db.Users.FirstOrDefaultAsync(
                 u => u.GoogleUserId == providerSub || u.Email == claims.Email, ct);
 
+        bool isNewUser = user is null;
         if (user is null)
         {
             user = new User
@@ -109,6 +114,19 @@ public class AppAuthController : ControllerBase
             }
         }
 
+        var uid = user.Id.ToString();
+        _ = _posthog.IdentifyAsync(uid, user.Email!, user.Name);
+        if (isNewUser)
+        {
+            _ = _posthog.CaptureAsync(uid, "user_signed_up", new() { ["provider"] = request.Provider });
+            if (!string.IsNullOrEmpty(request.AnonymousId))
+                _ = _posthog.AliasAsync(uid, request.AnonymousId);
+        }
+        else
+        {
+            _ = _posthog.CaptureAsync(uid, "user_signed_in", new() { ["provider"] = request.Provider });
+        }
+
         return Ok(await IssueTokensAsync(user, ct));
     }
 
@@ -130,6 +148,12 @@ public class AppAuthController : ControllerBase
         _db.Users.Add(user);
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation("New user via email/password registration");
+
+        var uid = user.Id.ToString();
+        _ = _posthog.IdentifyAsync(uid, user.Email!, user.Name);
+        _ = _posthog.CaptureAsync(uid, "user_signed_up", new() { ["provider"] = "email" });
+        if (!string.IsNullOrEmpty(request.AnonymousId))
+            _ = _posthog.AliasAsync(uid, request.AnonymousId);
 
         return Ok(await IssueTokensAsync(user, ct));
     }
@@ -162,6 +186,11 @@ public class AppAuthController : ControllerBase
         {
             return Unauthorized(new { error = "Invalid credentials" });
         }
+
+        var uid = user.Id.ToString();
+        _ = _posthog.CaptureAsync(uid, "user_signed_in", new() { ["provider"] = "email" });
+        if (!string.IsNullOrEmpty(request.AnonymousId))
+            _ = _posthog.AliasAsync(uid, request.AnonymousId);
 
         return Ok(await IssueTokensAsync(user, ct));
     }
