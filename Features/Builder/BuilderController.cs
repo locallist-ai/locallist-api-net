@@ -7,6 +7,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Builder;
@@ -160,6 +161,27 @@ public class BuilderController : ControllerBase
 
             if (stopsToInsert.Any())
                 _db.PlanStops.AddRange(stopsToInsert);
+
+            var filledSignals = (short)(
+                (request.TripContext?.City != null ? 1 : 0) +
+                (request.TripContext?.Days.HasValue == true ? 1 : 0) +
+                (request.TripContext?.GroupType != null ? 1 : 0) +
+                ((request.TripContext?.Categories?.Count > 0 || request.TripContext?.Subcategories?.Count > 0) ? 1 : 0) +
+                (request.TripContext?.Budget != null ? 1 : 0));
+
+            _db.PlanMetrics.Add(new PlanMetric
+            {
+                PlanId = plan.Id,
+                GenerationSource = "builder",
+                SignalsFilled = filledSignals,
+                NumDays = result.Prefs.Days,
+                NumStops = planStopsData.Count,
+                NumCategories = result.Prefs.Categories?.Count ?? 0,
+                GroupType = result.Prefs.GroupType,
+                Budget = request.TripContext?.Budget,
+                LatencyMs = result.GeminiDiagnostics?.LatencyMs ?? 0,
+                CostUsd = result.GeminiDiagnostics?.CostUsd,
+            });
 
             await _db.SaveChangesAsync(ct);
 
