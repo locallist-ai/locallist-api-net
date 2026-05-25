@@ -75,8 +75,7 @@ public class CreatePlaceRequest
     [Required, StringLength(50)]
     public required string Category { get; set; }
 
-    [Required, MinLength(1)]
-    public required string WhyThisPlace { get; set; }
+    public string? WhyThisPlace { get; set; }
 
     [StringLength(100)]
     public string? Subcategory { get; set; }
@@ -256,5 +255,6 @@ public record GooglePlacePreview(
     List<string> Types,
     string? Website,
     string? Phone,
+    string? EditorialSummary,
     bool ExistsInLib
 );

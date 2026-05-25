@@ -20,6 +20,7 @@ public class LocalListDbContext : DbContext
     public DbSet<UserProfile> UserProfiles { get; set; } = null!;
     public DbSet<ChatTurn> ChatTurns { get; set; } = null!;
     public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
+    public DbSet<Subcategory> Subcategories { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -209,5 +210,13 @@ public class LocalListDbContext : DbContext
 
         modelBuilder.Entity<PlanMetric>()
             .HasIndex(pm => new { pm.PromptVersion, pm.CreatedAt });
+
+        modelBuilder.Entity<Subcategory>()
+            .HasQueryFilter(s => s.DeletedAt == null);
+
+        modelBuilder.Entity<Subcategory>()
+            .HasIndex(s => new { s.CategoryKey, s.Key })
+            .IsUnique()
+            .HasFilter("deleted_at IS NULL");
     }
 }

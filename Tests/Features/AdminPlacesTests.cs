@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Taxonomy;
 
 namespace LocalList.API.Tests.Features;
 
@@ -505,6 +507,500 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var client = CreateAdminClient();
         var response = await client.PatchAsync($"/admin/places/{Guid.NewGuid()}/postpone", content: null);
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // ── PR-B: Gemini description generation ──────────────────────────────
+
+    [Fact]
+    public async Task BulkImport_WithEmptyDescription_CallsGeminiAndPersistsResult()
+    {
+        fixture.FakeGemini.Responder = _ => GeminiOk("A lively spot beloved for its craft cocktails and warm ambiance.");
+        try
+        {
+            var client = CreateAdminClient();
+            var payload = new[]
+            {
+                new { name = $"Empty Desc Place {Guid.NewGuid():N}", category = "Nightlife",
+                      whyThisPlace = (string?)null, city = "Miami" }
+            };
+            var response = await client.PostAsJsonAsync("/admin/places/bulk", payload);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(1, body.GetProperty("created").GetInt32());
+
+            // Verify description was generated and persisted (not empty)
+            var db = fixture.GetDbContext();
+            var placeName = payload[0].name;
+            var place = await db.Places.FirstAsync(p => p.Name == placeName);
+            Assert.False(string.IsNullOrEmpty(place.WhyThisPlace));
+            Assert.DoesNotContain("Pending curatorial", place.WhyThisPlace);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task BulkImport_WithManualDescription_DoesNotCallGemini()
+    {
+        var callCount = 0;
+        fixture.FakeGemini.Responder = req =>
+        {
+            // Only count calls that look like a description generation (not other Gemini calls)
+            callCount++;
+            return GeminiOk("should not be called");
+        };
+        try
+        {
+            var client = CreateAdminClient();
+            var manualDesc = "Handcrafted description — already written by curator.";
+            var payload = new[]
+            {
+                new { name = $"Manual Desc Place {Guid.NewGuid():N}", category = "Food",
+                      whyThisPlace = manualDesc, city = "Miami" }
+            };
+            var countBefore = callCount;
+            var response = await client.PostAsJsonAsync("/admin/places/bulk", payload);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(countBefore, callCount); // no Gemini calls triggered
+
+            var db = fixture.GetDbContext();
+            var placeName = payload[0].name;
+            var place = await db.Places.FirstAsync(p => p.Name == placeName);
+            Assert.Equal(manualDesc, place.WhyThisPlace);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task BulkImport_WithGooglePlaceholder_CallsGeminiAndReplaces()
+    {
+        const string placeholder = "Imported from Google Places. Pending curatorial copy.";
+        fixture.FakeGemini.Responder = _ => GeminiOk("The city's best-kept secret for handmade pasta.");
+        try
+        {
+            var client = CreateAdminClient();
+            var payload = new[]
+            {
+                new { name = $"Placeholder Desc {Guid.NewGuid():N}", category = "Food",
+                      whyThisPlace = placeholder, city = "Miami" }
+            };
+            var response = await client.PostAsJsonAsync("/admin/places/bulk", payload);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            var db = fixture.GetDbContext();
+            var placeName = payload[0].name;
+            var place = await db.Places.FirstAsync(p => p.Name == placeName);
+            Assert.NotEqual(placeholder, place.WhyThisPlace);
+            Assert.False(string.IsNullOrEmpty(place.WhyThisPlace));
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task SuggestDescription_WithoutAuth_Returns401()
+    {
+        var client = fixture.CreateClient();
+        var response = await client.PostAsync($"/admin/places/{Guid.NewGuid()}/suggest-description", content: null);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SuggestDescription_ReturnsGeneratedText_DoesNotPersist()
+    {
+        var db = fixture.GetDbContext();
+        var original = "Original description — should not change.";
+        var seededId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = seededId,
+            Name = $"Suggest Target {Guid.NewGuid():N}",
+            Category = "Coffee",
+            City = "Miami",
+            WhyThisPlace = original,
+            Status = "in_review",
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("Sun-drenched terrace with specialty single-origin brews.");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync($"/admin/places/{seededId}/suggest-description", content: null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            var suggested = body.GetProperty("whyThisPlace").GetString();
+            Assert.False(string.IsNullOrEmpty(suggested));
+
+            // Must NOT have persisted — DB still has the original
+            var freshDb = fixture.GetDbContext();
+            var unchanged = await freshDb.Places.FirstAsync(p => p.Id == seededId);
+            Assert.Equal(original, unchanged.WhyThisPlace);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task SuggestDescription_GeminiUnavailable_Returns503()
+    {
+        var db = fixture.GetDbContext();
+        var seededId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = seededId,
+            Name = $"Suggest 503 {Guid.NewGuid():N}",
+            Category = "Shopping",
+            City = "Miami",
+            WhyThisPlace = "placeholder",
+            Status = "in_review",
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError);
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync($"/admin/places/{seededId}/suggest-description", content: null);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task BackfillDescriptions_DryRun_DoesNotMutate()
+    {
+        var db = fixture.GetDbContext();
+        var seededId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = seededId,
+            Name = $"Backfill DryRun {Guid.NewGuid():N}",
+            Category = "Wellness",
+            City = "Miami",
+            WhyThisPlace = "",
+            Status = "in_review",
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("Should not appear.");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync("/admin/places/backfill-descriptions?dryRun=true&limit=10", content: null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.True(body.GetProperty("dryRun").GetBoolean());
+            Assert.True(body.GetProperty("candidates").GetInt32() >= 1);
+
+            // DB must be unchanged
+            var freshDb = fixture.GetDbContext();
+            var place = await freshDb.Places.FirstAsync(p => p.Id == seededId);
+            Assert.Equal("", place.WhyThisPlace);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task BackfillDescriptions_OnlyTouchesPlaceholderOrEmpty()
+    {
+        var db = fixture.GetDbContext();
+        var realDescId = Guid.NewGuid();
+        var emptyId = Guid.NewGuid();
+        var placeholderId = Guid.NewGuid();
+
+        db.Places.AddRange(
+            new Place { Id = realDescId, Name = $"Real Desc {Guid.NewGuid():N}", Category = "Food",
+                City = "Miami", WhyThisPlace = "A real handcrafted description.", Status = "in_review" },
+            new Place { Id = emptyId, Name = $"Empty Desc {Guid.NewGuid():N}", Category = "Food",
+                City = "Miami", WhyThisPlace = "", Status = "in_review" },
+            new Place { Id = placeholderId, Name = $"Placeholder Desc {Guid.NewGuid():N}", Category = "Food",
+                City = "Miami", WhyThisPlace = "Imported from Google Places. Pending curatorial copy.",
+                Status = "in_review" }
+        );
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("Fresh AI description for the place.");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync("/admin/places/backfill-descriptions?dryRun=false&limit=200", content: null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            var freshDb = fixture.GetDbContext();
+            var realDesc = await freshDb.Places.FirstAsync(p => p.Id == realDescId);
+            var empty = await freshDb.Places.FirstAsync(p => p.Id == emptyId);
+            var placeholder = await freshDb.Places.FirstAsync(p => p.Id == placeholderId);
+
+            Assert.Equal("A real handcrafted description.", realDesc.WhyThisPlace);
+            Assert.False(string.IsNullOrEmpty(empty.WhyThisPlace));
+            Assert.NotEqual("Imported from Google Places. Pending curatorial copy.", placeholder.WhyThisPlace);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task GetPlaces_WithSearch_FiltersByNameCaseInsensitive()
+    {
+        var db = fixture.GetDbContext();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        db.Places.AddRange(
+            new Place { Id = Guid.NewGuid(), Name = $"Ramen Yokohama {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" },
+            new Place { Id = Guid.NewGuid(), Name = $"Sushi Bar {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" },
+            new Place { Id = Guid.NewGuid(), Name = $"Burger House {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" }
+        );
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+
+        var resLower = await client.GetAsync($"/admin/places?status=in_review&search=ramen+yokohama+{suffix}");
+        Assert.Equal(HttpStatusCode.OK, resLower.StatusCode);
+        var bodyLower = await resLower.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, bodyLower.GetProperty("total").GetInt32());
+
+        var resUpper = await client.GetAsync($"/admin/places?status=in_review&search=RAMEN+YOKOHAMA+{suffix}");
+        Assert.Equal(HttpStatusCode.OK, resUpper.StatusCode);
+        var bodyUpper = await resUpper.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, bodyUpper.GetProperty("total").GetInt32());
+    }
+
+    [Fact]
+    public async Task GetPlaces_WithSearch_AppliesAfterStatusFilter()
+    {
+        var db = fixture.GetDbContext();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        db.Places.AddRange(
+            new Place { Id = Guid.NewGuid(), Name = $"Ramen Search {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" },
+            new Place { Id = Guid.NewGuid(), Name = $"Ramen Search {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "published" }
+        );
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var res = await client.GetAsync($"/admin/places?status=in_review&search=ramen+search+{suffix}");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, body.GetProperty("total").GetInt32());
+        Assert.Equal("in_review", body.GetProperty("places")[0].GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task GetPlaces_SearchWithLikeWildcards_TreatsAsLiteral()
+    {
+        var db = fixture.GetDbContext();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        db.Places.AddRange(
+            new Place { Id = Guid.NewGuid(), Name = $"100% Pure Ramen {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" },
+            new Place { Id = Guid.NewGuid(), Name = $"Pure Ramen {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" },
+            new Place { Id = Guid.NewGuid(), Name = $"Pure_Bar {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" },
+            new Place { Id = Guid.NewGuid(), Name = $"Pure Bar {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" }
+        );
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+
+        // "%" must match only the name literally containing "%" — not all rows.
+        var resPercent = await client.GetAsync($"/admin/places?status=in_review&search=100%25+Pure+Ramen+{suffix}");
+        Assert.Equal(HttpStatusCode.OK, resPercent.StatusCode);
+        var bodyPercent = await resPercent.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, bodyPercent.GetProperty("total").GetInt32());
+
+        // "_" must match only the name literally containing "_" — not any 1-char wildcard.
+        var resUnderscore = await client.GetAsync($"/admin/places?status=in_review&search=Pure_Bar+{suffix}");
+        Assert.Equal(HttpStatusCode.OK, resUnderscore.StatusCode);
+        var bodyUnderscore = await resUnderscore.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, bodyUnderscore.GetProperty("total").GetInt32());
+
+        // Backslash must not cause a 500.
+        var resBackslash = await client.GetAsync($"/admin/places?status=in_review&search={Uri.EscapeDataString(@"\")}");
+        Assert.Equal(HttpStatusCode.OK, resBackslash.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetPlaces_SearchOverlong_TruncatesAt100()
+    {
+        var db = fixture.GetDbContext();
+        db.Places.Add(new Place { Id = Guid.NewGuid(), Name = "Ramen Yokohama", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "in_review" });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        // 200-char search — server truncates, never 500.
+        var longSearch = new string('a', 200);
+        var res = await client.GetAsync($"/admin/places?status=in_review&search={longSearch}");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+    }
+
+    // ── BackfillDescriptions: Google-first + Gemini fallback ──────────────
+
+    [Fact]
+    public async Task BackfillDescriptions_GoogleFirst_UsesEditorialWhenAvailable()
+    {
+        var googlePlaceId = $"ChIJbackfill-google-{Guid.NewGuid():N}";
+        const string editorial = "A sun-drenched terrace beloved by locals for craft ramen.";
+
+        var db = fixture.GetDbContext();
+        var placeId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = placeId,
+            Name = $"Google Editorial Test {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = PlaceTaxonomy.GooglePlaceholderWhyThisPlace,
+            Status = "in_review",
+            GooglePlaceId = googlePlaceId,
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGooglePlaces.DetailsByPlaceId[googlePlaceId] = new GooglePlaceDetails(
+            Id: googlePlaceId, Name: "Test", FormattedAddress: null,
+            City: "Miami", Neighborhood: null,
+            Lat: 25.77m, Lng: -80.19m,
+            PrimaryType: "restaurant", Types: ["restaurant"],
+            PriceLevel: null, Photos: [],
+            Rating: null, ReviewCount: null,
+            Website: null, Phone: null,
+            EditorialSummary: editorial);
+
+        var geminiCalled = false;
+        fixture.FakeGemini.Responder = _ => { geminiCalled = true; return GeminiOk("should not be used"); };
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync(
+                "/admin/places/backfill-descriptions?dryRun=false&limit=10", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(1, body.GetProperty("googleFilled").GetInt32());
+            Assert.Equal(0, body.GetProperty("geminiFilled").GetInt32());
+            Assert.False(geminiCalled);
+
+            var freshDb = fixture.GetDbContext();
+            var saved = await freshDb.Places.FirstAsync(p => p.Id == placeId);
+            Assert.Equal(editorial, saved.WhyThisPlace);
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+            fixture.FakeGooglePlaces.DetailsByPlaceId.Remove(googlePlaceId);
+        }
+    }
+
+    [Fact]
+    public async Task BackfillDescriptions_FallsBackToGemini_WhenGoogleHasNoEditorial()
+    {
+        var googlePlaceId = $"ChIJbackfill-noedit-{Guid.NewGuid():N}";
+        const string geminiText = "A LocalList-curated space where community gathers.";
+
+        var db = fixture.GetDbContext();
+        var placeId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = placeId,
+            Name = $"Google No Editorial {Guid.NewGuid():N}",
+            Category = "Coffee",
+            City = "Miami",
+            WhyThisPlace = PlaceTaxonomy.GooglePlaceholderWhyThisPlace,
+            Status = "in_review",
+            GooglePlaceId = googlePlaceId,
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGooglePlaces.DetailsByPlaceId[googlePlaceId] = new GooglePlaceDetails(
+            Id: googlePlaceId, Name: "Test", FormattedAddress: null,
+            City: "Miami", Neighborhood: null,
+            Lat: 25.77m, Lng: -80.19m,
+            PrimaryType: "coffee_shop", Types: ["coffee_shop"],
+            PriceLevel: null, Photos: [],
+            Rating: null, ReviewCount: null,
+            Website: null, Phone: null,
+            EditorialSummary: null);
+
+        fixture.FakeGemini.Responder = _ => GeminiOk(geminiText);
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync(
+                "/admin/places/backfill-descriptions?dryRun=false&limit=10", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            // Aggregate counts may include other fixture-seeded places; verify the specific place
+            Assert.True(body.GetProperty("geminiFilled").GetInt32() >= 1);
+
+            var freshDb = fixture.GetDbContext();
+            var saved = await freshDb.Places.FirstAsync(p => p.Id == placeId);
+            Assert.Equal(geminiText, saved.WhyThisPlace);
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+            fixture.FakeGooglePlaces.DetailsByPlaceId.Remove(googlePlaceId);
+        }
+    }
+
+    [Fact]
+    public async Task BackfillDescriptions_ExcludesRejectedPlaces()
+    {
+        var db = fixture.GetDbContext();
+        var rejectedId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = rejectedId,
+            Name = $"Rejected Placeholder {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = PlaceTaxonomy.GooglePlaceholderWhyThisPlace,
+            Status = "rejected",
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("should not be used for rejected");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync(
+                "/admin/places/backfill-descriptions?dryRun=false&limit=200", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            var freshDb = fixture.GetDbContext();
+            var rejected = await freshDb.Places.FirstAsync(p => p.Id == rejectedId);
+            Assert.Equal(PlaceTaxonomy.GooglePlaceholderWhyThisPlace, rejected.WhyThisPlace);
+        }
+        finally { fixture.FakeGemini.Responder = null; }
+    }
+
+    [Fact]
+    public async Task GoogleSearch_IncludesEditorialSummary_WhenGoogleReturnsIt()
+    {
+        const string editorial = "A cozy ramen joint with handmade noodles.";
+        fixture.FakeGooglePlaces.SearchResponder = (_, _) => Task.FromResult<List<GooglePlacePreview>?>(
+        [
+            new GooglePlacePreview(
+                GooglePlaceId: $"ChIJtest-{Guid.NewGuid():N}",
+                Name: "Test Ramen",
+                FormattedAddress: "123 Main St, Miami",
+                Lat: 25.76m, Lng: -80.19m,
+                Rating: 4.5m, ReviewCount: 200,
+                PriceLevel: "$$",
+                Photos: [],
+                Types: ["restaurant"],
+                Website: null,
+                Phone: null,
+                EditorialSummary: editorial,
+                ExistsInLib: false)
+        ]);
+
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsJsonAsync("/admin/places/google-search",
+                new { query = "ramen", city = "Miami" });
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            var first = body.GetProperty("results")[0];
+            Assert.Equal(editorial, first.GetProperty("editorialSummary").GetString());
+        }
+        finally { fixture.FakeGooglePlaces.SearchResponder = null; }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
