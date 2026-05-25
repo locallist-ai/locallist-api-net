@@ -7,6 +7,7 @@ using Npgsql;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Search;
 
 namespace LocalList.API.NET.Features.Cities;
 
@@ -64,13 +65,15 @@ public class CitiesController : ControllerBase
         if (queryNorm.Length < MinSearchLength)
             return BadRequest(new { error = $"q must contain at least {MinSearchLength} usable characters" });
 
+        var escapedNorm = LikePatterns.Escape(queryNorm);
+
         // Seeds visibles para todos; ciudades de usuario solo para su creador.
         Guid? currentUserId = null;
         if (User.Identity?.IsAuthenticated == true)
             currentUserId = await User.GetUserIdAsync(_db, ct);
 
         var matches = await _db.Cities
-            .Where(c => c.NormalizedName.StartsWith(queryNorm)
+            .Where(c => EF.Functions.ILike(c.NormalizedName, $"{escapedNorm}%", @"\")
                         && (c.Source == "seed" || (currentUserId != null && c.CreatedById == currentUserId)))
             .OrderBy(c => c.Name)
             .Take(10)

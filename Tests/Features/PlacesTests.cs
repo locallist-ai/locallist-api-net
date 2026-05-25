@@ -184,6 +184,27 @@ public class PlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal("Detail Spot", body.GetProperty("name").GetString());
     }
 
+    [Fact]
+    public async Task GetPlaces_PublicSearchWithWildcards_EscapesAsLiteral()
+    {
+        var db = fixture.GetDbContext();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        db.Places.AddRange(
+            new Place { Id = Guid.NewGuid(), Name = $"100% Ramen {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "published" },
+            new Place { Id = Guid.NewGuid(), Name = $"Pure Ramen {suffix}", Category = "Food", City = "Miami", WhyThisPlace = "test", Status = "published" }
+        );
+        await db.SaveChangesAsync();
+
+        // Anonymous call — no auth header.
+        var client = fixture.CreateClient();
+        var res = await client.GetAsync($"/places?search=100%25+Ramen+{suffix}");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        // "%" treated as literal: only "100% Ramen …" matches, not both.
+        Assert.Equal(1, body.GetProperty("total").GetInt32());
+        Assert.Equal($"100% Ramen {suffix}", body.GetProperty("places")[0].GetProperty("name").GetString());
+    }
+
     private static Place MakePlace(
         string name,
         string status = "published",

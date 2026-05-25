@@ -1251,6 +1251,64 @@ namespace LocalList.API.NET.Migrations
 
                     b.Navigation("SubmittedPlaces");
                 });
+
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.Subcategory", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("CategoryKey")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("category_key");
+
+                    b.Property<Guid?>("CreatedByAdminUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by_admin_user_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("key");
+
+                    b.Property<string>("LabelEn")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("label_en");
+
+                    b.Property<string>("LabelEs")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("label_es");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id")
+                        .HasName("PK_subcategories");
+
+                    b.HasIndex("CategoryKey", "Key")
+                        .IsUnique()
+                        .HasDatabaseName("IX_subcategories_category_key_key")
+                        .HasFilter("deleted_at IS NULL");
+
+                    b.ToTable("subcategories");
+                });
 #pragma warning restore 612, 618
         }
     }

@@ -41,7 +41,7 @@ public class GooglePlacesService : IGooglePlacesService
         "places.id,places.displayName,places.formattedAddress," +
         "places.location,places.types,places.rating,places.userRatingCount," +
         "places.priceLevel,places.photos,places.websiteUri," +
-        "places.internationalPhoneNumber";
+        "places.internationalPhoneNumber,places.editorialSummary";
 
     private const string DetailsFieldMask =
         "id,displayName,formattedAddress,location,types,primaryType," +
@@ -130,6 +130,7 @@ public class GooglePlacesService : IGooglePlacesService
                     Types: p.Types ?? [],
                     Website: p.WebsiteUri,
                     Phone: p.InternationalPhoneNumber,
+                    EditorialSummary: p.EditorialSummary?.Text,
                     ExistsInLib: false
                 ))
                 .ToList();

@@ -8,7 +8,9 @@ using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Search;
 using LocalList.API.NET.Shared.Taxonomy;
+using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -24,6 +26,7 @@ public class AdminPlacesController : ControllerBase
     private readonly EmbeddingService _embeddings;
     private readonly AiProviderService _ai;
     private readonly IGooglePlacesService _googlePlaces;
+    private readonly ITaxonomySvc _taxonomy;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -36,7 +39,8 @@ public class AdminPlacesController : ControllerBase
         TimeProvider clock,
         EmbeddingService embeddings,
         AiProviderService ai,
-        IGooglePlacesService googlePlaces)
+        IGooglePlacesService googlePlaces,
+        ITaxonomySvc taxonomy)
     {
         _db = db;
         _logger = logger;
@@ -44,6 +48,7 @@ public class AdminPlacesController : ControllerBase
         _embeddings = embeddings;
         _ai = ai;
         _googlePlaces = googlePlaces;
+        _taxonomy = taxonomy;
     }
 
     [HttpGet("cities")]
@@ -109,8 +114,9 @@ public class AdminPlacesController : ControllerBase
         if (!string.IsNullOrEmpty(category))
             query = query.Where(p => p.Category == category);
 
-        if (!string.IsNullOrEmpty(search))
-            query = query.Where(p => p.Name.Contains(search));
+        var escapedSearch = LikePatterns.Normalize(search);
+        if (!string.IsNullOrEmpty(escapedSearch))
+            query = query.Where(p => EF.Functions.ILike(p.Name, $"%{escapedSearch}%", @"\"));
 
         var total = await query.CountAsync(ct);
 
@@ -147,7 +153,7 @@ public class AdminPlacesController : ControllerBase
         if (!PlaceTaxonomy.IsValidCategory(request.Category))
             return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", PlaceTaxonomy.Categories)}" });
 
-        if (!PlaceTaxonomy.IsValidSubcategory(request.Category, request.Subcategory))
+        if (!await _taxonomy.IsValidSubcategoryAsync(request.Category, request.Subcategory, ct))
             return BadRequest(new { error = $"Invalid subcategory '{request.Subcategory}' for category '{request.Category}'.", code = "subcategory_not_in_taxonomy" });
 
         var userId = await User.GetUserIdAsync(_db, ct);
@@ -158,7 +164,7 @@ public class AdminPlacesController : ControllerBase
             Id = Guid.NewGuid(),
             Name = request.Name.Trim(),
             Category = request.Category,
-            WhyThisPlace = request.WhyThisPlace.Trim(),
+            WhyThisPlace = request.WhyThisPlace?.Trim() ?? string.Empty,
             Subcategory = request.Subcategory?.Trim(),
             Neighborhood = request.Neighborhood?.Trim(),
             City = request.City?.Trim() ?? "Miami",
@@ -232,7 +238,7 @@ public class AdminPlacesController : ControllerBase
                 continue;
             }
 
-            if (!PlaceTaxonomy.IsValidSubcategory(request.Category, request.Subcategory))
+            if (!await _taxonomy.IsValidSubcategoryAsync(request.Category, request.Subcategory, ct))
             {
                 results.Add(new BulkImportItemResult(request.Name, "error", $"Invalid subcategory '{request.Subcategory}' for category '{request.Category}'", null));
                 errors++;
@@ -249,6 +255,18 @@ public class AdminPlacesController : ControllerBase
             }
             existingNameCities.Add((nameKey, cityKey));
             validRequests.Add(request);
+        }
+
+        // Fill empty/placeholder descriptions with Gemini in parallel batches of 5
+        foreach (var chunk in validRequests.Where(r => PlaceTaxonomy.IsPlaceholderOrEmpty(r.WhyThisPlace)).Chunk(5))
+        {
+            await Task.WhenAll(chunk.Select(async req =>
+            {
+                var generated = await _ai.GeneratePlaceDescriptionAsync(
+                    req.Name, req.City ?? "Miami", req.Category, req.Subcategory,
+                    null, req.GoogleRating, req.GoogleReviewCount, req.Neighborhood, ct);
+                if (generated != null) req.WhyThisPlace = generated;
+            }));
         }
 
         var (created, skippedByGoogle, addedPlaces) = await InsertWithDedupAsync(validRequests, userId, now, ct);
@@ -332,7 +350,8 @@ public class AdminPlacesController : ControllerBase
             // Step 3 — map to CreatePlaceRequest
             var category = PlaceTaxonomy.CategoryFromGoogleTypes(details.PrimaryType, details.Types);
             var validCategory = category ?? "Culture";
-            var subcategory = PlaceTaxonomy.CanonicalSubcategoryFromGoogleTypes(validCategory, details.Types, details.Name);
+            var allowedSubs = (await _taxonomy.GetByCategoryAsync(validCategory, ct)).Select(s => s.Key).ToList();
+            var subcategory = PlaceTaxonomy.CanonicalSubcategoryFromGoogleTypes(validCategory, details.Types, allowedSubs, details.Name);
 
             toImport.Add(new CreatePlaceRequest
             {
@@ -361,6 +380,18 @@ public class AdminPlacesController : ControllerBase
         {
             var failed = rows.Count;
             return Ok(new ImportFromUrlsResponse(0, 0, 0, failed, rows));
+        }
+
+        // Fill empty/placeholder descriptions with Gemini before persisting
+        foreach (var chunk in toImport.Where(r => PlaceTaxonomy.IsPlaceholderOrEmpty(r.WhyThisPlace)).Chunk(5))
+        {
+            await Task.WhenAll(chunk.Select(async req =>
+            {
+                var generated = await _ai.GeneratePlaceDescriptionAsync(
+                    req.Name, req.City ?? request.DefaultCity ?? "Miami", req.Category, req.Subcategory,
+                    null, req.GoogleRating, req.GoogleReviewCount, req.Neighborhood, ct);
+                if (generated != null) req.WhyThisPlace = generated;
+            }));
         }
 
         // Step 4 — bulk insert with dedup
@@ -432,7 +463,7 @@ public class AdminPlacesController : ControllerBase
             return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", PlaceTaxonomy.Categories)}" });
 
         var effectiveCategory = request.Category ?? place.Category;
-        if (request.Subcategory != null && !PlaceTaxonomy.IsValidSubcategory(effectiveCategory, request.Subcategory))
+        if (request.Subcategory != null && !await _taxonomy.IsValidSubcategoryAsync(effectiveCategory, request.Subcategory, ct))
             return BadRequest(new { error = $"Invalid subcategory '{request.Subcategory}' for category '{effectiveCategory}'.", code = "subcategory_not_in_taxonomy" });
 
         // Apply non-null fields only (partial update)
@@ -737,7 +768,7 @@ public class AdminPlacesController : ControllerBase
                 Id = Guid.NewGuid(),
                 Name = req.Name.Trim(),
                 Category = req.Category,
-                WhyThisPlace = req.WhyThisPlace.Trim(),
+                WhyThisPlace = req.WhyThisPlace?.Trim() ?? string.Empty,
                 Subcategory = req.Subcategory?.Trim(),
                 Neighborhood = req.Neighborhood?.Trim(),
                 City = req.City?.Trim() ?? "Miami",
@@ -775,6 +806,106 @@ public class AdminPlacesController : ControllerBase
         }
 
         return (created, skipped, placesToAdd);
+    }
+
+    [HttpPost("{id}/suggest-description")]
+    public async Task<IActionResult> SuggestDescription(Guid id, CancellationToken ct)
+    {
+        var place = await _db.Places.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (place == null) return NotFound(new { error = "Place not found" });
+
+        var description = await _ai.GeneratePlaceDescriptionAsync(
+            place.Name, place.City, place.Category, place.Subcategory,
+            null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
+
+        if (description == null)
+            return StatusCode(503, new { error = "Description generation service unavailable." });
+
+        _logger.LogInformation("SuggestDescription: place={PlaceId} chars={Len}", place.Id, description.Length);
+
+        return Ok(new { whyThisPlace = description });
+    }
+
+    [HttpPost("backfill-descriptions")]
+    public async Task<IActionResult> BackfillDescriptions(
+        [FromQuery] bool dryRun = true,
+        [FromQuery] int limit = 50,
+        CancellationToken ct = default)
+    {
+        limit = Math.Clamp(limit, 1, 200);
+
+        var candidates = await _db.Places
+            .Where(p => p.Status != "rejected" &&
+                        (p.WhyThisPlace == "" || p.WhyThisPlace == PlaceTaxonomy.GooglePlaceholderWhyThisPlace))
+            .OrderBy(p => p.CreatedAt)
+            .Take(limit)
+            .ToListAsync(ct);
+
+        var bucketGoogle = candidates.Where(p => p.GooglePlaceId != null).ToList();
+        var bucketGemini = candidates.Where(p => p.GooglePlaceId == null).ToList();
+
+        if (dryRun)
+            return Ok(new
+            {
+                candidates = candidates.Count,
+                wouldFetchGoogle = bucketGoogle.Count,
+                wouldFallbackGemini = bucketGemini.Count,
+                dryRun = true
+            });
+
+        int googleFilled = 0, geminiFilled = 0, failed = 0;
+        var now = _clock.GetUtcNow();
+
+        // Bucket A: try Google editorial first (chunks of 10)
+        foreach (var chunk in bucketGoogle.Chunk(10))
+        {
+            foreach (var place in chunk)
+            {
+                if (ct.IsCancellationRequested) break;
+                var details = await _googlePlaces.GetDetailsAsync(place.GooglePlaceId!, ct);
+                if (!string.IsNullOrWhiteSpace(details?.EditorialSummary))
+                {
+                    place.WhyThisPlace = details.EditorialSummary;
+                    place.UpdatedAt = now;
+                    Interlocked.Increment(ref googleFilled);
+                }
+                else
+                {
+                    bucketGemini.Add(place);
+                }
+            }
+            if (!ct.IsCancellationRequested)
+                await _db.SaveChangesAsync(ct);
+        }
+
+        // Bucket B: Gemini fallback (no GooglePlaceId + Google misses)
+        foreach (var chunk in bucketGemini.Chunk(5))
+        {
+            await Task.WhenAll(chunk.Select(async place =>
+            {
+                var description = await _ai.GeneratePlaceDescriptionAsync(
+                    place.Name, place.City, place.Category, place.Subcategory,
+                    null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
+                if (description != null)
+                {
+                    place.WhyThisPlace = description;
+                    place.UpdatedAt = now;
+                    Interlocked.Increment(ref geminiFilled);
+                }
+                else
+                {
+                    Interlocked.Increment(ref failed);
+                }
+            }));
+            if (!ct.IsCancellationRequested)
+                await _db.SaveChangesAsync(ct);
+        }
+
+        _logger.LogInformation(
+            "backfill-descriptions: googleFilled={G} geminiFilled={Gem} failed={F} total={T}",
+            googleFilled, geminiFilled, failed, candidates.Count);
+
+        return Ok(new { candidates = candidates.Count, googleFilled, geminiFilled, failed, dryRun = false });
     }
 
     [HttpPost("translate-batch")]

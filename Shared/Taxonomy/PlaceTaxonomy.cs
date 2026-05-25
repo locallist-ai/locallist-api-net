@@ -7,31 +7,13 @@ public static class PlaceTaxonomy
         "Food", "Nightlife", "Coffee", "Outdoors", "Wellness", "Culture", "Shopping"
     };
 
-    public static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> SubcategoriesByCategory =
-        new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Food"]     = new[] { "Ramen", "Sushi", "Italian", "Pizza", "Mexican", "Tacos", "Cuban", "Latin American", "American", "Steakhouse", "Seafood", "Mediterranean", "Asian Fusion", "Brunch", "Bakery", "Vegan" },
-            ["Nightlife"] = new[] { "Pub", "Cocktail Bar", "Speakeasy", "Rooftop Bar", "Wine Bar", "Sports Bar", "Beer Bar", "Nightclub", "Live Music" },
-            ["Coffee"]   = new[] { "Specialty Coffee", "Espresso Bar", "Bakery Café", "Tea House", "Juice Bar", "Dessert" },
-            ["Outdoors"] = new[] { "Beach", "Park", "Garden", "Trail", "Marina", "Pier", "Waterfront", "Dog Park" },
-            ["Wellness"] = new[] { "Spa", "Pilates", "Yoga", "Gym", "Sauna", "IV Therapy", "Massage", "Salt Cave" },
-            ["Culture"]  = new[] { "Museum", "Gallery", "Theater", "Music Venue", "Festival Site", "Historic Site", "Public Art", "Cultural Center" },
-            ["Shopping"] = new[] { "Boutique", "Vintage", "Bookstore", "Record Store", "Concept Store", "Market", "Florist", "Designer" }
-        };
+    public const string GooglePlaceholderWhyThisPlace = "Imported from Google Places. Pending curatorial copy.";
+
+    public static bool IsPlaceholderOrEmpty(string? s) =>
+        string.IsNullOrWhiteSpace(s) || s.Trim() == GooglePlaceholderWhyThisPlace;
 
     public static bool IsValidCategory(string category) =>
         Categories.Any(c => string.Equals(c, category, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>
-    /// Null/empty subcategory is always valid (optional field).
-    /// Non-empty subcategory must belong to the allowed list for the given category.
-    /// </summary>
-    public static bool IsValidSubcategory(string category, string? subcategory)
-    {
-        if (string.IsNullOrWhiteSpace(subcategory)) return true;
-        if (!SubcategoriesByCategory.TryGetValue(category, out var allowed)) return false;
-        return allowed.Any(s => string.Equals(s, subcategory, StringComparison.OrdinalIgnoreCase));
-    }
 
     // Google Places types[] → canonical subcategory
     private static readonly Dictionary<string, string> _googleTypeToSubcategory =
@@ -167,10 +149,14 @@ public static class PlaceTaxonomy
     /// <summary>
     /// Infers a canonical subcategory from Google Places types[].
     /// A "taco" keyword in the place name overrides the type-based mapping for Food.
+    /// Pass the list of allowed subcategory keys/labels from ITaxonomyService.
     /// Returns null when no mapping is found.
     /// </summary>
     public static string? CanonicalSubcategoryFromGoogleTypes(
-        string category, IEnumerable<string> googleTypes, string? placeName = null)
+        string category,
+        IEnumerable<string> googleTypes,
+        IReadOnlyList<string> allowedSubs,
+        string? placeName = null)
     {
         if (!string.IsNullOrWhiteSpace(placeName) &&
             string.Equals(category, "Food", StringComparison.OrdinalIgnoreCase) &&
@@ -180,7 +166,7 @@ public static class PlaceTaxonomy
         foreach (var type in googleTypes)
         {
             if (_googleTypeToSubcategory.TryGetValue(type, out var candidate) &&
-                IsValidSubcategory(category, candidate))
+                allowedSubs.Any(s => string.Equals(s, candidate, StringComparison.OrdinalIgnoreCase)))
                 return candidate;
         }
         return null;

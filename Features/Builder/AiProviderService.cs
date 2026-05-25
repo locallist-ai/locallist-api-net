@@ -604,6 +604,81 @@ Return JSON only, no markdown. EXACT shape:
         }
     }
 
+    public async Task<string?> GeneratePlaceDescriptionAsync(
+        string name, string city, string category,
+        string? subcategory, IEnumerable<string>? googleTypes,
+        decimal? rating, int? reviewCount, string? neighborhood,
+        CancellationToken ct = default)
+    {
+        var apiKey = _config["Gemini:ApiKey"];
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            _logger.LogWarning("Gemini API key missing — cannot generate description for '{Name}'", name);
+            return null;
+        }
+
+        var typeHint = googleTypes is not null ? string.Join(", ", googleTypes) : "";
+        var ratingHint = rating.HasValue ? $" Google rating {rating:F1} ({reviewCount} reviews)." : "";
+        var hoodHint = !string.IsNullOrEmpty(neighborhood) ? $" Located in {neighborhood}." : "";
+        var subHint = !string.IsNullOrEmpty(subcategory) ? $" Subcategory: {subcategory}." : "";
+
+        var prompt = $"""
+            Write a single punchy editorial sentence (40-80 words) for a curated travel guide entry.
+            The tone is warm, inspiring, first-person-plural ("we"). No em-dashes.
+            Do NOT start with the place name. Do NOT include pricing or hours.
+
+            Place: {name}
+            City: {city}
+            Category: {category}{subHint}{hoodHint}
+            Google types: {typeHint}{ratingHint}
+
+            Return ONLY the sentence. No JSON, no quotes, no extra text.
+            """;
+
+        var requestBody = new
+        {
+            contents = new[] { new { parts = new[] { new { text = prompt } } } },
+            generationConfig = new
+            {
+                temperature = 0.7,
+                maxOutputTokens = 220,
+                responseMimeType = "text/plain"
+            }
+        };
+
+        try
+        {
+            var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+            var requestMessage = new HttpRequestMessage(HttpMethod.Post,
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+            requestMessage.Headers.Add("x-goog-api-key", apiKey);
+            requestMessage.Content = content;
+
+            var response = await _httpClient.SendAsync(requestMessage, ct);
+            response.EnsureSuccessStatusCode();
+
+            var responseJson = await response.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(responseJson);
+            var raw = doc.RootElement
+                .GetProperty("candidates")[0]
+                .GetProperty("content")
+                .GetProperty("parts")[0]
+                .GetProperty("text").GetString() ?? "";
+
+            var result = raw.Trim()
+                .Replace("—", "-").Replace("–", "-")   // em-dash, en-dash
+                .Replace("‒", "-").Replace("―", "-");  // figure dash, horizontal bar
+
+            if (result.Length > 800) result = result[..800];
+            return string.IsNullOrEmpty(result) ? null : result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Gemini generate description failed for place '{Name}'", name);
+            return null;
+        }
+    }
+
     private static string EscapeJson(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
 

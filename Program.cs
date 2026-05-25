@@ -140,6 +140,9 @@ builder.Services.AddHttpClient<PostHogService>(c =>
     c.Timeout = TimeSpan.FromSeconds(5);
 });
 
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<LocalList.API.NET.Shared.Taxonomy.ITaxonomyService, LocalList.API.NET.Shared.Taxonomy.TaxonomyService>();
+
 // Configure JSON formatting
 builder.Services.AddControllers().AddJsonOptions(options =>
 {

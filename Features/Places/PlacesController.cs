@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Search;
 
 namespace LocalList.API.NET.Features.Places;
 
@@ -57,8 +58,9 @@ public class PlacesController : ControllerBase
         if (!string.IsNullOrEmpty(neighborhood))
             query = query.Where(p => p.Neighborhood == neighborhood);
 
-        if (!string.IsNullOrEmpty(search))
-            query = query.Where(p => EF.Functions.ILike(p.Name, $"%{search}%"));
+        var escapedSearch = LikePatterns.Normalize(search);
+        if (!string.IsNullOrEmpty(escapedSearch))
+            query = query.Where(p => EF.Functions.ILike(p.Name, $"%{escapedSearch}%", @"\"));
 
         var total = await query.CountAsync(ct);
 
