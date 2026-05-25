@@ -853,6 +853,12 @@ public class AdminPlacesController : ControllerBase
                 dryRun = true
             });
 
+        // Clear legacy placeholder rows before processing so they never surface in the app
+        var clearedLegacy = await _db.Places
+            .Where(p => p.WhyThisPlace == PlaceTaxonomy.GooglePlaceholderWhyThisPlace)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.WhyThisPlace, _ => ""), ct);
+        _logger.LogInformation("backfill-descriptions: clearedLegacyPlaceholder={N}", clearedLegacy);
+
         int googleFilled = 0, geminiFilled = 0, failed = 0;
         var now = _clock.GetUtcNow();
 
@@ -867,7 +873,7 @@ public class AdminPlacesController : ControllerBase
                 {
                     place.WhyThisPlace = details.EditorialSummary;
                     place.UpdatedAt = now;
-                    Interlocked.Increment(ref googleFilled);
+                    googleFilled++;
                 }
                 else
                 {
@@ -878,34 +884,33 @@ public class AdminPlacesController : ControllerBase
                 await _db.SaveChangesAsync(ct);
         }
 
-        // Bucket B: Gemini fallback (no GooglePlaceId + Google misses)
-        foreach (var chunk in bucketGemini.Chunk(5))
+        // Bucket B: Gemini fallback — sequential with delay to avoid rate limits (~15 RPM)
+        foreach (var place in bucketGemini)
         {
-            await Task.WhenAll(chunk.Select(async place =>
+            if (ct.IsCancellationRequested) break;
+            var description = await _ai.GeneratePlaceDescriptionAsync(
+                place.Name, place.City, place.Category, place.Subcategory,
+                null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
+            if (description != null)
             {
-                var description = await _ai.GeneratePlaceDescriptionAsync(
-                    place.Name, place.City, place.Category, place.Subcategory,
-                    null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
-                if (description != null)
-                {
-                    place.WhyThisPlace = description;
-                    place.UpdatedAt = now;
-                    Interlocked.Increment(ref geminiFilled);
-                }
-                else
-                {
-                    Interlocked.Increment(ref failed);
-                }
-            }));
-            if (!ct.IsCancellationRequested)
-                await _db.SaveChangesAsync(ct);
+                place.WhyThisPlace = description;
+                place.UpdatedAt = now;
+                geminiFilled++;
+            }
+            else
+            {
+                failed++;
+            }
+            await Task.Delay(500, ct);
         }
+        if (!ct.IsCancellationRequested)
+            await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
             "backfill-descriptions: googleFilled={G} geminiFilled={Gem} failed={F} total={T}",
             googleFilled, geminiFilled, failed, candidates.Count);
 
-        return Ok(new { candidates = candidates.Count, googleFilled, geminiFilled, failed, dryRun = false });
+        return Ok(new { candidates = candidates.Count, clearedLegacyPlaceholder = clearedLegacy, googleFilled, geminiFilled, failed, dryRun = false });
     }
 
     [HttpPost("translate-batch")]
