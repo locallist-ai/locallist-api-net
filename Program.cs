@@ -552,6 +552,10 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
+var geminiPresent = !string.IsNullOrEmpty(app.Configuration["Gemini:ApiKey"]);
+var googlePlacesPresent = !string.IsNullOrEmpty(app.Configuration["GooglePlaces:ApiKey"]);
+app.Logger.LogInformation("API keys at boot — Gemini:{Gemini} GooglePlaces:{Google}", geminiPresent, googlePlacesPresent);
+
 app.Run();
 
 // Make the implicit Program class accessible for WebApplicationFactory<Program> in tests
