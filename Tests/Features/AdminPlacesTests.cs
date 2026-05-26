@@ -1040,6 +1040,77 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task BackfillDescriptions_WhenGeminiErrors_ExposesErrorKindInResponse()
+    {
+        var db = fixture.GetDbContext();
+        var placeId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = placeId,
+            Name = $"Error Kind Test {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "",
+            Status = "in_review",
+            // No GooglePlaceId → goes straight to Gemini bucket
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync(
+                "/admin/places/backfill-descriptions?dryRun=false&limit=10", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.True(body.GetProperty("failed").GetInt32() >= 1);
+            var errors = body.GetProperty("errors");
+            Assert.True(errors.GetArrayLength() >= 1);
+            Assert.Equal("http_error", errors[0].GetProperty("kind").GetString());
+            Assert.StartsWith("429:", errors[0].GetProperty("message").GetString());
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+        }
+    }
+
+    [Fact]
+    public async Task BackfillDescriptions_WhenGeminiSucceeds_ErrorsArrayIsEmpty()
+    {
+        var db = fixture.GetDbContext();
+        var placeId = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = placeId,
+            Name = $"Success No Errors {Guid.NewGuid():N}",
+            Category = "Culture",
+            City = "Miami",
+            WhyThisPlace = "",
+            Status = "in_review",
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("A city landmark where art meets community spirit.");
+        try
+        {
+            var client = CreateAdminClient();
+            var response = await client.PostAsync(
+                "/admin/places/backfill-descriptions?dryRun=false&limit=10", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(0, body.GetProperty("errors").GetArrayLength());
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+        }
+    }
+
+    [Fact]
     public async Task GoogleSearch_IncludesEditorialSummary_WhenGoogleReturnsIt()
     {
         const string editorial = "A cozy ramen joint with handmade noodles.";

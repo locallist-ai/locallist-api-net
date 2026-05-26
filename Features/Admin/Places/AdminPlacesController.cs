@@ -866,6 +866,7 @@ public class AdminPlacesController : ControllerBase
         _logger.LogInformation("backfill-descriptions: clearedLegacyPlaceholder={N}", clearedLegacy);
 
         int googleFilled = 0, geminiFilled = 0, failed = 0;
+        var errors = new List<object>();
         var now = _clock.GetUtcNow();
 
         // Bucket A: try Google editorial first (chunks of 10)
@@ -890,24 +891,26 @@ public class AdminPlacesController : ControllerBase
                 await _db.SaveChangesAsync(ct);
         }
 
-        // Bucket B: Gemini fallback — sequential with delay to avoid rate limits (~15 RPM)
+        // Bucket B: Gemini fallback — sequential with delay to stay under free-tier limit (~15 RPM)
         foreach (var place in bucketGemini)
         {
             if (ct.IsCancellationRequested) break;
-            var description = await _ai.GeneratePlaceDescriptionAsync(
+            var result = await _ai.GeneratePlaceDescriptionWithDiagnosticsAsync(
                 place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault(),
                 null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
-            if (description != null)
+            if (result.Description != null)
             {
-                place.WhyThisPlace = description;
+                place.WhyThisPlace = result.Description;
                 place.UpdatedAt = now;
                 geminiFilled++;
             }
             else
             {
                 failed++;
+                if (errors.Count < 20)
+                    errors.Add(new { placeId = place.Id, name = place.Name, kind = result.ErrorKind, message = result.ErrorMessage });
             }
-            await Task.Delay(500, ct);
+            await Task.Delay(4000, ct);
         }
         if (!ct.IsCancellationRequested)
             await _db.SaveChangesAsync(ct);
@@ -916,7 +919,7 @@ public class AdminPlacesController : ControllerBase
             "backfill-descriptions: googleFilled={G} geminiFilled={Gem} failed={F} total={T}",
             googleFilled, geminiFilled, failed, candidates.Count);
 
-        return Ok(new { candidates = candidates.Count, clearedLegacyPlaceholder = clearedLegacy, googleFilled, geminiFilled, failed, dryRun = false });
+        return Ok(new { candidates = candidates.Count, clearedLegacyPlaceholder = clearedLegacy, googleFilled, geminiFilled, failed, errors, dryRun = false });
     }
 
     [HttpPost("translate-batch")]

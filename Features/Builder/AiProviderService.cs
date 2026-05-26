@@ -613,11 +613,22 @@ Return JSON only, no markdown. EXACT shape:
         decimal? rating, int? reviewCount, string? neighborhood,
         CancellationToken ct = default)
     {
+        var result = await GeneratePlaceDescriptionWithDiagnosticsAsync(
+            name, city, category, subcategory, googleTypes, rating, reviewCount, neighborhood, ct);
+        return result.Description;
+    }
+
+    public async Task<GeneratePlaceDescriptionResult> GeneratePlaceDescriptionWithDiagnosticsAsync(
+        string name, string city, string category,
+        string? subcategory, IEnumerable<string>? googleTypes,
+        decimal? rating, int? reviewCount, string? neighborhood,
+        CancellationToken ct = default)
+    {
         var apiKey = _config["Gemini:ApiKey"];
         if (string.IsNullOrEmpty(apiKey))
         {
             _logger.LogWarning("Gemini API key missing — cannot generate description for '{Name}'", name);
-            return null;
+            return new GeneratePlaceDescriptionResult(null, "missing_key", "Gemini:ApiKey not configured");
         }
 
         var typeHint = googleTypes is not null ? string.Join(", ", googleTypes) : "";
@@ -658,27 +669,51 @@ Return JSON only, no markdown. EXACT shape:
             requestMessage.Content = content;
 
             var response = await _httpClient.SendAsync(requestMessage, ct);
-            response.EnsureSuccessStatusCode();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(ct);
+                var snippet = errorBody.Length > 300 ? errorBody[..300] : errorBody;
+                _logger.LogError("Gemini generate description HTTP {Status} for '{Name}': {Body}", (int)response.StatusCode, name, snippet);
+                return new GeneratePlaceDescriptionResult(null, "http_error", $"{(int)response.StatusCode}: {snippet}");
+            }
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(responseJson);
-            var raw = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content")
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
+                return new GeneratePlaceDescriptionResult(null, "empty_response", "No candidates in response");
+
+            var candidate = candidates[0];
+            if (candidate.TryGetProperty("finishReason", out var finishReason))
+            {
+                var reason = finishReason.GetString();
+                if (reason is "SAFETY" or "RECITATION" or "PROHIBITED_CONTENT")
+                    return new GeneratePlaceDescriptionResult(null, "safety_block", $"finishReason={reason}");
+            }
+
+            if (!candidate.TryGetProperty("content", out var candidateContent))
+                return new GeneratePlaceDescriptionResult(null, "empty_response", "No content in candidate");
+
+            var raw = candidateContent
                 .GetProperty("parts")[0]
                 .GetProperty("text").GetString() ?? "";
 
-            var result = raw.Trim()
-                .Replace("—", "-").Replace("–", "-")   // em-dash, en-dash
-                .Replace("‒", "-").Replace("―", "-");  // figure dash, horizontal bar
+            var text = raw.Trim()
+                .Replace("—", "-").Replace("–", "-")
+                .Replace("‒", "-").Replace("―", "-");
 
-            if (result.Length > 800) result = result[..800];
-            return string.IsNullOrEmpty(result) ? null : result;
+            if (text.Length > 800) text = text[..800];
+            if (string.IsNullOrEmpty(text))
+                return new GeneratePlaceDescriptionResult(null, "empty_response", null);
+
+            return new GeneratePlaceDescriptionResult(text, null, null);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Gemini generate description failed for place '{Name}'", name);
-            return null;
+            return new GeneratePlaceDescriptionResult(null, "exception", $"{ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -697,6 +732,8 @@ Return JSON only, no markdown. EXACT shape:
             .ToList();
     }
 }
+
+public record GeneratePlaceDescriptionResult(string? Description, string? ErrorKind, string? ErrorMessage);
 
 public record PlaceTranslationDraft(
     string? Name,
