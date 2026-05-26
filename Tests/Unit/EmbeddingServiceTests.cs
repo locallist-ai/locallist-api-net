@@ -10,7 +10,7 @@ public class EmbeddingServiceTests
         var text = EmbeddingService.BuildPlaceIndexText(
             name: "Enriqueta's Sandwich Shop",
             category: "Food",
-            subcategory: "Cuban",
+            subcategories: new[] { "Cuban" },
             neighborhood: "Wynwood",
             city: "Miami",
             whyThisPlace: "Cuban breakfast sandwich",
@@ -33,7 +33,7 @@ public class EmbeddingServiceTests
         var text = EmbeddingService.BuildPlaceIndexText(
             name: "Solo Name",
             category: null,
-            subcategory: null,
+            subcategories: null,
             neighborhood: "",
             city: null,
             whyThisPlace: null,
@@ -47,10 +47,10 @@ public class EmbeddingServiceTests
     public void BuildPlaceIndexText_DifferentCitiesYieldDifferentText()
     {
         var miami = EmbeddingService.BuildPlaceIndexText(
-            name: "Joe's Pizza", category: "Food", subcategory: "Pizza", neighborhood: "Downtown",
+            name: "Joe's Pizza", category: "Food", subcategories: new[] { "Pizza" }, neighborhood: "Downtown",
             city: "Miami", whyThisPlace: "slice", bestFor: null, suitableFor: null);
         var nyc = EmbeddingService.BuildPlaceIndexText(
-            name: "Joe's Pizza", category: "Food", subcategory: "Pizza", neighborhood: "Downtown",
+            name: "Joe's Pizza", category: "Food", subcategories: new[] { "Pizza" }, neighborhood: "Downtown",
             city: "NYC", whyThisPlace: "slice", bestFor: null, suitableFor: null);
 
         Assert.NotEqual(miami, nyc);
@@ -64,7 +64,7 @@ public class EmbeddingServiceTests
         var text = EmbeddingService.BuildPlaceIndexText(
             name: "A",
             category: "B",
-            subcategory: null,
+            subcategories: null,
             neighborhood: null,
             city: null,
             whyThisPlace: "C",
@@ -72,5 +72,21 @@ public class EmbeddingServiceTests
             suitableFor: null);
 
         Assert.Equal("A. B. C", text);
+    }
+
+    [Fact]
+    public void BuildPlaceIndexText_MultipleSubcategoriesJoined()
+    {
+        var text = EmbeddingService.BuildPlaceIndexText(
+            name: "Trattoria X",
+            category: "Food",
+            subcategories: new[] { "Italian", "Fine Dining" },
+            neighborhood: null,
+            city: "Miami",
+            whyThisPlace: null,
+            bestFor: null,
+            suitableFor: null);
+
+        Assert.Contains("Italian, Fine Dining", text);
     }
 }
