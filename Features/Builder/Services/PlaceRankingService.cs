@@ -222,10 +222,7 @@ public class PlaceRankingService
         if (prefs.Subcategories == null || prefs.Subcategories.Count == 0) return 0f;
         if (string.IsNullOrWhiteSpace(place.Category)) return 0f;
 
-        // Resolve canonical subcategories — prefer new array, fall back to legacy scalar.
-        var placeSubs = place.Subcategories is { Count: > 0 }
-            ? place.Subcategories
-            : (!string.IsNullOrWhiteSpace(place.Subcategory) ? new List<string> { place.Subcategory } : null);
+        var placeSubs = place.Subcategories is { Count: > 0 } ? place.Subcategories : null;
         if (placeSubs == null || placeSubs.Count == 0) return 0f;
 
         List<string>? tags = null;

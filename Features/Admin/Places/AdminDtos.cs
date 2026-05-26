@@ -47,19 +47,10 @@ public record AdminPlaceDto(
     OpeningHoursData? OpeningHours = null
 )
 {
-    // Adapter for legacy clients that still read the singular field.
-    public string? Subcategory => Subcategories?.FirstOrDefault();
-    public string? SubcategoryEs => SubcategoriesEs?.FirstOrDefault();
-
     public static AdminPlaceDto FromEntity(Place p)
     {
-        // Resolve canonical subcategories: prefer new array, fall back to legacy scalar.
-        var subs = p.Subcategories is { Count: > 0 }
-            ? p.Subcategories
-            : (!string.IsNullOrWhiteSpace(p.Subcategory) ? new List<string> { p.Subcategory } : null);
-        var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", null, isCurated: false)
-            ?? (LanguageAccessor.ResolveString(p.SubcategoryI18n, "es", null, isCurated: false) is string legacyEs
-                ? new List<string> { legacyEs } : null);
+        var subs = p.Subcategories is { Count: > 0 } ? p.Subcategories : null;
+        var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", null, isCurated: false);
 
         return new(
             p.Id, p.Name, p.Category, subs, p.Neighborhood, p.City,
@@ -91,9 +82,6 @@ public class CreatePlaceRequest
     public required string Category { get; set; }
 
     public string? WhyThisPlace { get; set; }
-
-    [StringLength(100)]
-    public string? Subcategory { get; set; }
 
     public List<string>? Subcategories { get; set; }
 
@@ -155,9 +143,6 @@ public class UpdatePlaceRequest
 
     public string? WhyThisPlace { get; set; }
 
-    [StringLength(100)]
-    public string? Subcategory { get; set; }
-
     public List<string>? Subcategories { get; set; }
 
     [StringLength(100)]
@@ -199,7 +184,6 @@ public class UpdatePlaceRequest
     public string? WhyThisPlaceEs { get; set; }
     public string? BestTimeEs { get; set; }
     public string? NeighborhoodEs { get; set; }
-    public string? SubcategoryEs { get; set; }
     public List<string>? SubcategoriesEs { get; set; }
     public List<string>? BestForEs { get; set; }
     public List<string>? SuitableForEs { get; set; }

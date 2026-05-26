@@ -116,7 +116,7 @@ public class AdminSubcategoriesTests(ApiFixture fixture) : IClassFixture<ApiFixt
             Id = placeId,
             Name = $"Place With Deleted Sub {Guid.NewGuid():N}",
             Category = "Culture",
-            Subcategory = subKey,
+            Subcategories = new List<string> { subKey },
             City = "Miami",
             WhyThisPlace = "test place",
             Status = "published",
@@ -137,7 +137,7 @@ public class AdminSubcategoriesTests(ApiFixture fixture) : IClassFixture<ApiFixt
         var freshDb = fixture.GetDbContext();
         var place = await freshDb.Places.FindAsync(placeId);
         Assert.NotNull(place);
-        Assert.Equal(subKey, place!.Subcategory);
+        Assert.Contains(subKey, place!.Subcategories ?? []);
     }
 
     private HttpClient CreateAdminClient()

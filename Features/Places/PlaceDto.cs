@@ -32,22 +32,14 @@ public record PlaceDto(
     OpeningHoursData? OpeningHours = null
 )
 {
-    // Adapter for legacy app clients that still read the singular field.
-    public string? Subcategory => Subcategories?.FirstOrDefault();
-
     public static PlaceDto FromEntity(Place p, string lang = "en")
     {
         var isCurated = p.Source == "curated";
         var ts = p.TranslationStatus;
 
-        // Resolve canonical subcategories with i18n: prefer new array fields, fall back to legacy.
-        var subsI18n = p.SubcategoriesI18n != null
-            ? LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, lang, null, isCurated, ts)
-            : null;
-        var subs = subsI18n
-            ?? (p.Subcategories is { Count: > 0 } ? p.Subcategories : null)
-            ?? (LanguageAccessor.ResolveString(p.SubcategoryI18n, lang, p.Subcategory, isCurated, ts) is string legacySub
-                ? new List<string> { legacySub } : null);
+        var subs = p.SubcategoriesI18n != null
+            ? LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, lang, p.Subcategories, isCurated, ts)
+            : (p.Subcategories is { Count: > 0 } ? p.Subcategories : null);
 
         return new(
             p.Id,
