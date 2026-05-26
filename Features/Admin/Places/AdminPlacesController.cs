@@ -153,7 +153,7 @@ public class AdminPlacesController : ControllerBase
         if (!PlaceTaxonomy.IsValidCategory(request.Category))
             return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", PlaceTaxonomy.Categories)}" });
 
-        var resolvedSubs = ResolveSubcategoriesFromRequest(request.Subcategories, request.Subcategory);
+        var resolvedSubs = request.Subcategories?.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
         if (!await _taxonomy.AreValidSubcategoriesAsync(request.Category, resolvedSubs, ct))
             return BadRequest(new { error = $"Invalid subcategory for category '{request.Category}'.", code = "subcategory_not_in_taxonomy" });
 
@@ -166,7 +166,6 @@ public class AdminPlacesController : ControllerBase
             Name = request.Name.Trim(),
             Category = request.Category,
             WhyThisPlace = request.WhyThisPlace?.Trim() ?? string.Empty,
-            Subcategory = resolvedSubs?.FirstOrDefault(),
             Subcategories = resolvedSubs,
             Neighborhood = request.Neighborhood?.Trim(),
             City = request.City?.Trim() ?? "Miami",
@@ -240,15 +239,13 @@ public class AdminPlacesController : ControllerBase
                 continue;
             }
 
-            var reqSubs = ResolveSubcategoriesFromRequest(request.Subcategories, request.Subcategory);
-            if (!await _taxonomy.AreValidSubcategoriesAsync(request.Category, reqSubs, ct))
+            request.Subcategories = request.Subcategories?.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
+            if (!await _taxonomy.AreValidSubcategoriesAsync(request.Category, request.Subcategories, ct))
             {
                 results.Add(new BulkImportItemResult(request.Name, "error", $"Invalid subcategory for category '{request.Category}'", null));
                 errors++;
                 continue;
             }
-            request.Subcategories = reqSubs;
-            request.Subcategory = reqSubs?.FirstOrDefault();
 
             var nameKey = request.Name.Trim().ToLowerInvariant();
             var cityKey = (request.City?.Trim() ?? "Miami").ToLowerInvariant();
@@ -269,7 +266,7 @@ public class AdminPlacesController : ControllerBase
             {
                 var generated = await _ai.GeneratePlaceDescriptionAsync(
                     req.Name, req.City ?? "Miami", req.Category,
-                    req.Subcategories?.FirstOrDefault() ?? req.Subcategory,
+                    req.Subcategories?.FirstOrDefault(),
                     null, req.GoogleRating, req.GoogleReviewCount, req.Neighborhood, ct);
                 if (generated != null) req.WhyThisPlace = generated;
             }));
@@ -363,7 +360,7 @@ public class AdminPlacesController : ControllerBase
             {
                 Name = details.Name,
                 Category = validCategory,
-                Subcategory = subcategory,
+                Subcategories = subcategory != null ? new List<string> { subcategory } : null,
                 WhyThisPlace = details.EditorialSummary ?? "",
                 City = details.City ?? request.DefaultCity ?? "Miami",
                 Neighborhood = details.Neighborhood,
@@ -395,7 +392,7 @@ public class AdminPlacesController : ControllerBase
             {
                 var generated = await _ai.GeneratePlaceDescriptionAsync(
                     req.Name, req.City ?? request.DefaultCity ?? "Miami", req.Category,
-                    req.Subcategories?.FirstOrDefault() ?? req.Subcategory,
+                    req.Subcategories?.FirstOrDefault(),
                     null, req.GoogleRating, req.GoogleReviewCount, req.Neighborhood, ct);
                 if (generated != null) req.WhyThisPlace = generated;
             }));
@@ -426,8 +423,7 @@ public class AdminPlacesController : ControllerBase
             {
                 var texts = addedPlaces
                     .Select(p => EmbeddingService.BuildPlaceIndexText(
-                        p.Name, p.Category,
-                        p.Subcategories ?? (p.Subcategory != null ? new List<string> { p.Subcategory } : null),
+                        p.Name, p.Category, p.Subcategories,
                         p.Neighborhood, p.City, p.WhyThisPlace, p.BestFor, p.SuitableFor))
                     .ToList();
 
@@ -471,9 +467,7 @@ public class AdminPlacesController : ControllerBase
             return BadRequest(new { error = $"Invalid category. Valid: {string.Join(", ", PlaceTaxonomy.Categories)}" });
 
         var effectiveCategory = request.Category ?? place.Category;
-        var resolvedUpdateSubs = request.Subcategories != null || request.Subcategory != null
-            ? ResolveSubcategoriesFromRequest(request.Subcategories, request.Subcategory)
-            : null;
+        var resolvedUpdateSubs = request.Subcategories?.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
         if (resolvedUpdateSubs != null && !await _taxonomy.AreValidSubcategoriesAsync(effectiveCategory, resolvedUpdateSubs, ct))
             return BadRequest(new { error = $"Invalid subcategory for category '{effectiveCategory}'.", code = "subcategory_not_in_taxonomy" });
 
@@ -481,11 +475,7 @@ public class AdminPlacesController : ControllerBase
         if (request.Name != null) place.Name = request.Name.Trim();
         if (request.Category != null) place.Category = request.Category;
         if (request.WhyThisPlace != null) place.WhyThisPlace = request.WhyThisPlace.Trim();
-        if (resolvedUpdateSubs != null)
-        {
-            place.Subcategories = resolvedUpdateSubs;
-            place.Subcategory = resolvedUpdateSubs.FirstOrDefault();
-        }
+        if (resolvedUpdateSubs != null) place.Subcategories = resolvedUpdateSubs;
         if (request.Neighborhood != null) place.Neighborhood = request.Neighborhood.Trim();
         if (request.City != null) place.City = request.City.Trim();
         if (request.Latitude.HasValue) place.Latitude = request.Latitude;
@@ -514,15 +504,7 @@ public class AdminPlacesController : ControllerBase
         if (request.NeighborhoodEs != null)
             place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, "es", request.NeighborhoodEs);
         if (request.SubcategoriesEs != null)
-        {
             place.SubcategoriesI18n = LanguageAccessor.SetI18nList(place.SubcategoriesI18n, "es", request.SubcategoriesEs);
-            place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, "es", request.SubcategoriesEs.FirstOrDefault());
-        }
-        else if (request.SubcategoryEs != null)
-        {
-            place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, "es", request.SubcategoryEs);
-            place.SubcategoriesI18n = LanguageAccessor.SetI18nList(place.SubcategoriesI18n, "es", new List<string> { request.SubcategoryEs });
-        }
         if (request.BestForEs != null)
             place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, "es", request.BestForEs);
         if (request.SuitableForEs != null)
@@ -635,7 +617,7 @@ public class AdminPlacesController : ControllerBase
 
         var texts = tracked
             .Select(p => EmbeddingService.BuildPlaceIndexText(
-                p.Name, p.Category, p.Subcategories ?? (p.Subcategory != null ? new List<string> { p.Subcategory } : null),
+                p.Name, p.Category, p.Subcategories,
                 p.Neighborhood, p.City, p.WhyThisPlace, p.BestFor, p.SuitableFor))
             .ToList();
 
@@ -739,7 +721,6 @@ public class AdminPlacesController : ControllerBase
             whyThisPlaceEs = draft.WhyThisPlace,
             bestTimeEs = draft.BestTime,
             neighborhoodEs = draft.Neighborhood,
-            subcategoryEs = draft.Subcategory,
             subcategoriesEs = draft.Subcategory != null ? new List<string> { draft.Subcategory } : null,
             bestForEs = draft.BestFor,
             suitableForEs = draft.SuitableFor,
@@ -752,17 +733,6 @@ public class AdminPlacesController : ControllerBase
     /// Saves progress every 5 places so partial runs are resumable.
     /// </summary>
     // ── Private helpers ─────────────────────────────────────────────────────
-
-    // Resolves subcategories from a request: canonical array wins over legacy single string.
-    // Returns a sanitized list, or null if no subcategory provided.
-    private static List<string>? ResolveSubcategoriesFromRequest(List<string>? subcategories, string? legacySingle)
-    {
-        if (subcategories != null)
-            return subcategories.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
-        if (!string.IsNullOrWhiteSpace(legacySingle))
-            return new List<string> { legacySingle.Trim() };
-        return null;
-    }
 
     /// <summary>
     /// Inserts already-validated CreatePlaceRequests, deduplicating by GooglePlaceId.
@@ -805,7 +775,6 @@ public class AdminPlacesController : ControllerBase
                 Name = req.Name.Trim(),
                 Category = req.Category,
                 WhyThisPlace = req.WhyThisPlace?.Trim() ?? string.Empty,
-                Subcategory = req.Subcategory?.Trim(),
                 Subcategories = req.Subcategories,
                 Neighborhood = req.Neighborhood?.Trim(),
                 City = req.City?.Trim() ?? "Miami",
@@ -852,7 +821,7 @@ public class AdminPlacesController : ControllerBase
         if (place == null) return NotFound(new { error = "Place not found" });
 
         var description = await _ai.GeneratePlaceDescriptionAsync(
-            place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault() ?? place.Subcategory,
+            place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault(),
             null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
 
         if (description == null)
@@ -926,7 +895,7 @@ public class AdminPlacesController : ControllerBase
         {
             if (ct.IsCancellationRequested) break;
             var description = await _ai.GeneratePlaceDescriptionAsync(
-                place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault() ?? place.Subcategory,
+                place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault(),
                 null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
             if (description != null)
             {
@@ -987,7 +956,6 @@ public class AdminPlacesController : ControllerBase
                 place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, lang, draft.WhyThisPlace);
                 place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, lang, draft.BestTime);
                 place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, lang, draft.Neighborhood);
-                place.SubcategoryI18n = LanguageAccessor.SetI18nString(place.SubcategoryI18n, lang, draft.Subcategory);
                 if (draft.Subcategory != null)
                     place.SubcategoriesI18n = LanguageAccessor.SetI18nList(place.SubcategoriesI18n, lang, new List<string> { draft.Subcategory });
                 place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, lang, draft.BestFor);

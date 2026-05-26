@@ -442,7 +442,7 @@ Return JSON only, no markdown. EXACT shape:
         var eSubcategory = EscapeJson(
             place.Subcategories is { Count: > 0 }
                 ? string.Join(", ", place.Subcategories)
-                : place.Subcategory ?? string.Empty);
+                : string.Empty);
 
         var prompt = $$"""
             Translate the following place fields from English to {{targetLang}}-ES (Spain Spanish).

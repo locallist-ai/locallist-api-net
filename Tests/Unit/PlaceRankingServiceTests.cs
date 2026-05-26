@@ -25,7 +25,7 @@ public class PlaceRankingServiceTests
         BestFor = bestFor,
         AiVibeScore = aiVibeScore,
         SuitableFor = suitableFor,
-        Subcategory = subcategory,
+        Subcategories = subcategory != null ? new List<string> { subcategory } : null,
         PriceRange = priceRange,
     };
 

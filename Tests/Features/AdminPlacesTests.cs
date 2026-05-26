@@ -378,7 +378,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.NotNull(saved);
         Assert.Equal(placeName, saved!.Name);
         Assert.Equal("Food", saved.Category);
-        Assert.Equal("Italian", saved.Subcategory);
+        Assert.Contains("Italian", saved.Subcategories ?? []);
         Assert.Equal("$", saved.PriceRange);
         Assert.Equal(4.5m, saved.GoogleRating);
         Assert.NotNull(saved.Photos);

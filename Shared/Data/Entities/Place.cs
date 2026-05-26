@@ -25,10 +25,6 @@ public class Place
     [Required]
     public string Category { get; set; } = string.Empty;
 
-    [Column("subcategory")]
-    [StringLength(100)]
-    public string? Subcategory { get; set; }
-
     [Column("subcategories", TypeName = "text[]")]
     public List<string>? Subcategories { get; set; }
 
@@ -91,9 +87,6 @@ public class Place
 
     [Column("neighborhood_i18n", TypeName = "jsonb")]
     public JsonDocument? NeighborhoodI18n { get; set; }
-
-    [Column("subcategory_i18n", TypeName = "jsonb")]
-    public JsonDocument? SubcategoryI18n { get; set; }
 
     [Column("subcategories_i18n", TypeName = "jsonb")]
     public JsonDocument? SubcategoriesI18n { get; set; }
