@@ -50,6 +50,14 @@ public class TaxonomyService : ITaxonomyService
                           || string.Equals(s.LabelEn, subcategory, StringComparison.OrdinalIgnoreCase));
     }
 
+    public async Task<bool> AreValidSubcategoriesAsync(string categoryKey, IList<string>? subcategories, CancellationToken ct = default)
+    {
+        if (subcategories == null || subcategories.Count == 0) return true;
+        foreach (var sub in subcategories)
+            if (!await IsValidSubcategoryAsync(categoryKey, sub, ct)) return false;
+        return true;
+    }
+
     public async Task<DateTimeOffset> GetLastUpdatedAsync(CancellationToken ct = default)
     {
         var all = await GetAllAsync(ct);

@@ -29,6 +29,9 @@ public class Place
     [StringLength(100)]
     public string? Subcategory { get; set; }
 
+    [Column("subcategories", TypeName = "text[]")]
+    public List<string>? Subcategories { get; set; }
+
     [Column("neighborhood")]
     [StringLength(100)]
     public string? Neighborhood { get; set; }
@@ -91,6 +94,9 @@ public class Place
 
     [Column("subcategory_i18n", TypeName = "jsonb")]
     public JsonDocument? SubcategoryI18n { get; set; }
+
+    [Column("subcategories_i18n", TypeName = "jsonb")]
+    public JsonDocument? SubcategoriesI18n { get; set; }
 
     [Column("best_for_i18n", TypeName = "jsonb")]
     public JsonDocument? BestForI18n { get; set; }

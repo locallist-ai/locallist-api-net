@@ -439,7 +439,10 @@ Return JSON only, no markdown. EXACT shape:
         var eWhy = EscapeJson(place.WhyThisPlace);
         var eBestTime = EscapeJson(place.BestTime ?? string.Empty);
         var eNeighborhood = EscapeJson(place.Neighborhood ?? string.Empty);
-        var eSubcategory = EscapeJson(place.Subcategory ?? string.Empty);
+        var eSubcategory = EscapeJson(
+            place.Subcategories is { Count: > 0 }
+                ? string.Join(", ", place.Subcategories)
+                : place.Subcategory ?? string.Empty);
 
         var prompt = $$"""
             Translate the following place fields from English to {{targetLang}}-ES (Spain Spanish).

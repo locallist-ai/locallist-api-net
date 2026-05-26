@@ -10,7 +10,7 @@ public record AdminPlaceDto(
     Guid Id,
     string Name,
     string Category,
-    string? Subcategory,
+    List<string>? Subcategories,
     string? Neighborhood,
     string City,
     decimal? Latitude,
@@ -40,31 +40,46 @@ public record AdminPlaceDto(
     string? WhyThisPlaceEs,
     string? BestTimeEs,
     string? NeighborhoodEs,
-    string? SubcategoryEs,
+    List<string>? SubcategoriesEs,
     List<string>? BestForEs,
     List<string>? SuitableForEs,
     string? TranslationStatusEs,
     OpeningHoursData? OpeningHours = null
 )
 {
-    public static AdminPlaceDto FromEntity(Place p) => new(
-        p.Id, p.Name, p.Category, p.Subcategory, p.Neighborhood, p.City,
-        p.Latitude, p.Longitude, p.WhyThisPlace, p.BestFor, p.SuitableFor,
-        p.BestTime, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
-        p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
-        p.RejectionReason, p.AiVibeScore, p.VisitDurationMin, p.Flags,
-        p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
-        NameEs: LanguageAccessor.ResolveString(p.NameI18n, "es", null, isCurated: false),
-        WhyThisPlaceEs: LanguageAccessor.ResolveString(p.WhyThisPlaceI18n, "es", null, isCurated: false),
-        BestTimeEs: LanguageAccessor.ResolveString(p.BestTimeI18n, "es", null, isCurated: false),
-        NeighborhoodEs: LanguageAccessor.ResolveString(p.NeighborhoodI18n, "es", null, isCurated: false),
-        SubcategoryEs: LanguageAccessor.ResolveString(p.SubcategoryI18n, "es", null, isCurated: false),
-        BestForEs: LanguageAccessor.ResolveStringList(p.BestForI18n, "es", null, isCurated: false),
-        SuitableForEs: LanguageAccessor.ResolveStringList(p.SuitableForI18n, "es", null, isCurated: false),
-        TranslationStatusEs: p.TranslationStatus?.RootElement.TryGetProperty("es", out var tsEs) == true
-            && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null,
-        OpeningHours: OpeningHoursData.FromJsonDocument(p.OpeningHours)
-    );
+    // Adapter for legacy clients that still read the singular field.
+    public string? Subcategory => Subcategories?.FirstOrDefault();
+    public string? SubcategoryEs => SubcategoriesEs?.FirstOrDefault();
+
+    public static AdminPlaceDto FromEntity(Place p)
+    {
+        // Resolve canonical subcategories: prefer new array, fall back to legacy scalar.
+        var subs = p.Subcategories is { Count: > 0 }
+            ? p.Subcategories
+            : (!string.IsNullOrWhiteSpace(p.Subcategory) ? new List<string> { p.Subcategory } : null);
+        var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", null, isCurated: false)
+            ?? (LanguageAccessor.ResolveString(p.SubcategoryI18n, "es", null, isCurated: false) is string legacyEs
+                ? new List<string> { legacyEs } : null);
+
+        return new(
+            p.Id, p.Name, p.Category, subs, p.Neighborhood, p.City,
+            p.Latitude, p.Longitude, p.WhyThisPlace, p.BestFor, p.SuitableFor,
+            p.BestTime, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
+            p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
+            p.RejectionReason, p.AiVibeScore, p.VisitDurationMin, p.Flags,
+            p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
+            NameEs: LanguageAccessor.ResolveString(p.NameI18n, "es", null, isCurated: false),
+            WhyThisPlaceEs: LanguageAccessor.ResolveString(p.WhyThisPlaceI18n, "es", null, isCurated: false),
+            BestTimeEs: LanguageAccessor.ResolveString(p.BestTimeI18n, "es", null, isCurated: false),
+            NeighborhoodEs: LanguageAccessor.ResolveString(p.NeighborhoodI18n, "es", null, isCurated: false),
+            SubcategoriesEs: subsEs,
+            BestForEs: LanguageAccessor.ResolveStringList(p.BestForI18n, "es", null, isCurated: false),
+            SuitableForEs: LanguageAccessor.ResolveStringList(p.SuitableForI18n, "es", null, isCurated: false),
+            TranslationStatusEs: p.TranslationStatus?.RootElement.TryGetProperty("es", out var tsEs) == true
+                && tsEs.ValueKind == JsonValueKind.String ? tsEs.GetString() : null,
+            OpeningHours: OpeningHoursData.FromJsonDocument(p.OpeningHours)
+        );
+    }
 }
 
 public class CreatePlaceRequest
@@ -79,6 +94,8 @@ public class CreatePlaceRequest
 
     [StringLength(100)]
     public string? Subcategory { get; set; }
+
+    public List<string>? Subcategories { get; set; }
 
     [StringLength(100)]
     public string? Neighborhood { get; set; }
@@ -141,6 +158,8 @@ public class UpdatePlaceRequest
     [StringLength(100)]
     public string? Subcategory { get; set; }
 
+    public List<string>? Subcategories { get; set; }
+
     [StringLength(100)]
     public string? Neighborhood { get; set; }
 
@@ -181,6 +200,7 @@ public class UpdatePlaceRequest
     public string? BestTimeEs { get; set; }
     public string? NeighborhoodEs { get; set; }
     public string? SubcategoryEs { get; set; }
+    public List<string>? SubcategoriesEs { get; set; }
     public List<string>? BestForEs { get; set; }
     public List<string>? SuitableForEs { get; set; }
     // "draft" | "approved" | null (null = no change)

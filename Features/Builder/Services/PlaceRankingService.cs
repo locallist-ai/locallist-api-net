@@ -220,10 +220,14 @@ public class PlaceRankingService
     private static float ScoreSubcategoryMatch(Place place, ExtractedPreferences prefs)
     {
         if (prefs.Subcategories == null || prefs.Subcategories.Count == 0) return 0f;
-        if (string.IsNullOrWhiteSpace(place.Subcategory) || string.IsNullOrWhiteSpace(place.Category)) return 0f;
+        if (string.IsNullOrWhiteSpace(place.Category)) return 0f;
 
-        // Buscamos el bucket de subcategorías para la category del place.
-        // Match case-insensitive en el key del dict.
+        // Resolve canonical subcategories — prefer new array, fall back to legacy scalar.
+        var placeSubs = place.Subcategories is { Count: > 0 }
+            ? place.Subcategories
+            : (!string.IsNullOrWhiteSpace(place.Subcategory) ? new List<string> { place.Subcategory } : null);
+        if (placeSubs == null || placeSubs.Count == 0) return 0f;
+
         List<string>? tags = null;
         foreach (var (key, value) in prefs.Subcategories)
         {
@@ -235,8 +239,8 @@ public class PlaceRankingService
         }
         if (tags == null || tags.Count == 0) return 0f;
 
-        var sub = place.Subcategory.ToLowerInvariant();
-        return tags.Any(t => !string.IsNullOrWhiteSpace(t) && sub.Contains(t.ToLowerInvariant()))
+        return placeSubs.Any(sub =>
+            tags.Any(t => !string.IsNullOrWhiteSpace(t) && sub.ToLowerInvariant().Contains(t.ToLowerInvariant())))
             ? 1f
             : 0f;
     }
