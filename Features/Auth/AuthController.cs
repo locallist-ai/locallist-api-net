@@ -57,7 +57,7 @@ public class AuthController : ControllerBase
                 Role = ResolveRole(email)
             };
             _db.Users.Add(user);
-            _logger.LogInformation("New user created via Firebase sync: {Email}", email);
+            _logger.LogInformation("New user created via Firebase sync: {EmailPrefix}", email[..Math.Min(3, email.Length)] + "***");
         }
         else if (string.IsNullOrEmpty(user.FirebaseUid))
         {

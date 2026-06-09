@@ -166,7 +166,7 @@ const string MultiScheme = "Multi";
 builder.Services.AddAuthentication(MultiScheme)
     .AddJwtBearer(FirebaseScheme, options =>
     {
-        options.IncludeErrorDetails = true;
+        options.IncludeErrorDetails = builder.Environment.IsDevelopment();
         options.Authority = $"https://securetoken.google.com/{firebaseProjectId}";
         options.TokenValidationParameters = new TokenValidationParameters
         {
@@ -196,7 +196,7 @@ builder.Services.AddAuthentication(MultiScheme)
         if (Encoding.UTF8.GetByteCount(jwtSecret) < 32)
             throw new InvalidOperationException("JWT_SECRET must be at least 32 bytes for HS256.");
 
-        options.IncludeErrorDetails = true;
+        options.IncludeErrorDetails = builder.Environment.IsDevelopment();
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -274,6 +274,7 @@ builder.Services.AddCors(options =>
 });
 
 // Configure Rate Limiting
+var builderLimit = builder.Configuration.GetValue<int?>("Builder:RateLimitPerHour") ?? 5;
 builder.Services.AddRateLimiter(options =>
 {
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
@@ -288,10 +289,7 @@ builder.Services.AddRateLimiter(options =>
             }));
             
     // A3: Builder specific rate limits per hour per IP to prevent Gemini abuse.
-    // Configurable via env `Builder__RateLimitPerHour` (default 5). Pablo
-    // 2026-04-26: durante testing intensivo override en Railway a 100+ para
-    // no bloquearse; revertir antes de scale-out con usuarios reales.
-    var builderLimit = builder.Configuration.GetValue<int?>("Builder:RateLimitPerHour") ?? 5;
+    // Configurable via env `Builder__RateLimitPerHour` (default 5).
     options.AddPolicy("BuilderLimit", context =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
@@ -555,6 +553,9 @@ using (var scope = app.Services.CreateScope())
 var geminiPresent = !string.IsNullOrEmpty(app.Configuration["Gemini:ApiKey"]);
 var googlePlacesPresent = !string.IsNullOrEmpty(app.Configuration["GooglePlaces:ApiKey"]);
 app.Logger.LogInformation("API keys at boot — Gemini:{Gemini} GooglePlaces:{Google}", geminiPresent, googlePlacesPresent);
+
+if (app.Environment.IsProduction() && builderLimit > 20)
+    app.Logger.LogWarning("Builder rate limit is {Limit}/hr — expected ≤20 in production", builderLimit);
 
 app.Run();
 
