@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace LocalList.API.NET.Features.Places;
+namespace LocalList.API.NET.Shared.Dtos;
 
 public sealed record OpeningHoursData(
     List<OpeningPeriod> Periods,

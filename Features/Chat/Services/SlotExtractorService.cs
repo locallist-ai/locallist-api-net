@@ -247,7 +247,7 @@ Extract into this schema (ONLY fill slots the user actually mentioned; never inv
 
 Rules:
 - NEVER fill a slot the user did not mention.
-- If user contradicts a known slot, fill it AND prefix aiMessage with a short acknowledgement in the chosen language (e.g. ""Cambiado a X — "" in Spanish or ""Switched to X — "" in English).
+- If user contradicts a known slot, fill it AND prefix aiMessage with a short acknowledgement in the chosen language (e.g. ""Cambiado a X."" in Spanish or ""Switched to X."" in English).
 - NEVER re-ask a slot that is already filled.
 - If all critical slots are filled (city, days, groupType, categories, budget), set nextQuestion=null.
 - quickReplies: 0-4 chips, each id must encode the slot and value (e.g. ""budget_moderate"").

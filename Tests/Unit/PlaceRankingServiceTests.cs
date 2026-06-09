@@ -451,4 +451,50 @@ public class PlaceRankingServiceTests
         var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
         Assert.Equal(0f, scored[0].Breakdown.BudgetMatch);
     }
+
+    // ── TC-1: Invariante de normalización (DT-5 guard) ────────────────────────
+    // Asegura que la suma de pesos positivos = 1.0 se mantiene.
+    // Si se añade un signal nuevo sin ajustar los existentes, este test falla.
+
+    [Fact]
+    public void AllSignalsActive_ScoreDoesNotExceedOne()
+    {
+        var svc = new PlaceRankingService();
+
+        // Candidato con TODOS los soft signals activos:
+        // category match, bestFor match, suitableFor match, aiVibe 100,
+        // subcategory match, companyTags match, styleTags match, budget exact.
+        var place = P(
+            "MaxSignals",
+            category: "Food",
+            neighborhood: "SomeArea",
+            bestFor: new List<string> { "romantic", "foodie", "urban-explorer" },
+            aiVibeScore: 100,
+            suitableFor: new List<string> { "family", "honeymoon" },
+            subcategory: "Italian",
+            priceRange: "$$"   // tier 2, coincide con budgetAmount=150
+        );
+
+        var prefs = new ExtractedPreferences
+        {
+            Categories  = new List<string> { "food" },
+            Vibes       = new List<string> { "romantic" },
+            GroupType   = "family-kids",
+            Subcategories = new Dictionary<string, List<string>> { ["food"] = new() { "italian" } },
+            CompanyTags = new List<string> { "honeymoon" },
+            StyleTags   = new List<string> { "urban", "foodie" },
+            BudgetAmount = 150,
+        };
+
+        // distance=0 → similarity=1.0; primer y único place → NeighborhoodPenalty=0
+        var scored = svc.RankWithScores(new[] { (place, 0.0f) }, prefs);
+        var score = scored[0].Score;
+
+        const float epsilon = 1e-4f;
+        Assert.True(score >= 0f,
+            $"Score should be non-negative, got {score}");
+        Assert.True(score <= 1.0f + epsilon,
+            $"Score should not exceed 1.0 (weights are normalized). Got {score}. " +
+            $"If a new signal was added, renormalize all weights to sum = 1.0.");
+    }
 }

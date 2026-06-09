@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Search;
 

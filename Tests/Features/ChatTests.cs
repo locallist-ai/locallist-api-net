@@ -487,6 +487,66 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         await db.SaveChangesAsync();
     }
 
+    // ── DELETE /chat/session/:id ─────────────────────────────────────────────
+
+    /// <summary>
+    /// TC-2: Verifica que un usuario no puede borrar la sesión de otro (IDOR).
+    /// La lógica en ChatController.DeleteSession filtra por userId, por lo que
+    /// devuelve 404 sin revelar que la sesión existe.
+    /// </summary>
+    [Fact]
+    public async Task DeleteSession_NonOwner_Returns404AndPreservesSession()
+    {
+        // Arrange: usuario A y usuario B distintos
+        var ownerFbUid  = $"fb-owner-{Guid.NewGuid():N}";
+        var attackerFbUid = $"fb-attacker-{Guid.NewGuid():N}";
+        var ownerId    = Guid.NewGuid();
+        var attackerId = Guid.NewGuid();
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = ownerId,    Email = $"owner-{ownerId:N}@test.com",    FirebaseUid = ownerFbUid });
+        db.Users.Add(new User { Id = attackerId, Email = $"attacker-{attackerId:N}@test.com", FirebaseUid = attackerFbUid });
+
+        var session = new ChatSession { UserId = ownerId, Status = "active" };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        // Act: atacante intenta borrar la sesión del propietario
+        var attackerClient = fixture.CreateAuthenticatedClient(attackerId, attackerFbUid);
+        var response = await attackerClient.DeleteAsync($"/chat/session/{session.Id}");
+
+        // Assert: 404 (no revela existencia) y la sesión sigue en la DB
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        var after = fixture.GetDbContext();
+        Assert.NotNull(await after.ChatSessions.FindAsync(session.Id));
+    }
+
+    [Fact]
+    public async Task DeleteSession_Owner_Returns204AndRemovesSession()
+    {
+        // Arrange: propietario crea sesión
+        var ownerFbUid = $"fb-delowner-{Guid.NewGuid():N}";
+        var ownerId    = Guid.NewGuid();
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = ownerId, Email = $"delowner-{ownerId:N}@test.com", FirebaseUid = ownerFbUid });
+
+        var session = new ChatSession { UserId = ownerId, Status = "active" };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        // Act: el propietario borra su propia sesión
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
+        var response = await client.DeleteAsync($"/chat/session/{session.Id}");
+
+        // Assert: 204 y la sesión ya no existe
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var after = fixture.GetDbContext();
+        Assert.Null(await after.ChatSessions.FindAsync(session.Id));
+    }
+
     private static HttpResponseMessage GeminiExtractedOk(object extracted)
     {
         var envelope = new

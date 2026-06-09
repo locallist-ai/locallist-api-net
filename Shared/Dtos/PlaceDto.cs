@@ -1,7 +1,7 @@
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
 
-namespace LocalList.API.NET.Features.Places;
+namespace LocalList.API.NET.Shared.Dtos;
 
 /// <summary>
 /// Public-facing Place DTO. Excludes internal curation fields

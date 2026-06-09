@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
-using LocalList.API.NET.Features.Places;
+using LocalList.API.NET.Shared.Dtos;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 

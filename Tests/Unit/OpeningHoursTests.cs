@@ -1,7 +1,7 @@
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
-using LocalList.API.NET.Features.Places;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
