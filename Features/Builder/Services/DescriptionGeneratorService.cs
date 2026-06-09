@@ -109,9 +109,9 @@ public class DescriptionGeneratorService
             if (!candidate.TryGetProperty("content", out var candidateContent))
                 return new GeneratePlaceDescriptionResult(null, "empty_response", "No content in candidate");
 
-            var raw = candidateContent
-                .GetProperty("parts")[0]
-                .GetProperty("text").GetString() ?? "";
+            var raw = GetPartsText(candidateContent);
+            if (raw == null)
+                return new GeneratePlaceDescriptionResult(null, "empty_parts", "Gemini returned empty parts array");
 
             var text = raw.Trim()
                 .Replace("—", "-").Replace("–", "-")
@@ -128,6 +128,14 @@ public class DescriptionGeneratorService
             _logger.LogError(ex, "Gemini generate description failed for place '{Name}'", name);
             return new GeneratePlaceDescriptionResult(null, "exception", $"{ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    // Returns null when Gemini returns an empty parts array (e.g. content-filtered responses).
+    private static string? GetPartsText(JsonElement content)
+    {
+        if (!content.TryGetProperty("parts", out var parts)) return null;
+        if (parts.GetArrayLength() == 0) return null;
+        return parts[0].TryGetProperty("text", out var t) ? t.GetString() : null;
     }
 }
 

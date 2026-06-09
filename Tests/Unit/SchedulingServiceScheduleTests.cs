@@ -514,7 +514,7 @@ public class SchedulingServiceScheduleTests
     {
         // Empty periods → FindWindowAt always returns null → IsOpenAt always false,
         // NextOpenAt always null → always skipped regardless of when the clock reaches it.
-        var data = new LocalList.API.NET.Features.Places.OpeningHoursData(
+        var data = new LocalList.API.NET.Shared.Dtos.OpeningHoursData(
             Periods: [],
             WeekdayDescriptions: []);
         return data.ToJsonDocument();
