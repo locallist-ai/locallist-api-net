@@ -214,7 +214,54 @@ public class SchedulingService
         var ordered = OrderByGeography(places, rng);
         AnchorMeals(ordered);       // position food near meal windows first
         AnchorNightlife(ordered);   // then push nightlife to end (always last)
-        await WalkDayClockAsync(ordered, result, day, ct);
+
+        // Pre-fetch all consecutive travel segments in parallel before the sequential clock walk.
+        // Avoids up to N-1 sequential Mapbox calls on cold cache; DB cache writes are idempotent
+        // (ON CONFLICT DO NOTHING), so concurrent pre-fetches across requests are safe.
+        var prefetched = await PrefetchDaySegmentsAsync(ordered, ct);
+        await WalkDayClockAsync(ordered, result, day, prefetched, ct);
+    }
+
+    // Pre-fetches route segments for all consecutive place pairs in parallel (concurrency cap 4,
+    // matching the batch resolver in RouteResolver.FetchAndPersistAsync).
+    // Returns a dict keyed by (fromId, toId); entries that fail resolver fall back to Haversine
+    // inside ResolveTravelAsync and are still stored so WalkDayClockAsync gets a dict hit.
+    private async Task<Dictionary<(Guid, Guid), TravelInfoDto>> PrefetchDaySegmentsAsync(
+        List<Place> ordered, CancellationToken ct)
+    {
+        if (_resolver == null || ordered.Count < 2) return [];
+
+        var pairs = new List<(Place from, Place to, double dist, string mode)>(ordered.Count - 1);
+        for (int i = 1; i < ordered.Count; i++)
+        {
+            var prev = ordered[i - 1];
+            var curr = ordered[i];
+            if (prev.Latitude.HasValue && prev.Longitude.HasValue &&
+                curr.Latitude.HasValue && curr.Longitude.HasValue)
+            {
+                double dist = Haversine(
+                    (double)prev.Latitude.Value, (double)prev.Longitude.Value,
+                    (double)curr.Latitude.Value, (double)curr.Longitude.Value);
+                pairs.Add((prev, curr, dist, dist < 2 ? "walk" : "drive"));
+            }
+        }
+
+        if (pairs.Count == 0) return [];
+
+        using var semaphore = new SemaphoreSlim(4);
+        var tasks = pairs.Select(async pair =>
+        {
+            await semaphore.WaitAsync(ct);
+            try
+            {
+                var travel = await ResolveTravelAsync(pair.from, pair.to, pair.dist, pair.mode, ct);
+                return (key: (pair.from.Id, pair.to.Id), travel);
+            }
+            finally { semaphore.Release(); }
+        });
+
+        var results = await Task.WhenAll(tasks);
+        return results.ToDictionary(r => r.key, r => r.travel);
     }
 
     // ── Geographic ordering ───────────────────────────────────────────────────
@@ -312,7 +359,10 @@ public class SchedulingService
 
     // ── Clock walk ────────────────────────────────────────────────────────────
 
-    private async Task WalkDayClockAsync(List<Place> places, ScheduleResult result, int day, CancellationToken ct)
+    private async Task WalkDayClockAsync(
+        List<Place> places, ScheduleResult result, int day,
+        Dictionary<(Guid, Guid), TravelInfoDto> prefetched,
+        CancellationToken ct)
     {
         var clock      = DayStart;
         bool overpacked = false;
@@ -341,7 +391,12 @@ public class SchedulingService
                         (double)place.Latitude.Value, (double)place.Longitude.Value);
                     string mode = dist < 2 ? "walk" : "drive";
 
-                    travelInfo = await ResolveTravelAsync(prevPlace, place, dist, mode, ct);
+                    // Use pre-fetched result for consecutive pairs (the common case).
+                    // Falls back to a live resolver call only when a prior stop was skipped
+                    // (opening-hours check), producing a non-consecutive pair not in the dict.
+                    if (!prefetched.TryGetValue((prevPlace.Id, place.Id), out travelInfo))
+                        travelInfo = await ResolveTravelAsync(prevPlace, place, dist, mode, ct);
+
                     clock += TimeSpan.FromMinutes(travelInfo.duration_min);
                 }
             }

@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using Pgvector.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -122,10 +123,10 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
         builder.ConfigureTestServices(services =>
         {
-            // Remove the production DbContext registration (if any)
-            var descriptor = services.SingleOrDefault(
-                d => d.ServiceType == typeof(DbContextOptions<LocalListDbContext>));
-            if (descriptor is not null) services.Remove(descriptor);
+            // Remove all production DbContext and factory registrations (RemoveAll tolerates
+            // 0 or N descriptors, safe even if a future EF Core upgrade registers multiples).
+            services.RemoveAll<DbContextOptions<LocalListDbContext>>();
+            services.RemoveAll<IDbContextFactory<LocalListDbContext>>();
 
             var dataSourceBuilder = new NpgsqlDataSourceBuilder(_postgres.GetConnectionString());
             dataSourceBuilder.UseVector();
@@ -133,6 +134,11 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddDbContext<LocalListDbContext>(options =>
                 options.UseNpgsql(dataSource, npg => npg.UseVector()));
+
+            // Scoped factory mirrors the prod registration: each concurrent prefetch task
+            // creates its own DbContext, avoiding EF Core concurrent-operation errors.
+            services.AddDbContextFactory<LocalListDbContext>(options =>
+                options.UseNpgsql(dataSource, npg => npg.UseVector()), ServiceLifetime.Scoped);
 
             // Replace TimeProvider.System with FakeTimeProvider
             var timeDescriptor = services.SingleOrDefault(
@@ -405,26 +411,34 @@ public class FakeEmbeddingHandler : HttpMessageHandler
 public class FakeMapboxHandler : HttpMessageHandler
 {
     public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
+
+    /// <summary>
+    /// Async variant — takes priority over <see cref="Responder"/>. Use when the test needs
+    /// to introduce real latency (e.g. <c>await Task.Delay(50, ct)</c>) so that concurrent
+    /// pre-fetch tasks are truly in-flight simultaneously.
+    /// </summary>
+    public Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? AsyncResponder { get; set; }
+
     public List<HttpRequestMessage> Calls { get; } = new();
 
-    // Respuesta Mapbox mínima válida para tests que no configuran Responder.
     private const string DefaultMapboxResponse = """
         {"routes":[{"geometry":"test_polyline","legs":[{"distance":500.0,"duration":300.0}],"distance":500.0,"duration":300.0}],"code":"Ok"}
         """;
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        Calls.Add(request);
-        var responder = Responder;
-        if (responder is null)
+        lock (Calls) { Calls.Add(request); }
+
+        if (AsyncResponder is { } asyncR)
+            return await asyncR(request, cancellationToken);
+
+        if (Responder is { } responder)
+            return responder(request);
+
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
-            var fallback = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
-            {
-                Content = new StringContent(DefaultMapboxResponse, System.Text.Encoding.UTF8, "application/json")
-            };
-            return Task.FromResult(fallback);
-        }
-        return Task.FromResult(responder(request));
+            Content = new StringContent(DefaultMapboxResponse, System.Text.Encoding.UTF8, "application/json")
+        };
     }
 }
 

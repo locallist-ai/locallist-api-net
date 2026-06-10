@@ -9,13 +9,16 @@ namespace LocalList.API.NET.Features.Routing;
 
 public class RouteResolver : ISegmentResolver
 {
-    private readonly LocalListDbContext _db;
+    private readonly IDbContextFactory<LocalListDbContext> _dbFactory;
     private readonly IRoutingService _routing;
     private readonly ILogger<RouteResolver> _logger;
 
-    public RouteResolver(LocalListDbContext db, IRoutingService routing, ILogger<RouteResolver> logger)
+    public RouteResolver(
+        IDbContextFactory<LocalListDbContext> dbFactory,
+        IRoutingService routing,
+        ILogger<RouteResolver> logger)
     {
-        _db = db;
+        _dbFactory = dbFactory;
         _routing = routing;
         _logger = logger;
     }
@@ -30,9 +33,11 @@ public class RouteResolver : ISegmentResolver
 
         var modeStr = mode.ToString().ToLowerInvariant();
 
+        await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+
         // Batch cache lookup: filter by all place IDs involved, then match pairs in-memory.
         var placeIds = pairs.SelectMany(p => new[] { p.From.PlaceId, p.To.PlaceId }).Distinct().ToList();
-        var cachedRows = await _db.RouteSegmentCaches
+        var cachedRows = await ctx.RouteSegmentCaches
             .Where(r => placeIds.Contains(r.FromPlaceId) && placeIds.Contains(r.ToPlaceId) && r.Mode == modeStr)
             .ToListAsync(ct);
 
@@ -42,7 +47,7 @@ public class RouteResolver : ISegmentResolver
         if (misses.Count > 0)
         {
             _logger.LogInformation("RouteResolver: {MissCount} cache misses, calling Mapbox", misses.Count);
-            var newRows = await FetchAndPersistAsync(misses, mode, modeStr, ct);
+            var newRows = await FetchAndPersistAsync(misses, mode, modeStr, ctx, ct);
             foreach (var row in newRows)
                 cacheHits[(row.FromPlaceId, row.ToPlaceId)] = row;
         }
@@ -66,6 +71,9 @@ public class RouteResolver : ISegmentResolver
     // ── ISegmentResolver ─────────────────────────────────────────────────────
 
     /// <inheritdoc />
+    /// Uses a fresh DbContext per call (via IDbContextFactory) so that concurrent
+    /// invocations from SchedulingService.PrefetchDaySegmentsAsync do not share
+    /// a single EF Core context and trigger "A second operation was started on this context".
     public async Task<RouteSegment?> ResolveSegmentAsync(
         Place from, Place to, RoutingMode mode, CancellationToken ct)
     {
@@ -75,7 +83,9 @@ public class RouteResolver : ISegmentResolver
 
         var modeStr = mode.ToString().ToLowerInvariant();
 
-        var cached = await _db.RouteSegmentCaches.AsNoTracking()
+        await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+
+        var cached = await ctx.RouteSegmentCaches.AsNoTracking()
             .Where(r => r.FromPlaceId == from.Id && r.ToPlaceId == to.Id && r.Mode == modeStr)
             .FirstOrDefaultAsync(ct);
 
@@ -100,7 +110,7 @@ public class RouteResolver : ISegmentResolver
                 new NpgsqlParameter("@p5", segment.DistanceMeters),
                 new NpgsqlParameter("@p6", segment.DurationSeconds),
             };
-            await _db.Database.ExecuteSqlRawAsync(
+            await ctx.Database.ExecuteSqlRawAsync(
                 "INSERT INTO route_segment_cache " +
                 "(id, from_place_id, to_place_id, mode, encoded_polyline, distance_meters, duration_seconds, computed_at) " +
                 "VALUES (@p0, @p1, @p2, @p3, @p4, @p5, @p6, NOW()) " +
@@ -121,6 +131,7 @@ public class RouteResolver : ISegmentResolver
         List<(PlanStop From, PlanStop To)> misses,
         RoutingMode mode,
         string modeStr,
+        LocalListDbContext ctx,
         CancellationToken ct)
     {
         using var semaphore = new SemaphoreSlim(4);
@@ -174,7 +185,7 @@ public class RouteResolver : ISegmentResolver
         }
         sql.Append(" ON CONFLICT (from_place_id, to_place_id, mode) DO NOTHING");
 
-        await _db.Database.ExecuteSqlRawAsync(sql.ToString(), parameters.Cast<object>().ToArray(), ct);
+        await ctx.Database.ExecuteSqlRawAsync(sql.ToString(), parameters.Cast<object>().ToArray(), ct);
         return results;
     }
 

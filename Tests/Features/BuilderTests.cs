@@ -29,6 +29,9 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         fixture.FakeGemini.Calls.Clear();
         fixture.FakeEmbeddings.Responder = null;
         fixture.FakeEmbeddings.Calls.Clear();
+        fixture.FakeMapbox.AsyncResponder = null;
+        fixture.FakeMapbox.Responder = null;
+        lock (fixture.FakeMapbox.Calls) { fixture.FakeMapbox.Calls.Clear(); }
     }
 
     [Fact]
@@ -697,6 +700,83 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("insufficient_input", body.GetProperty("error").GetString());
         Assert.False(body.GetProperty("signals").GetProperty("wizard_interests").GetBoolean());
+    }
+
+    // ── Fix 2026-06-10: concurrent prefetch integration regression ─────────
+
+    [Fact]
+    public async Task Chat_ConcurrentMapboxPrefetch_NoDbConflict_Returns200WithStops()
+    {
+        // Regression guard for the "A second operation was started on this context" bug.
+        //
+        // Setup: 5 places with distinct coordinates → PrefetchDaySegmentsAsync fires ≥4
+        // concurrent Mapbox calls (one per consecutive pair). FakeMapbox.AsyncResponder
+        // introduces a 50ms delay so all tasks are truly in-flight simultaneously.
+        //
+        // Before the fix: RouteResolver.ResolveSegmentAsync shared the scoped _db context
+        // across parallel tasks; EF Core threw, the builder returned 500.
+        // After the fix: each task gets its own DbContext from _dbFactory → no conflict.
+        var tag = Guid.NewGuid().ToString("N")[..8];
+        var city = $"ConcCity-{tag}";
+        var db = fixture.GetDbContext();
+        for (int i = 0; i < 5; i++)
+        {
+            db.Places.Add(new Place
+            {
+                Id = Guid.NewGuid(),
+                Name = $"ConcPlace-{tag}-{i}",
+                Category = "food",
+                City = city,
+                WhyThisPlace = "Concurrency regression seed",
+                Status = "published",
+                BestTime = "any",
+                Latitude  = 25.77m + i * 0.01m,
+                Longitude = -80.19m + i * 0.01m,
+                GooglePlaceId = $"gpid-conc-{tag}-{i}",
+            });
+        }
+        await db.SaveChangesAsync();
+
+        // Introduce real async latency so ≥4 tasks overlap in time.
+        fixture.FakeMapbox.AsyncResponder = async (_, ct) =>
+        {
+            await Task.Delay(50, ct);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"routes":[{"geometry":"poly","legs":[{"distance":500.0,"duration":300.0}],"distance":500.0,"duration":300.0}],"code":"Ok"}""",
+                    System.Text.Encoding.UTF8, "application/json")
+            };
+        };
+
+        var extracted = new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "Concurrency Test",
+            maxStopsPerDay = 5,
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "food tour",
+            tripContext = new { city, days = 1, groupType = "couple" },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.TryGetProperty("stops", out var stops), "Response missing 'stops'");
+        Assert.True(stops.GetArrayLength() >= 1, "Expected ≥1 stop");
+
+        // ≥4 concurrent Mapbox calls confirm PrefetchDaySegmentsAsync actually ran.
+        int mapboxCalls;
+        lock (fixture.FakeMapbox.Calls) { mapboxCalls = fixture.FakeMapbox.Calls.Count; }
+        Assert.True(mapboxCalls >= 4,
+            $"Expected ≥4 Mapbox calls (N-1 pairs for 5 stops); got {mapboxCalls}");
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
