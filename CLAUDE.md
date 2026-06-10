@@ -192,6 +192,7 @@ LocalList.API.NET/
     │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
     │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
     │   ├── ScheduledStopDto.cs          # ScheduledStopDto, TravelInfoDto, ScheduleResult
+    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
     │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
     │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
     ├── Search/
