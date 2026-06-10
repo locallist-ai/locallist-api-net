@@ -6,6 +6,7 @@ using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Shared;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
 

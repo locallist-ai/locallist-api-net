@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
-using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Taxonomy;
 using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
@@ -18,7 +18,7 @@ namespace LocalList.API.NET.Features.Admin.Places;
 public class PlaceImportService
 {
     private readonly LocalListDbContext _db;
-    private readonly DescriptionGeneratorService _ai;
+    private readonly IDescriptionGeneratorService _ai;
     private readonly EmbeddingService _embeddings;
     private readonly IGooglePlacesService _googlePlaces;
     private readonly ITaxonomySvc _taxonomy;
@@ -27,7 +27,7 @@ public class PlaceImportService
 
     public PlaceImportService(
         LocalListDbContext db,
-        DescriptionGeneratorService ai,
+        IDescriptionGeneratorService ai,
         EmbeddingService embeddings,
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,

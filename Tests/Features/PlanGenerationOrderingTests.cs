@@ -1,5 +1,6 @@
-using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -39,7 +40,7 @@ public class PlanGenerationOrderingTests(ApiFixture fixture) : IClassFixture<Api
 
         // Resolve PlanGenerationService from the DI container (real DB + fakes already wired)
         using var scope = fixture.Services.CreateScope();
-        var svc = scope.ServiceProvider.GetRequiredService<PlanGenerationService>();
+        var svc = (PlanGenerationService)scope.ServiceProvider.GetRequiredService<IPlanGenerationService>();
 
         var prefs = new ExtractedPreferences
         {

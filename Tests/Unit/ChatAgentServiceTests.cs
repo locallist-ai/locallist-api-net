@@ -1,4 +1,4 @@
-using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat;
 using LocalList.API.NET.Features.Chat.I18n;

@@ -6,6 +6,7 @@ using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Routing;
@@ -111,9 +112,9 @@ Action<Microsoft.Extensions.Http.Resilience.HttpStandardResilienceOptions> gemin
 };
 builder.Services.AddHttpClient<PreferenceExtractorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
     .AddStandardResilienceHandler(geminiResilienceOpts);
-builder.Services.AddHttpClient<PlaceTranslatorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+builder.Services.AddHttpClient<IPlaceTranslatorService, PlaceTranslatorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
     .AddStandardResilienceHandler(geminiResilienceOpts);
-builder.Services.AddHttpClient<DescriptionGeneratorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+builder.Services.AddHttpClient<IDescriptionGeneratorService, DescriptionGeneratorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
     .AddStandardResilienceHandler(geminiResilienceOpts);
 
 builder.Services.AddHttpClient<EmbeddingService>(c => c.Timeout = TimeSpan.FromSeconds(15))
@@ -131,6 +132,7 @@ builder.Services.AddScoped<LanguageAccessor>();
 builder.Services.AddScoped<PlaceRankingService>();
 builder.Services.AddScoped<SchedulingService>();
 builder.Services.AddScoped<PlanGenerationService>();
+builder.Services.AddScoped<IPlanGenerationService>(sp => sp.GetRequiredService<PlanGenerationService>());
 builder.Services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddHttpClient<IGooglePlacesService, GooglePlacesService>(c => c.Timeout = TimeSpan.FromSeconds(15))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });

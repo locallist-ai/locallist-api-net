@@ -9,7 +9,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
-| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:218-255`. |
+| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:231-255`. |
 | **AI** | Gemini 2.5 Flash. Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. |
 | **Rate Limit** | 100 req/min global. Builder 5/hr (configurable via `Builder__RateLimitPerHour`). Chat 20/hr anon · 40/hr auth. Auth 10/15min. Waitlist 5/60s. Admin 60/min. |
 
@@ -123,9 +123,7 @@ LocalList.API.NET/
 │   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Places/
-│   │   ├── PlacesController.cs         # GET /places, GET /places/:id
-│   │   ├── PlaceDto.cs
-│   │   └── OpeningHours.cs
+│   │   └── PlacesController.cs         # GET /places, GET /places/:id
 │   ├── Plans/
 │   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
 │   │   ├── PlanDtos.cs
@@ -148,6 +146,13 @@ LocalList.API.NET/
 │       ├── IEmailMarketingService.cs
 │       └── KlaviyoService.cs           # Klaviyo email marketing integration
 └── Shared/
+    ├── AI/
+    │   └── Services/
+    │       ├── IPlaceTranslatorService.cs      # TranslatePlaceAsync, TranslatePlanAsync
+    │       ├── IDescriptionGeneratorService.cs # GeneratePlaceDescriptionAsync + WithDiagnostics
+    │       ├── IPlanGenerationService.cs       # GenerateAsync, ResolveStopPlaces
+    │       ├── PlaceTranslatorService.cs       # Implementación (movida de Builder/Services/)
+    │       └── DescriptionGeneratorService.cs  # Implementación (movida de Builder/Services/)
     ├── Auth/
     │   ├── AdminAuthorizeAttribute.cs   # Admin authorization attribute
     │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain
@@ -183,6 +188,14 @@ LocalList.API.NET/
     │   └── PiiRedactor.cs              # Redacción de PII en logs y excerpts
     ├── PostHog/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
+    ├── Dtos/
+    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Plans + Admin)
+    │   ├── OpeningHours.cs              # OpeningHoursData, OpeningPeriod, OpeningTime
+    │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
+    │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
+    │   ├── ScheduledStopDto.cs          # ScheduledStopDto, TravelInfoDto, ScheduleResult
+    │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
+    │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
     ├── Search/
     │   └── LikePatterns.cs             # Helpers para LIKE patterns en EF Core
     └── Taxonomy/

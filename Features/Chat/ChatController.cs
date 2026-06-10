@@ -3,7 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
-using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Services;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
@@ -20,23 +21,20 @@ public class ChatController : ControllerBase
 {
     private readonly ChatAgentService _agent;
     private readonly LocalListDbContext _db;
-    private readonly PlanGenerationService _planGen;
-    private readonly SchedulingService _scheduler;
+    private readonly IPlanGenerationService _planGen;
     private readonly ILogger<ChatController> _logger;
     private readonly PostHogService _posthog;
 
     public ChatController(
         ChatAgentService agent,
         LocalListDbContext db,
-        PlanGenerationService planGen,
-        SchedulingService scheduler,
+        IPlanGenerationService planGen,
         ILogger<ChatController> logger,
         PostHogService posthog)
     {
         _agent = agent;
         _db = db;
         _planGen = planGen;
-        _scheduler = scheduler;
         _logger = logger;
         _posthog = posthog;
     }
@@ -142,7 +140,7 @@ public class ChatController : ControllerBase
                 return Ok(new
                 {
                     plan = existing,
-                    stops = _scheduler.ResolveStopPlaces(existingStopDtos, existingPlaces),
+                    stops = _planGen.ResolveStopPlaces(existingStopDtos, existingPlaces),
                     message = "Your plan is ready!",
                     warnings = Array.Empty<string>(),
                     appliedRefinements = Array.Empty<string>(),
@@ -217,7 +215,7 @@ public class ChatController : ControllerBase
             return Ok(new
             {
                 plan = ephemeralPlan,
-                stops = _scheduler.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
+                stops = _planGen.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
                 message = $"Created a {result.Prefs.Days}-day plan with {result.Schedule.Stops.Count} stops!",
                 warnings = result.Schedule.Warnings,
                 appliedRefinements = result.Schedule.AppliedRefinements
@@ -326,7 +324,7 @@ public class ChatController : ControllerBase
         return Ok(new
         {
             plan,
-            stops = _scheduler.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
+            stops = _planGen.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
             message = $"Created a {result.Prefs.Days}-day plan with {result.Schedule.Stops.Count} stops!",
             warnings = result.Schedule.Warnings,
             appliedRefinements = result.Schedule.AppliedRefinements

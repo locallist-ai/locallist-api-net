@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;

@@ -24,6 +24,7 @@ using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
@@ -184,9 +185,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             // FakeGemini.Responder se configura en cada escenario de test.
             services.AddHttpClient<PreferenceExtractorService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
-            services.AddHttpClient<PlaceTranslatorService>()
+            services.AddHttpClient<IPlaceTranslatorService, PlaceTranslatorService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
-            services.AddHttpClient<DescriptionGeneratorService>()
+            services.AddHttpClient<IDescriptionGeneratorService, DescriptionGeneratorService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
 
             // SlotExtractorService también usa Gemini — usamos el mismo FakeGemini.
