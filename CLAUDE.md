@@ -32,6 +32,14 @@ Required User Secrets / Environment Variables:
 - `Gemini__ApiKey`
 - `Gemini__EmbeddingModel` — `gemini-embedding-001` (768 dims, L2-norm). **No** `text-embedding-004` (retirado 2026-01-14). Se usa en `EmbeddingService` para RAG.
 
+**LLM fallback chain (camino crítico: chat slot-filling + builder preferences)**
+- Cadena ordenada en `appsettings.json` → `Llm:Providers` (gemini → openai → mistral → anthropic). Abstracción en `Shared/AI/Llm/` (`ILlmClient`, `FallbackLlmClient`, circuit breaker `LlmProviderHealthRegistry`: 3 fallos seguidos → skip 60s).
+- `OpenAI__ApiKey` — opcional. Activa GPT-5 Nano como backup.
+- `Mistral__ApiKey` — opcional. Activa Mistral Small como backup.
+- `Anthropic__ApiKey` — opcional. Activa Claude Haiku 4.5 como backup (último por coste).
+- Un provider sin key se omite de la cadena (log en boot). Solo con `Gemini__ApiKey` el comportamiento es el clásico. `chat_turns.ai_provider/model` registran quién respondió realmente.
+- Traducciones, descripciones y embeddings siguen solo-Gemini (fuera de la cadena).
+
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
 

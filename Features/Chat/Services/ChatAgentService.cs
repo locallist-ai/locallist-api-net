@@ -269,7 +269,8 @@ public class ChatAgentService
                 SessionId = session.Id,
                 UserId = session.UserId,
                 TurnIndex = session.TurnCount,
-                AiProvider = "gemini",
+                AiProvider = aiDiagnostics.Provider,
+                Model = aiDiagnostics.Model,
                 PromptVersion = "slot-v1",
                 UserMessage = string.IsNullOrWhiteSpace(rawMessage) ? null
                     : PiiRedactor.Redact(rawMessage.Length > 2000 ? rawMessage[..2000] : rawMessage),
@@ -286,7 +287,7 @@ public class ChatAgentService
                 ThinkingTokens = aiDiagnostics.ThinkingTokens,
                 TotalTokens = aiDiagnostics.TotalTokens,
                 CostUsd = aiDiagnostics.CostUsd,
-                GeminiStatus = aiDiagnostics.GeminiStatus,
+                GeminiStatus = aiDiagnostics.HttpStatus,
                 ErrorCode = aiDiagnostics.ErrorCode,
                 ErrorMessage = aiDiagnostics.ErrorMessage,
                 SlotCompleteness = (short)(CountFilledCriticalSlots(slots) * 20),

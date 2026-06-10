@@ -1,20 +1,18 @@
-using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
 
 namespace LocalList.API.NET.Features.Chat.Services;
 
 /// <summary>
-/// Calls Gemini with a laser-focused slot-filling prompt. Returns extracted slot
-/// updates and the next AI message. Never recommends specific places — that is
+/// Calls the LLM chain with a laser-focused slot-filling prompt. Returns extracted
+/// slot updates and the next AI message. Never recommends specific places — that is
 /// RAG's job during plan generation.
 /// </summary>
 public class SlotExtractorService
 {
-    private readonly HttpClient _httpClient;
-    private readonly IConfiguration _config;
+    private readonly ILlmClient _llm;
     private readonly ILogger<SlotExtractorService> _logger;
 
     private static readonly string[] AllowedCategories =
@@ -33,10 +31,9 @@ public class SlotExtractorService
         { "vegetarian", "vegan", "halal", "kosher", "gluten-free", "none" };
 
 
-    public SlotExtractorService(HttpClient httpClient, IConfiguration config, ILogger<SlotExtractorService> logger)
+    public SlotExtractorService(ILlmClient llm, ILogger<SlotExtractorService> logger)
     {
-        _httpClient = httpClient;
-        _config = config;
+        _llm = llm;
         _logger = logger;
     }
 
@@ -47,127 +44,16 @@ public class SlotExtractorService
         string lang = "en",
         CancellationToken ct = default)
     {
-        var apiKey = _config["Gemini:ApiKey"];
         var prompt = BuildPrompt(sanitizedMessage, currentSlots, recentHistory, lang);
 
-        if (string.IsNullOrEmpty(apiKey))
-        {
-            _logger.LogWarning("Chat: Gemini API key missing");
-            var missingKeyDiag = new AiCallDiagnostics(
-                Prompt: prompt, ResponseRaw: null, FinishReason: null,
-                LatencyMs: 0, InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "missing_key", ErrorMessage: "Gemini API key not configured");
-            return (null, missingKeyDiag);
-        }
+        var response = await _llm.GenerateJsonAsync(
+            new LlmJsonRequest(prompt, Temperature: 0.2, MaxOutputTokens: 200), ct);
 
+        if (!response.Succeeded)
+            return (null, response.Diagnostics);
 
-        var requestBody = new
-        {
-            contents = new[] { new { parts = new[] { new { text = prompt } } } },
-            generationConfig = new
-            {
-                temperature = 0.2,
-                maxOutputTokens = 200,
-                responseMimeType = "application/json"
-            }
-        };
-
-        var sw = Stopwatch.StartNew();
-        try
-        {
-            var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-            var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-            var request = new HttpRequestMessage(HttpMethod.Post, url);
-            request.Headers.Add("x-goog-api-key", apiKey);
-            request.Content = content;
-
-            var response = await _httpClient.SendAsync(request, ct);
-            sw.Stop();
-            var latencyMs = (int)sw.ElapsedMilliseconds;
-
-            var responseJson = await response.Content.ReadAsStringAsync(ct);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogError("Chat: Gemini API returned {Status}", (int)response.StatusCode);
-                var httpErrDiag = new AiCallDiagnostics(
-                    Prompt: TruncatePrompt(prompt), ResponseRaw: TruncateResponse(responseJson),
-                    FinishReason: null, LatencyMs: latencyMs,
-                    InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                    CostUsd: null, GeminiStatus: (int)response.StatusCode,
-                    ErrorCode: "http_error", ErrorMessage: $"HTTP {(int)response.StatusCode}");
-                return (null, httpErrDiag);
-            }
-
-            using var doc = JsonDocument.Parse(responseJson);
-
-            // Extract usage metadata (Gemini always returns this; no extra cost)
-            int? inputTokens = null, outputTokens = null, thinkingTokens = null;
-            string? finishReason = null;
-            if (doc.RootElement.TryGetProperty("usageMetadata", out var usage))
-            {
-                if (usage.TryGetProperty("promptTokenCount", out var ptc)) inputTokens = ptc.GetInt32();
-                if (usage.TryGetProperty("candidatesTokenCount", out var ctc)) outputTokens = ctc.GetInt32();
-                if (usage.TryGetProperty("thoughtsTokenCount", out var ttc)) thinkingTokens = ttc.GetInt32();
-            }
-            if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.GetArrayLength() > 0)
-            {
-                if (cands[0].TryGetProperty("finishReason", out var fr)) finishReason = fr.GetString();
-            }
-
-            var totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (thinkingTokens ?? 0);
-
-            var text = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text").GetString() ?? "{}";
-
-            var diag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt),
-                ResponseRaw: TruncateResponse(responseJson),
-                FinishReason: finishReason,
-                LatencyMs: latencyMs,
-                InputTokens: inputTokens,
-                OutputTokens: outputTokens,
-                ThinkingTokens: thinkingTokens,
-                TotalTokens: totalTokens > 0 ? totalTokens : null,
-                CostUsd: GeminiCostCalculator.Calculate(inputTokens, outputTokens),
-                GeminiStatus: (int)response.StatusCode,
-                ErrorCode: null,
-                ErrorMessage: null);
-
-            return (ParseAndValidate(text, lang), diag);
-        }
-        catch (HttpRequestException ex)
-        {
-            sw.Stop();
-            _logger.LogError(ex, "Chat: Gemini API call failed");
-            var exDiag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
-                LatencyMs: (int)sw.ElapsedMilliseconds,
-                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "http_error", ErrorMessage: ex.Message);
-            return (null, exDiag);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            sw.Stop();
-            _logger.LogError("Chat: Gemini API call timed out");
-            var toDiag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
-                LatencyMs: (int)sw.ElapsedMilliseconds,
-                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "timeout", ErrorMessage: "Gemini API call timed out");
-            return (null, toDiag);
-        }
+        return (ParseAndValidate(response.Text!, lang), response.Diagnostics);
     }
-
-    private static string TruncatePrompt(string prompt) =>
-        prompt.Length <= 4096 ? prompt : prompt[..4096];
-
-    private static string TruncateResponse(string response) =>
-        response.Length <= 8192 ? response : response[..8192];
 
     private string BuildPrompt(string message, ChatSlots slots, List<HistoryEntry> history, string lang)
     {

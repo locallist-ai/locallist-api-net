@@ -356,8 +356,7 @@ public class ChatAgentServiceTests
         Assert.Equal(150, ctx.BudgetAmount); // tier wired
 
         var aiSvc = new PreferenceExtractorService(
-            new HttpClient(),
-            new ConfigurationBuilder().Build(),
+            LocalList.API.Tests.Unit.Llm.StubLlmClient.Succeeding("gemini"),
             NullLogger<PreferenceExtractorService>.Instance);
 
         var prefs = aiSvc.MergeContextIntoPrefs(new ExtractedPreferences(), ctx);

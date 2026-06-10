@@ -173,7 +173,8 @@ public class ChatController : ControllerBase
                 {
                     SessionId = session.Id,
                     TurnIndex = session.TurnCount,
-                    AiProvider = "gemini",
+                    AiProvider = result.GeminiDiagnostics.Provider,
+                    Model = result.GeminiDiagnostics.Model,
                     PromptVersion = "slot-v1",
                     ContextSignalsJson = session.SlotsJson,
                     PromptChars = result.GeminiDiagnostics.Prompt.Length,
@@ -190,7 +191,7 @@ public class ChatController : ControllerBase
                     ThinkingTokens = result.GeminiDiagnostics.ThinkingTokens,
                     TotalTokens = result.GeminiDiagnostics.TotalTokens,
                     CostUsd = result.GeminiDiagnostics.CostUsd,
-                    GeminiStatus = result.GeminiDiagnostics.GeminiStatus,
+                    GeminiStatus = result.GeminiDiagnostics.HttpStatus,
                     ErrorCode = result.GeminiDiagnostics.ErrorCode,
                     ErrorMessage = result.GeminiDiagnostics.ErrorMessage,
                 });
@@ -258,7 +259,8 @@ public class ChatController : ControllerBase
             SessionId = session.Id,
             UserId = userId,
             TurnIndex = session.TurnCount,
-            AiProvider = "gemini",
+            AiProvider = result.GeminiDiagnostics.Provider,
+            Model = result.GeminiDiagnostics.Model,
             PromptVersion = "slot-v1",
             ContextSignalsJson = session.SlotsJson,
             PromptChars = result.GeminiDiagnostics.Prompt.Length,
@@ -275,7 +277,7 @@ public class ChatController : ControllerBase
             ThinkingTokens = result.GeminiDiagnostics.ThinkingTokens,
             TotalTokens = result.GeminiDiagnostics.TotalTokens,
             CostUsd = result.GeminiDiagnostics.CostUsd,
-            GeminiStatus = result.GeminiDiagnostics.GeminiStatus,
+            GeminiStatus = result.GeminiDiagnostics.HttpStatus,
             ErrorCode = result.GeminiDiagnostics.ErrorCode,
             ErrorMessage = result.GeminiDiagnostics.ErrorMessage,
         } : null;
