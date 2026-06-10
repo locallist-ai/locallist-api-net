@@ -5,7 +5,6 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
-using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Search;
@@ -24,7 +23,8 @@ public class AdminPlacesController : ControllerBase
     private readonly ILogger<AdminPlacesController> _logger;
     private readonly TimeProvider _clock;
     private readonly EmbeddingService _embeddings;
-    private readonly AiProviderService _ai;
+    private readonly PlaceTranslatorService _translator;
+    private readonly DescriptionGeneratorService _descGen;
     private readonly IGooglePlacesService _googlePlaces;
     private readonly ITaxonomySvc _taxonomy;
 
@@ -38,7 +38,8 @@ public class AdminPlacesController : ControllerBase
         ILogger<AdminPlacesController> logger,
         TimeProvider clock,
         EmbeddingService embeddings,
-        AiProviderService ai,
+        PlaceTranslatorService translator,
+        DescriptionGeneratorService descGen,
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy)
     {
@@ -46,7 +47,8 @@ public class AdminPlacesController : ControllerBase
         _logger = logger;
         _clock = clock;
         _embeddings = embeddings;
-        _ai = ai;
+        _translator = translator;
+        _descGen = descGen;
         _googlePlaces = googlePlaces;
         _taxonomy = taxonomy;
     }
@@ -264,7 +266,7 @@ public class AdminPlacesController : ControllerBase
         {
             await Task.WhenAll(chunk.Select(async req =>
             {
-                var generated = await _ai.GeneratePlaceDescriptionAsync(
+                var generated = await _descGen.GeneratePlaceDescriptionAsync(
                     req.Name, req.City ?? "Miami", req.Category,
                     req.Subcategories?.FirstOrDefault(),
                     null, req.GoogleRating, req.GoogleReviewCount, req.Neighborhood, ct);
@@ -390,7 +392,7 @@ public class AdminPlacesController : ControllerBase
         {
             await Task.WhenAll(chunk.Select(async req =>
             {
-                var generated = await _ai.GeneratePlaceDescriptionAsync(
+                var generated = await _descGen.GeneratePlaceDescriptionAsync(
                     req.Name, req.City ?? request.DefaultCity ?? "Miami", req.Category,
                     req.Subcategories?.FirstOrDefault(),
                     null, req.GoogleRating, req.GoogleReviewCount, req.Neighborhood, ct);
@@ -709,7 +711,7 @@ public class AdminPlacesController : ControllerBase
         if (place.Source != "curated")
             return BadRequest(new { error = "Translation is only supported for curated places." });
 
-        var draft = await _ai.TranslatePlaceAsync(place, "es", ct);
+        var draft = await _translator.TranslatePlaceAsync(place, "es", ct);
         if (draft == null)
             return StatusCode(503, new { error = "Translation service unavailable." });
 
@@ -820,7 +822,7 @@ public class AdminPlacesController : ControllerBase
         var place = await _db.Places.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
         if (place == null) return NotFound(new { error = "Place not found" });
 
-        var description = await _ai.GeneratePlaceDescriptionAsync(
+        var description = await _descGen.GeneratePlaceDescriptionAsync(
             place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault(),
             null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
 
@@ -895,7 +897,7 @@ public class AdminPlacesController : ControllerBase
         foreach (var place in bucketGemini)
         {
             if (ct.IsCancellationRequested) break;
-            var result = await _ai.GeneratePlaceDescriptionWithDiagnosticsAsync(
+            var result = await _descGen.GeneratePlaceDescriptionWithDiagnosticsAsync(
                 place.Name, place.City, place.Category, place.Subcategories?.FirstOrDefault(),
                 null, place.GoogleRating, place.GoogleReviewCount, place.Neighborhood, ct);
             if (result.Description != null)
@@ -952,7 +954,7 @@ public class AdminPlacesController : ControllerBase
             {
                 if (ct.IsCancellationRequested) break;
 
-                var draft = await _ai.TranslatePlaceAsync(place, lang, ct);
+                var draft = await _translator.TranslatePlaceAsync(place, lang, ct);
                 if (draft == null) { failed++; continue; }
 
                 place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, lang, draft.Name);

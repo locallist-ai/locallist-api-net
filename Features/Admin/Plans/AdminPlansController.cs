@@ -5,7 +5,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
-using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.I18n;
 
 namespace LocalList.API.NET.Features.Admin.Plans;
@@ -19,9 +19,9 @@ public class AdminPlansController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<AdminPlansController> _logger;
     private readonly TimeProvider _clock;
-    private readonly AiProviderService _ai;
+    private readonly PlaceTranslatorService _ai;
 
-    public AdminPlansController(LocalListDbContext db, ILogger<AdminPlansController> logger, TimeProvider clock, AiProviderService ai)
+    public AdminPlansController(LocalListDbContext db, ILogger<AdminPlansController> logger, TimeProvider clock, PlaceTranslatorService ai)
     {
         _db = db;
         _logger = logger;

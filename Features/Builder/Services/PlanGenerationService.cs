@@ -1,4 +1,3 @@
-using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Observability;
@@ -16,7 +15,7 @@ namespace LocalList.API.NET.Features.Builder.Services;
 public class PlanGenerationService
 {
     private readonly LocalListDbContext _db;
-    private readonly AiProviderService _aiProvider;
+    private readonly PreferenceExtractorService _aiProvider;
     private readonly EmbeddingService _embeddings;
     private readonly PlaceRankingService _ranker;
     private readonly SchedulingService _scheduler;
@@ -32,7 +31,7 @@ public class PlanGenerationService
 
     public PlanGenerationService(
         LocalListDbContext db,
-        AiProviderService aiProvider,
+        PreferenceExtractorService aiProvider,
         EmbeddingService embeddings,
         PlaceRankingService ranker,
         SchedulingService scheduler,

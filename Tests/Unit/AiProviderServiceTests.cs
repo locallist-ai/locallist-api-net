@@ -1,16 +1,16 @@
-using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Builder.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace LocalList.API.Tests.Unit;
 
-public class AiProviderServiceTests
+public class DescriptionGeneratorServiceTests
 {
     [Fact]
     public async Task GeneratePlaceDescriptionWithDiagnostics_WhenKeyMissing_ReturnsMissingKeyKind()
     {
         var config = new ConfigurationBuilder().Build(); // no Gemini:ApiKey set
-        var svc = new AiProviderService(new HttpClient(), config, NullLogger<AiProviderService>.Instance);
+        var svc = new DescriptionGeneratorService(new HttpClient(), config, NullLogger<DescriptionGeneratorService>.Instance);
 
         var result = await svc.GeneratePlaceDescriptionWithDiagnosticsAsync(
             "Test Place", "Miami", "Food", null, null, null, null, null);
