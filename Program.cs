@@ -83,6 +83,17 @@ if (!string.IsNullOrEmpty(connectionUrl))
             // sweet-spot entre tolerancia a latencia transitoria y failure-fast.
             npg.CommandTimeout(10);
         }));
+
+    // Scoped factory for RouteResolver.ResolveSegmentAsync — each concurrent pre-fetch task
+    // creates its own independent DbContext via the factory, avoiding EF Core's
+    // "A second operation was started on this context" on the shared scoped context.
+    // Scoped lifetime is correct: RouteResolver is scoped and all calls happen within one request.
+    builder.Services.AddDbContextFactory<LocalListDbContext>(options =>
+        options.UseNpgsql(dataSource, npg =>
+        {
+            npg.UseVector();
+            npg.CommandTimeout(10);
+        }), ServiceLifetime.Scoped);
 }
 
 // Add DI Services

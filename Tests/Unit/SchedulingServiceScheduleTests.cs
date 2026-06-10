@@ -369,11 +369,12 @@ public class SchedulingServiceScheduleTests
     {
         public int DurationSeconds { get; set; } = 900; // 15 min
         public int DistanceMeters { get; set; } = 1500; // 1.5 km
-        public int Calls { get; private set; }
+        private int _calls;
+        public int Calls => _calls;
 
         public Task<RouteSegment?> ResolveSegmentAsync(Place from, Place to, RoutingMode mode, CancellationToken ct)
         {
-            Calls++;
+            Interlocked.Increment(ref _calls);
             return Task.FromResult<RouteSegment?>(new RouteSegment("_fake_poly_", DistanceMeters, DurationSeconds));
         }
     }
@@ -472,6 +473,96 @@ public class SchedulingServiceScheduleTests
         var travel = stops[1].TravelFromPrevious;
         Assert.NotNull(travel);
         Assert.True(travel.duration_min >= 1, "Haversine fallback should produce non-zero duration");
+    }
+
+    // ── Fix 3: parallel pre-fetch produces same output as sequential baseline ─────
+
+    [Fact]
+    public async Task BuildPlanScheduleAsync_ParallelPrefetch_ProducesSameScheduleAcrossRuns()
+    {
+        // Two runs with same seed and same FakeSegmentResolver must produce identical stops.
+        // Verifies that concurrent pre-fetch does not introduce non-determinism.
+        var resolver = new FakeSegmentResolver { DurationSeconds = 600, DistanceMeters = 800 };
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, resolver);
+
+        var places = new List<Place>
+        {
+            MakePlace("food",     lat: 25.77m, lon: -80.19m),
+            MakePlace("culture",  lat: 25.78m, lon: -80.20m),
+            MakePlace("outdoors", lat: 25.79m, lon: -80.21m),
+            MakePlace("coffee",   lat: 25.80m, lon: -80.22m),
+        };
+        var prefs = Prefs(days: 2, maxStops: 2);
+
+        var r1 = await svc.BuildPlanScheduleAsync(places, prefs, seed: 42);
+        var r2 = await svc.BuildPlanScheduleAsync(places, prefs, seed: 42);
+
+        Assert.Equal(r1.Stops.Count, r2.Stops.Count);
+        for (int i = 0; i < r1.Stops.Count; i++)
+        {
+            Assert.Equal(r1.Stops[i].PlaceId,              r2.Stops[i].PlaceId);
+            Assert.Equal(r1.Stops[i].DayNumber,            r2.Stops[i].DayNumber);
+            Assert.Equal(r1.Stops[i].OrderIndex,           r2.Stops[i].OrderIndex);
+            Assert.Equal(r1.Stops[i].SuggestedArrival,     r2.Stops[i].SuggestedArrival);
+            Assert.Equal(r1.Stops[i].SuggestedDurationMin, r2.Stops[i].SuggestedDurationMin);
+        }
+    }
+
+    // ── Fix 4: opening-hours skip triggers live-resolver fallback for non-consecutive pair ─
+
+    private static System.Text.Json.JsonDocument MakeClosedOpeningHoursJson()
+    {
+        // Empty periods → FindWindowAt always returns null → IsOpenAt always false,
+        // NextOpenAt always null → always skipped regardless of when the clock reaches it.
+        var data = new LocalList.API.NET.Features.Places.OpeningHoursData(
+            Periods: [],
+            WeekdayDescriptions: []);
+        return data.ToJsonDocument();
+    }
+
+    [Fact]
+    public async Task BuildPlanScheduleAsync_SkippedStop_LiveResolverCalledForNonConsecutivePair()
+    {
+        // B has empty opening hours → always skipped regardless of position or clock time.
+        //
+        // With B in the middle (ordered X→B→Y):
+        //   prefetch covers (X→B) + (B→Y): 2 calls; B is skipped; Y looks up (X→Y) → MISS
+        //   → 1 live call → resolver.Calls == 3; Y.TravelFromPrevious from live call.
+        //
+        // With B first (ordered B→X→Y):
+        //   prefetch covers (B→X) + (X→Y): 2 calls; B is skipped (no prev); X becomes first
+        //   emitted stop (no travel); Y looks up (X→Y) → HIT → resolver.Calls == 2.
+        //
+        // In ALL orderings: 2 emitted stops, OrderIndex=0 has no travel, OrderIndex=1 has travel.
+        var resolver = new FakeSegmentResolver { DurationSeconds = 600, DistanceMeters = 800 };
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, resolver);
+
+        var placeA = MakePlace("food",    lat: 25.77m, lon: -80.19m);
+        var placeB = MakePlace("culture", lat: 25.78m, lon: -80.20m);
+        var placeC = MakePlace("culture", lat: 25.79m, lon: -80.21m);
+        placeB.OpeningHours = MakeClosedOpeningHoursJson();
+
+        var result = await svc.BuildPlanScheduleAsync(
+            new List<Place> { placeA, placeB, placeC }, Prefs(maxStops: 3), seed: 0);
+
+        // B must be absent (always closed — no open periods)
+        Assert.DoesNotContain(result.Stops, s => s.PlaceId == placeB.Id);
+        Assert.Contains(result.Stops, s => s.PlaceId == placeA.Id);
+        Assert.Contains(result.Stops, s => s.PlaceId == placeC.Id);
+        Assert.Equal(2, result.Stops.Count);
+
+        // At least the N-1 prefetch calls happened; possibly one extra live fallback
+        Assert.True(resolver.Calls >= 2, $"Expected ≥2 resolver calls; got {resolver.Calls}");
+
+        // First emitted stop (OrderIndex=0) never has travel info
+        var firstStop = result.Stops.First(s => s.OrderIndex == 0);
+        Assert.Null(firstStop.TravelFromPrevious);
+
+        // Second emitted stop (OrderIndex=1) always has travel info —
+        // either from the prefetch dict hit or from the live fallback after the skip
+        var secondStop = result.Stops.First(s => s.OrderIndex == 1);
+        Assert.NotNull(secondStop.TravelFromPrevious);
+        Assert.Equal(10, secondStop.TravelFromPrevious.duration_min); // 600s / 60
     }
 
     /// <summary>

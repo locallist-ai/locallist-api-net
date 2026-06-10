@@ -122,10 +122,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
         builder.ConfigureTestServices(services =>
         {
-            // Remove the production DbContext registration (if any)
+            // Remove the production DbContext and factory registrations (if any)
             var descriptor = services.SingleOrDefault(
                 d => d.ServiceType == typeof(DbContextOptions<LocalListDbContext>));
             if (descriptor is not null) services.Remove(descriptor);
+
+            var factoryDescriptor = services.SingleOrDefault(
+                d => d.ServiceType == typeof(IDbContextFactory<LocalListDbContext>));
+            if (factoryDescriptor is not null) services.Remove(factoryDescriptor);
 
             var dataSourceBuilder = new NpgsqlDataSourceBuilder(_postgres.GetConnectionString());
             dataSourceBuilder.UseVector();
@@ -133,6 +137,11 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddDbContext<LocalListDbContext>(options =>
                 options.UseNpgsql(dataSource, npg => npg.UseVector()));
+
+            // Scoped factory mirrors the prod registration: each concurrent prefetch task
+            // creates its own DbContext, avoiding EF Core concurrent-operation errors.
+            services.AddDbContextFactory<LocalListDbContext>(options =>
+                options.UseNpgsql(dataSource, npg => npg.UseVector()), ServiceLifetime.Scoped);
 
             // Replace TimeProvider.System with FakeTimeProvider
             var timeDescriptor = services.SingleOrDefault(

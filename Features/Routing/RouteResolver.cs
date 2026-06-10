@@ -9,13 +9,19 @@ namespace LocalList.API.NET.Features.Routing;
 
 public class RouteResolver : ISegmentResolver
 {
-    private readonly LocalListDbContext _db;
+    private readonly LocalListDbContext _db;                             // batch ResolveAsync path (sequential)
+    private readonly IDbContextFactory<LocalListDbContext> _dbFactory;  // ResolveSegmentAsync (parallel-safe)
     private readonly IRoutingService _routing;
     private readonly ILogger<RouteResolver> _logger;
 
-    public RouteResolver(LocalListDbContext db, IRoutingService routing, ILogger<RouteResolver> logger)
+    public RouteResolver(
+        LocalListDbContext db,
+        IDbContextFactory<LocalListDbContext> dbFactory,
+        IRoutingService routing,
+        ILogger<RouteResolver> logger)
     {
         _db = db;
+        _dbFactory = dbFactory;
         _routing = routing;
         _logger = logger;
     }
@@ -66,6 +72,9 @@ public class RouteResolver : ISegmentResolver
     // ── ISegmentResolver ─────────────────────────────────────────────────────
 
     /// <inheritdoc />
+    /// Uses a fresh DbContext per call (via IDbContextFactory) so that concurrent
+    /// invocations from SchedulingService.PrefetchDaySegmentsAsync do not share
+    /// a single EF Core context and trigger "A second operation was started on this context".
     public async Task<RouteSegment?> ResolveSegmentAsync(
         Place from, Place to, RoutingMode mode, CancellationToken ct)
     {
@@ -75,7 +84,9 @@ public class RouteResolver : ISegmentResolver
 
         var modeStr = mode.ToString().ToLowerInvariant();
 
-        var cached = await _db.RouteSegmentCaches.AsNoTracking()
+        await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+
+        var cached = await ctx.RouteSegmentCaches.AsNoTracking()
             .Where(r => r.FromPlaceId == from.Id && r.ToPlaceId == to.Id && r.Mode == modeStr)
             .FirstOrDefaultAsync(ct);
 
@@ -100,7 +111,7 @@ public class RouteResolver : ISegmentResolver
                 new NpgsqlParameter("@p5", segment.DistanceMeters),
                 new NpgsqlParameter("@p6", segment.DurationSeconds),
             };
-            await _db.Database.ExecuteSqlRawAsync(
+            await ctx.Database.ExecuteSqlRawAsync(
                 "INSERT INTO route_segment_cache " +
                 "(id, from_place_id, to_place_id, mode, encoded_polyline, distance_meters, duration_seconds, computed_at) " +
                 "VALUES (@p0, @p1, @p2, @p3, @p4, @p5, @p6, NOW()) " +

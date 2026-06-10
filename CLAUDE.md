@@ -199,8 +199,8 @@ Railway despliega **una sola réplica** de esta API. Escalar a 2+ réplicas romp
 |---|---|---|
 | Rate limiters (`AddRateLimiter`) | `IMemoryCache` in-process | Límites efectivos se multiplican por el número de réplicas |
 | `IMemoryCache` (JWKS cache, etc.) | In-process | Cada réplica llena su propia caché — no hay coherencia |
-| `SemaphoreSlim(4)` en `RouteResolver.FetchAndPersistAsync` | Per-instance | El semáforo no coordina entre réplicas; posibles ráfagas Mapbox |
-| `SemaphoreSlim(4)` en `SchedulingService.PrefetchDaySegmentsAsync` | Per-instance | Ídem |
+| `SemaphoreSlim(4)` en `RouteResolver.FetchAndPersistAsync` | Per-call (variable local) | El semáforo no coordina entre réplicas; posibles ráfagas Mapbox |
+| `SemaphoreSlim(4)` en `SchedulingService.PrefetchDaySegmentsAsync` | Per-call (variable local) | Ídem |
 
 Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStackExchangeRedisRateLimiting`) y reemplazar `IMemoryCache` por `IDistributedCache`.
 
