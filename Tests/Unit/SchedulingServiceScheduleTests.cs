@@ -400,6 +400,31 @@ public class SchedulingServiceScheduleTests
     }
 
     [Fact]
+    public async Task BuildPlanScheduleAsync_PrefetchesAllConsecutivePairs()
+    {
+        // 3 stops → 2 consecutive pairs → resolver must be called exactly twice (pre-fetch only),
+        // not again during the clock walk (dict hit for every non-first stop).
+        var fakeResolver = new FakeSegmentResolver { DurationSeconds = 600, DistanceMeters = 800 };
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, fakeResolver);
+
+        var places = new List<Place>
+        {
+            MakePlace("food",     lat: 25.77m, lon: -80.19m),
+            MakePlace("culture",  lat: 25.78m, lon: -80.20m),
+            MakePlace("outdoors", lat: 25.79m, lon: -80.21m),
+        };
+        var prefs = Prefs(maxStops: 3);
+
+        var result = await svc.BuildPlanScheduleAsync(places, prefs, seed: 42);
+
+        Assert.Equal(3, result.Stops.Count);
+        Assert.Equal(2, fakeResolver.Calls); // N-1 pairs, no double-calls from the walk
+        var stops = result.Stops.OrderBy(s => s.OrderIndex).ToList();
+        Assert.Equal(10, stops[1].TravelFromPrevious!.duration_min); // 600s / 60
+        Assert.Equal(10, stops[2].TravelFromPrevious!.duration_min);
+    }
+
+    [Fact]
     public async Task BuildPlanScheduleAsync_WithRealRouting_UsesDurationFromSegmentResolver()
     {
         var fakeResolver = new FakeSegmentResolver { DurationSeconds = 600, DistanceMeters = 800 }; // 10 min, 0.8 km
