@@ -124,6 +124,7 @@ builder.Services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Tim
 builder.Services.AddHttpClient<IGooglePlacesService, GooglePlacesService>(c => c.Timeout = TimeSpan.FromSeconds(15))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<RouteResolver>();
+builder.Services.AddScoped<LocalList.API.NET.Features.Admin.Places.PlaceImportService>();
 builder.Services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
