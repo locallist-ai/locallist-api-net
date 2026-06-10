@@ -280,12 +280,18 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowSpecificOrigins", corsBuilder =>
     {
         var env = builder.Environment;
-        var allowedOrigins = env.IsProduction()
+        var defaultOrigins = env.IsProduction()
             ? new[] { "https://locallist.ai" }
             : new[] { "http://localhost:8081", "http://localhost:19006" };
 
-        corsBuilder.WithOrigins(allowedOrigins)
-            .WithMethods("GET", "POST", "PATCH", "DELETE", "OPTIONS")
+        // Cors:AllowedOrigins (env: Cors__AllowedOrigins, separados por ';') amplía los
+        // defaults sin redeploy de código — p. ej. la admin web en localhost contra prod.
+        var extraOrigins = builder.Configuration["Cors:AllowedOrigins"]
+            ?.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            ?? Array.Empty<string>();
+
+        corsBuilder.WithOrigins(defaultOrigins.Concat(extraOrigins).Distinct().ToArray())
+            .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             .WithHeaders("Content-Type", "Authorization")
             .AllowCredentials();
     });
