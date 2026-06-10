@@ -45,7 +45,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     public FakeGoogleIdTokenValidator FakeGoogle { get; } = new();
 
     /// <summary>
-    /// Handler compartido que intercepta las llamadas salientes de <see cref="AiProviderService"/>.
+    /// Handler compartido que intercepta las llamadas salientes de los servicios Gemini
+    /// (PreferenceExtractorService, PlaceTranslatorService, DescriptionGeneratorService).
     /// Los tests pueden sustituir <see cref="FakeGeminiHandler.Responder"/> para definir la respuesta
     /// (OK con JSON válido, 502, texto malformado, etc.) sin levantar un servidor HTTP real.
     /// </summary>
@@ -173,10 +174,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             if (googleDescriptor is not null) services.Remove(googleDescriptor);
             services.AddSingleton<IGoogleIdTokenValidator>(FakeGoogle);
 
-            // Sustituir el HttpMessageHandler primario del HttpClient inyectado en
-            // AiProviderService por nuestro fake. Los tests del Builder configuran
-            // FakeGemini.Responder en cada escenario.
-            services.AddHttpClient<AiProviderService>()
+            // Sustituir el HttpMessageHandler de los tres servicios Gemini por el fake.
+            // FakeGemini.Responder se configura en cada escenario de test.
+            services.AddHttpClient<PreferenceExtractorService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
+            services.AddHttpClient<PlaceTranslatorService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
+            services.AddHttpClient<DescriptionGeneratorService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
 
             // SlotExtractorService también usa Gemini — usamos el mismo FakeGemini.
@@ -489,9 +493,10 @@ public class FakePostHogHandler : HttpMessageHandler
 }
 
 /// <summary>
-/// Handler HTTP fake que intercepta las llamadas a Gemini desde
-/// <c>AiProviderService</c>. Los tests ajustan <see cref="Responder"/> para
-/// devolver distintos cuerpos/estados (200 OK, 502, JSON malformado…).
+/// Handler HTTP fake que intercepta las llamadas a Gemini desde los servicios Gemini
+/// (PreferenceExtractorService, PlaceTranslatorService, DescriptionGeneratorService).
+/// Los tests ajustan <see cref="Responder"/> para devolver distintos cuerpos/estados
+/// (200 OK, 502, JSON malformado…).
 /// Si <see cref="Responder"/> es null, devuelve 200 con una respuesta Gemini vacía.
 /// </summary>
 public class FakeGeminiHandler : HttpMessageHandler

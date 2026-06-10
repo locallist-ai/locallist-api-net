@@ -87,18 +87,23 @@ if (!string.IsNullOrEmpty(connectionUrl))
 
 // Add DI Services
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddHttpClient<AiProviderService>(c => c.Timeout = TimeSpan.FromSeconds(25))
-    .AddStandardResilienceHandler(options =>
-    {
-        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
-        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(25);
-        options.CircuitBreaker.FailureRatio = 0.5;
-        options.Retry.MaxRetryAttempts = 1;
-        // Solo reintentar errores de red transitorios. Los 5xx son "duros" — el servicio
-        // cae a keyword fallback inmediatamente (AiProviderService catch HttpRequestException).
-        options.Retry.ShouldHandle = args => ValueTask.FromResult(
-            args.Outcome.Exception is HttpRequestException);
-    });
+// Gemini services share the same resilience configuration — 25s total timeout,
+// 1 retry on transient network errors only (5xx errors are treated as hard failures).
+Action<Microsoft.Extensions.Http.Resilience.HttpStandardResilienceOptions> geminiResilienceOpts = options =>
+{
+    options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
+    options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(25);
+    options.CircuitBreaker.FailureRatio = 0.5;
+    options.Retry.MaxRetryAttempts = 1;
+    options.Retry.ShouldHandle = args => ValueTask.FromResult(
+        args.Outcome.Exception is HttpRequestException);
+};
+builder.Services.AddHttpClient<PreferenceExtractorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+    .AddStandardResilienceHandler(geminiResilienceOpts);
+builder.Services.AddHttpClient<PlaceTranslatorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+    .AddStandardResilienceHandler(geminiResilienceOpts);
+builder.Services.AddHttpClient<DescriptionGeneratorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+    .AddStandardResilienceHandler(geminiResilienceOpts);
 
 builder.Services.AddHttpClient<EmbeddingService>(c => c.Timeout = TimeSpan.FromSeconds(15))
     .AddStandardResilienceHandler(options =>
