@@ -1,6 +1,8 @@
 using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Features.Places;
+using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
+
 
 namespace LocalList.API.NET.Features.Builder.Services;
 
@@ -32,10 +34,12 @@ public sealed class ScheduleResult
 public class SchedulingService
 {
     private readonly ILogger<SchedulingService> _logger;
+    private readonly ISegmentResolver? _resolver;
 
-    public SchedulingService(ILogger<SchedulingService> logger)
+    public SchedulingService(ILogger<SchedulingService> logger, ISegmentResolver? resolver = null)
     {
         _logger = logger;
+        _resolver = resolver;
     }
 
     // ── Time-block compatibility (kept for IsGoodTimeMatch) ───────────────────
@@ -87,12 +91,13 @@ public class SchedulingService
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds a plan schedule from ranked places.
-    /// <paramref name="seed"/> makes the output reproducible — same seed, same plan.
-    /// Different seeds produce different but equally coherent plans.
+    /// Async version — uses <see cref="ISegmentResolver"/> for real travel durations when available.
+    /// Same seed guarantees the same candidate ranking and selection logic.
+    /// Travel times may vary (Mapbox vs haversine fallback), which can affect
+    /// which stops fit within the day's time budget.
     /// </summary>
-    public ScheduleResult BuildPlanSchedule(
-        List<Place> filteredPlaces, ExtractedPreferences prefs, int? seed = null)
+    public async Task<ScheduleResult> BuildPlanScheduleAsync(
+        List<Place> filteredPlaces, ExtractedPreferences prefs, int? seed = null, CancellationToken ct = default)
     {
         var result = new ScheduleResult();
         var rng = new Random(seed ?? Random.Shared.Next());
@@ -104,11 +109,19 @@ public class SchedulingService
         for (int day = 1; day <= prefs.Days; day++)
         {
             if (!dayPlaces.TryGetValue(day, out var places) || places.Count == 0) continue;
-            ScheduleDay(places, result, day, rng);
+            await ScheduleDayAsync(places, result, day, rng, ct);
         }
 
         return result;
     }
+
+    /// <summary>
+    /// Sync wrapper for backward compatibility (unit tests). Production code should prefer
+    /// <see cref="BuildPlanScheduleAsync"/>.
+    /// </summary>
+    public ScheduleResult BuildPlanSchedule(
+        List<Place> filteredPlaces, ExtractedPreferences prefs, int? seed = null)
+        => BuildPlanScheduleAsync(filteredPlaces, prefs, seed).GetAwaiter().GetResult();
 
     // ── Step 1: pace clamp ────────────────────────────────────────────────────
 
@@ -196,12 +209,12 @@ public class SchedulingService
 
     // ── Step 3: schedule one day ──────────────────────────────────────────────
 
-    private void ScheduleDay(List<Place> places, ScheduleResult result, int day, Random rng)
+    private async Task ScheduleDayAsync(List<Place> places, ScheduleResult result, int day, Random rng, CancellationToken ct)
     {
         var ordered = OrderByGeography(places, rng);
         AnchorMeals(ordered);       // position food near meal windows first
         AnchorNightlife(ordered);   // then push nightlife to end (always last)
-        WalkDayClock(ordered, result, day);
+        await WalkDayClockAsync(ordered, result, day, ct);
     }
 
     // ── Geographic ordering ───────────────────────────────────────────────────
@@ -299,7 +312,7 @@ public class SchedulingService
 
     // ── Clock walk ────────────────────────────────────────────────────────────
 
-    private void WalkDayClock(List<Place> places, ScheduleResult result, int day)
+    private async Task WalkDayClockAsync(List<Place> places, ScheduleResult result, int day, CancellationToken ct)
     {
         var clock      = DayStart;
         bool overpacked = false;
@@ -323,18 +336,13 @@ public class SchedulingService
                 if (prevPlace?.Latitude.HasValue == true && prevPlace.Longitude.HasValue &&
                     place.Latitude.HasValue && place.Longitude.HasValue)
                 {
-                    double dist  = Haversine(
+                    double dist = Haversine(
                         (double)prevPlace.Latitude.Value, (double)prevPlace.Longitude.Value,
                         (double)place.Latitude.Value, (double)place.Longitude.Value);
-                    string mode  = dist < 2 ? "walk" : "drive";
-                    int travelMin = EstimateTravelTime(dist, mode);
-                    clock        += TimeSpan.FromMinutes(travelMin);
-                    travelInfo   = new TravelInfoDto
-                    {
-                        distance_km = Math.Round(dist, 1),
-                        duration_min = travelMin,
-                        mode = mode
-                    };
+                    string mode = dist < 2 ? "walk" : "drive";
+
+                    travelInfo = await ResolveTravelAsync(prevPlace, place, dist, mode, ct);
+                    clock += TimeSpan.FromMinutes(travelInfo.duration_min);
                 }
             }
 
@@ -388,6 +396,39 @@ public class SchedulingService
             clock += TimeSpan.FromMinutes(duration);
             orderIndex++;
         }
+    }
+
+    private async Task<TravelInfoDto> ResolveTravelAsync(Place from, Place to, double dist, string mode, CancellationToken ct)
+    {
+        if (_resolver != null)
+        {
+            try
+            {
+                var routeMode = mode == "walk" ? RoutingMode.Walking : RoutingMode.Driving;
+                var segment = await _resolver.ResolveSegmentAsync(from, to, routeMode, ct);
+                if (segment != null)
+                    return new TravelInfoDto
+                    {
+                        distance_km  = Math.Round(segment.DistanceMeters / 1000.0, 1),
+                        duration_min = Math.Max(1, (int)Math.Ceiling(segment.DurationSeconds / 60.0)),
+                        mode         = mode
+                    };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                // Catches non-OCE errors (HttpRequestException, DB failures…) and OCE from
+                // internal timeouts. Does NOT catch OCE when ct is cancelled (user cancelled).
+                _logger.LogWarning(ex, "Routing failed for segment {From}→{To} — using Haversine estimate",
+                    from.Name, to.Name);
+            }
+        }
+
+        return new TravelInfoDto
+        {
+            distance_km  = Math.Round(dist, 1),
+            duration_min = EstimateTravelTime(dist, mode),
+            mode         = mode
+        };
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

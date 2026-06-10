@@ -664,6 +664,15 @@ public class ChatAgentService
         Days = slots.Days,
         GroupType = slots.GroupType,
         Budget = slots.Budget,
+        // Map tier to amount so MergeContextIntoPrefs can populate BudgetAmount on prefs
+        // and ScoreBudgetMatch returns non-zero when ranking from the chat path.
+        BudgetAmount = slots.Budget switch
+        {
+            "budget"   => 50,
+            "moderate" => 150,
+            "premium"  => 300,
+            _          => null,
+        },
         Categories = slots.Categories.Count > 0 ? slots.Categories : null,
         Pace = slots.Pace,
         Dietary = slots.Dietary.Count > 0 ? slots.Dietary : null,

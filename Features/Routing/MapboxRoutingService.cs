@@ -61,7 +61,7 @@ public class MapboxRoutingService : IRoutingService
             var duration = (int)Math.Round(route.Duration);
             return new RouteSegment(route.Geometry, distance, duration);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Mapbox Directions request failed");
             return null;
