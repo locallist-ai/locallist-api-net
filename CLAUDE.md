@@ -152,6 +152,14 @@ LocalList.API.NET/
 │       └── KlaviyoService.cs           # Klaviyo email marketing integration
 └── Shared/
     ├── AI/
+    │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
+    │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
+    │   │   ├── FallbackLlmClient.cs            # Encadena providers; limpia fences; valida JSON
+    │   │   ├── LlmProviderHealthRegistry.cs    # Circuit breaker: 3 fallos seguidos → skip 60s
+    │   │   ├── LlmClientFactory.cs             # Construye la cadena desde Llm:Providers
+    │   │   ├── LlmOptions.cs                   # Config binding de Llm:Providers
+    │   │   ├── LlmDiagnostics.cs               # Truncados compartidos
+    │   │   └── Providers/                      # GeminiLlmClient, OpenAiCompatibleLlmClient (OpenAI+Mistral), AnthropicLlmClient
     │   └── Services/
     │       ├── IPlaceTranslatorService.cs      # TranslatePlaceAsync, TranslatePlanAsync
     │       ├── IDescriptionGeneratorService.cs # GeneratePlaceDescriptionAsync + WithDiagnostics
