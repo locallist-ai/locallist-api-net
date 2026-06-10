@@ -1,7 +1,11 @@
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Shared.Data.Entities;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace LocalList.API.Tests.Unit;
 
@@ -313,5 +317,62 @@ public class ChatAgentServiceTests
     {
         Assert.Equal(ChatStrings.ParseFallback("en"), ChatStrings.ParseFallback("pt"));
         Assert.Equal(ChatStrings.ReadyToBuild("en"),  ChatStrings.ReadyToBuild("zh"));
+    }
+
+    // ── Budget tier → BudgetAmount mapping (Fix 1) ───────────────────────────
+
+    [Theory]
+    [InlineData("budget",   50)]
+    [InlineData("moderate", 150)]
+    [InlineData("premium",  300)]
+    public void SlotsToTripContext_BudgetTier_SetsBudgetAmount(string tier, int expectedAmount)
+    {
+        var slots = new ChatSlots { City = "Miami", Days = 3, GroupType = "couple", Budget = tier };
+        var ctx = ChatAgentService.SlotsToTripContext(slots);
+        Assert.Equal(expectedAmount, ctx.BudgetAmount);
+    }
+
+    [Fact]
+    public void SlotsToTripContext_UnknownTier_BudgetAmountIsNull()
+    {
+        var slots = new ChatSlots { City = "Miami", Days = 2 }; // Budget not set
+        var ctx = ChatAgentService.SlotsToTripContext(slots);
+        Assert.Null(ctx.BudgetAmount);
+    }
+
+    [Fact]
+    public void BudgetTierSignal_FlowsFromSlotsToMergeToRank()
+    {
+        // Regression: chat path sets Budget tier but never BudgetAmount.
+        // Fix: SlotsToTripContext maps tier→amount so MergeContextIntoPrefs populates
+        // prefs.BudgetAmount, and ScoreBudgetMatch returns > 0 for a matching place.
+        var slots = new ChatSlots
+        {
+            City = "Miami", Days = 3, GroupType = "couple", Budget = "moderate",
+            Categories = ["food"],
+        };
+
+        var ctx = ChatAgentService.SlotsToTripContext(slots);
+        Assert.Equal(150, ctx.BudgetAmount); // tier wired
+
+        var aiSvc = new AiProviderService(
+            new HttpClient(),
+            new ConfigurationBuilder().Build(),
+            NullLogger<AiProviderService>.Instance);
+
+        var prefs = aiSvc.MergeContextIntoPrefs(new ExtractedPreferences(), ctx);
+        Assert.Equal(150, prefs.BudgetAmount); // merged into prefs
+
+        var midRange = new Place
+        {
+            Id = Guid.NewGuid(), Name = "Café Medio", Category = "food",
+            City = "Miami", WhyThisPlace = "test", PriceRange = "$$"
+        };
+        var scored = new PlaceRankingService().RankWithScores(
+            new[] { (midRange, 0.20f) }, prefs);
+
+        // BudgetMatch should be > 0 now that BudgetAmount is wired
+        Assert.True(scored[0].Breakdown.BudgetMatch > 0,
+            "ScoreBudgetMatch returned 0 — budget tier signal is not reaching the ranker");
     }
 }

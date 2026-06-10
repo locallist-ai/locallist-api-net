@@ -1,5 +1,6 @@
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -359,5 +360,76 @@ public class SchedulingServiceScheduleTests
         double topThreeRate = (double)topThreeHits / totalSlots;
         Assert.True(topThreeRate > 0.35,
             $"Top-3 hit rate {topThreeRate:P0} too low — ranking not influencing selection");
+    }
+
+    // ── Real routing wired into WalkDayClock (Fix 3) ─────────────────────────
+
+    private sealed class FakeRoutingService : IRoutingService
+    {
+        public int DurationSeconds { get; set; } = 900; // 15 min
+        public int DistanceMeters { get; set; } = 1500; // 1.5 km
+        public int Calls { get; private set; }
+
+        public Task<RouteSegment?> GetRouteAsync(GeoPoint from, GeoPoint to, RoutingMode mode, CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult<RouteSegment?>(new RouteSegment("_fake_poly_", DistanceMeters, DurationSeconds));
+        }
+    }
+
+    [Fact]
+    public async Task BuildPlanScheduleAsync_WithRealRouting_UsesDurationFromRoutingService()
+    {
+        var fakeRouting = new FakeRoutingService { DurationSeconds = 600, DistanceMeters = 800 }; // 10 min, 0.8 km
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, fakeRouting);
+
+        var places = new List<Place>
+        {
+            MakePlace("food",    lat: 25.77m, lon: -80.19m),
+            MakePlace("culture", lat: 25.78m, lon: -80.20m),
+        };
+        var prefs = Prefs(maxStops: 2);
+
+        var result = await svc.BuildPlanScheduleAsync(places, prefs, seed: 42);
+
+        var stops = result.Stops.OrderBy(s => s.OrderIndex).ToList();
+        Assert.Equal(2, stops.Count);
+
+        // Second stop must have TravelFromPrevious populated by the routing service
+        var travel = stops[1].TravelFromPrevious;
+        Assert.NotNull(travel);
+        Assert.Equal(10, travel.duration_min); // 600s / 60 = 10 min
+        Assert.Equal(0.8, travel.distance_km); // 800m / 1000 = 0.8 km
+        Assert.True(fakeRouting.Calls >= 1, "IRoutingService.GetRouteAsync was never called");
+    }
+
+    [Fact]
+    public async Task BuildPlanScheduleAsync_RoutingFails_FallsBackToHaversine()
+    {
+        var failingRouting = new FailingRoutingService();
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, failingRouting);
+
+        var places = new List<Place>
+        {
+            MakePlace("food",    lat: 25.77m, lon: -80.19m),
+            MakePlace("culture", lat: 25.78m, lon: -80.20m),
+        };
+        var prefs = Prefs(maxStops: 2);
+
+        // Should not throw even when routing service fails
+        var result = await svc.BuildPlanScheduleAsync(places, prefs, seed: 42);
+
+        var stops = result.Stops.OrderBy(s => s.OrderIndex).ToList();
+        Assert.Equal(2, stops.Count);
+
+        var travel = stops[1].TravelFromPrevious;
+        Assert.NotNull(travel);
+        Assert.True(travel.duration_min >= 1, "Haversine fallback should produce non-zero duration");
+    }
+
+    private sealed class FailingRoutingService : IRoutingService
+    {
+        public Task<RouteSegment?> GetRouteAsync(GeoPoint from, GeoPoint to, RoutingMode mode, CancellationToken ct)
+            => throw new HttpRequestException("Routing service unavailable");
     }
 }

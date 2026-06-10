@@ -85,7 +85,7 @@ public class PlanGenerationService
 
         var seed = Random.Shared.Next();
         _logger.LogInformation("PlanGen: schedule seed={Seed}", seed);
-        var schedule = _scheduler.BuildPlanSchedule(places, prefs, seed);
+        var schedule = await _scheduler.BuildPlanScheduleAsync(places, prefs, seed, ct);
 
         // Sanitize Gemini-generated text before returning (L6 defense)
         var planName = Sanitize(PlanNamingService.BuildPlanName(prefs, city, msg), MaxPlanNameLength);
@@ -180,8 +180,11 @@ public class PlanGenerationService
     private async Task<List<Place>> FallbackKeywordFilterAsync(
         string city, ExtractedPreferences prefs, CancellationToken ct)
     {
+        // OrderBy(p => p.Id) is load-bearing for determinism: same seed + same city always
+        // produces the same candidate pool because FilterByCategory preserves input order.
         var matching = await _db.Places.AsNoTracking()
             .Where(p => p.Status == "published" && p.City == city)
+            .OrderBy(p => p.Id)
             .Take(FallbackKeywordHardCap)
             .ToListAsync(ct);
         return FilterByCategory(matching, prefs);
