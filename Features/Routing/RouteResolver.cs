@@ -9,18 +9,15 @@ namespace LocalList.API.NET.Features.Routing;
 
 public class RouteResolver : ISegmentResolver
 {
-    private readonly LocalListDbContext _db;                             // batch ResolveAsync path (sequential)
-    private readonly IDbContextFactory<LocalListDbContext> _dbFactory;  // ResolveSegmentAsync (parallel-safe)
+    private readonly IDbContextFactory<LocalListDbContext> _dbFactory;
     private readonly IRoutingService _routing;
     private readonly ILogger<RouteResolver> _logger;
 
     public RouteResolver(
-        LocalListDbContext db,
         IDbContextFactory<LocalListDbContext> dbFactory,
         IRoutingService routing,
         ILogger<RouteResolver> logger)
     {
-        _db = db;
         _dbFactory = dbFactory;
         _routing = routing;
         _logger = logger;
@@ -36,9 +33,11 @@ public class RouteResolver : ISegmentResolver
 
         var modeStr = mode.ToString().ToLowerInvariant();
 
+        await using var ctx = await _dbFactory.CreateDbContextAsync(ct);
+
         // Batch cache lookup: filter by all place IDs involved, then match pairs in-memory.
         var placeIds = pairs.SelectMany(p => new[] { p.From.PlaceId, p.To.PlaceId }).Distinct().ToList();
-        var cachedRows = await _db.RouteSegmentCaches
+        var cachedRows = await ctx.RouteSegmentCaches
             .Where(r => placeIds.Contains(r.FromPlaceId) && placeIds.Contains(r.ToPlaceId) && r.Mode == modeStr)
             .ToListAsync(ct);
 
@@ -48,7 +47,7 @@ public class RouteResolver : ISegmentResolver
         if (misses.Count > 0)
         {
             _logger.LogInformation("RouteResolver: {MissCount} cache misses, calling Mapbox", misses.Count);
-            var newRows = await FetchAndPersistAsync(misses, mode, modeStr, ct);
+            var newRows = await FetchAndPersistAsync(misses, mode, modeStr, ctx, ct);
             foreach (var row in newRows)
                 cacheHits[(row.FromPlaceId, row.ToPlaceId)] = row;
         }
@@ -132,6 +131,7 @@ public class RouteResolver : ISegmentResolver
         List<(PlanStop From, PlanStop To)> misses,
         RoutingMode mode,
         string modeStr,
+        LocalListDbContext ctx,
         CancellationToken ct)
     {
         using var semaphore = new SemaphoreSlim(4);
@@ -185,7 +185,7 @@ public class RouteResolver : ISegmentResolver
         }
         sql.Append(" ON CONFLICT (from_place_id, to_place_id, mode) DO NOTHING");
 
-        await _db.Database.ExecuteSqlRawAsync(sql.ToString(), parameters.Cast<object>().ToArray(), ct);
+        await ctx.Database.ExecuteSqlRawAsync(sql.ToString(), parameters.Cast<object>().ToArray(), ct);
         return results;
     }
 
