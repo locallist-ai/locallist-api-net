@@ -1,5 +1,5 @@
 using LocalList.API.NET.Features.Builder.Shared;
-using LocalList.API.NET.Features.Places;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
 

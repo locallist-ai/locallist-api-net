@@ -36,10 +36,9 @@ public class PlaceTranslatorService
         var eWhy = EscapeJson(place.WhyThisPlace);
         var eBestTime = EscapeJson(place.BestTime ?? string.Empty);
         var eNeighborhood = EscapeJson(place.Neighborhood ?? string.Empty);
-        var eSubcategory = EscapeJson(
-            place.Subcategories is { Count: > 0 }
-                ? string.Join(", ", place.Subcategories)
-                : string.Empty);
+        var subcategoriesJson = place.Subcategories is { Count: > 0 }
+            ? JsonSerializer.Serialize(place.Subcategories)
+            : "[]";
 
         var prompt = $$"""
             Translate the following place fields from English to {{targetLang}}-ES (Spain Spanish).
@@ -49,7 +48,7 @@ public class PlaceTranslatorService
               Pinecrest, Little Havana, Edgewater, Design District), cuisine names (Cuban, Peruvian,
               American, Italian), and any value of "name" in the input.
             - Maintain an editorial, inspiring, first-person-plural travel tone.
-            - bestFor and suitableFor must remain as JSON arrays of strings.
+            - subcategories, bestFor and suitableFor must remain as JSON arrays of strings.
             - Return ONLY valid JSON with the exact keys shown below. No extra text.
 
             Input:
@@ -58,7 +57,7 @@ public class PlaceTranslatorService
               "whyThisPlace": "{{eWhy}}",
               "bestTime": "{{eBestTime}}",
               "neighborhood": "{{eNeighborhood}}",
-              "subcategory": "{{eSubcategory}}",
+              "subcategories": {{subcategoriesJson}},
               "bestFor": {{bestForJson}},
               "suitableFor": {{suitableForJson}}
             }
@@ -69,7 +68,7 @@ public class PlaceTranslatorService
               "whyThisPlace": "...",
               "bestTime": "...",
               "neighborhood": "...",
-              "subcategory": "...",
+              "subcategories": [...],
               "bestFor": [...],
               "suitableFor": [...]
             }
@@ -99,11 +98,10 @@ public class PlaceTranslatorService
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(responseJson);
-            var text = doc.RootElement
+            var geminiContent = doc.RootElement
                 .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text").GetString() ?? "{}";
+                .GetProperty("content");
+            var text = GetPartsText(geminiContent) ?? "{}";
 
             using var result = JsonDocument.Parse(text);
             var root = result.RootElement;
@@ -113,7 +111,7 @@ public class PlaceTranslatorService
                 WhyThisPlace: GetStr(root, "whyThisPlace"),
                 BestTime: GetStr(root, "bestTime"),
                 Neighborhood: GetStr(root, "neighborhood"),
-                Subcategory: GetStr(root, "subcategory"),
+                Subcategories: GetStrList(root, "subcategories"),
                 BestFor: GetStrList(root, "bestFor"),
                 SuitableFor: GetStrList(root, "suitableFor")
             );
@@ -183,11 +181,10 @@ public class PlaceTranslatorService
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(responseJson);
-            var text = doc.RootElement
+            var geminiContent = doc.RootElement
                 .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text").GetString() ?? "{}";
+                .GetProperty("content");
+            var text = GetPartsText(geminiContent) ?? "{}";
 
             using var result = JsonDocument.Parse(text);
             var root = result.RootElement;
@@ -209,6 +206,14 @@ public class PlaceTranslatorService
     private static string EscapeJson(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
 
+    // Returns null when Gemini returns an empty parts array (e.g. content-filtered responses).
+    private static string? GetPartsText(JsonElement content)
+    {
+        if (!content.TryGetProperty("parts", out var parts)) return null;
+        if (parts.GetArrayLength() == 0) return null;
+        return parts[0].TryGetProperty("text", out var t) ? t.GetString() : null;
+    }
+
     private static string? GetStr(JsonElement el, string key) =>
         el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
@@ -227,7 +232,7 @@ public record PlaceTranslationDraft(
     string? WhyThisPlace,
     string? BestTime,
     string? Neighborhood,
-    string? Subcategory,
+    List<string>? Subcategories,
     List<string>? BestFor,
     List<string>? SuitableFor
 );

@@ -14,29 +14,26 @@ namespace LocalList.API.NET.Features.Builder.Services;
 /// </summary>
 public class PlaceRankingService
 {
-    // Pesos rebalanceados en Parte C del plan Builder quality:
-    // - Cosine baja 0.50→0.40 (RAG ya no es la única señal, hay más soft signals).
-    // - Category baja 0.20→0.15 (sobreindexaba cuando Gemini devolvía category errónea).
-    // - BestFor se mantiene en 0.15.
-    // - SuitableFor NUEVO en 0.15 (match con groupType: family/family-kids filtra adults-only).
-    // - AiVibe se mantiene en 0.10.
-    // - NeighborhoodPenalty se mantiene en 0.05.
-    // Total contributivo = 0.40 + 0.15 + 0.15 + 0.15 + 0.10 = 0.95. Penalty resta hasta 0.05.
-    private const float WeightCosine = 0.4f;
-    private const float WeightCategory = 0.15f;
-    private const float WeightBestFor = 0.15f;
-    private const float WeightSuitableFor = 0.15f;
-    private const float WeightAiVibe = 0.1f;
-    private const float WeightNeighborhoodPenalty = 0.05f;
-
-    // Pablo 2026-04-27 — soft signals adicionales del wizard. Solo aportan
-    // si el usuario aportó la señal (drill-down, budget). Aditivos sobre el
-    // total existente (no rebalancean los pesos previos para no romper
-    // tests de regresión).
-    private const float WeightSubcategory = 0.10f;
+    // Pesos normalizados — suma de todos los pesos positivos = 1.0 exacto.
+    // Orden de prioridad: cosine (señal semántica del LLM) > tier-2 (category/bestFor/
+    // suitableFor/aiVibe) > soft signals (subcategory/company/style/budget).
+    //
+    // Historia de cambios:
+    // - Parte B: Cosine 0.50→0.40, Category 0.20→0.15; SuitableFor NUEVO 0.15; AiVibe 0.10.
+    // - Parte C: añadidos soft signals (Subcategory 0.10, CompanyTags/StyleTags/Budget 0.05)
+    //   → suma total subió a 1.20 (deuda técnica DT-5).
+    // - 2026-06-09: renormalizar todo a 1.0; WeightNeighborhoodPenalty (subtractivo) = 0.04
+    //   → rango efectivo del score final: [-0.04, 1.0].
+    private const float WeightCosine = 0.34f;
+    private const float WeightCategory = 0.12f;
+    private const float WeightBestFor = 0.12f;
+    private const float WeightSuitableFor = 0.12f;
+    private const float WeightAiVibe = 0.08f;
+    private const float WeightNeighborhoodPenalty = 0.04f;
+    private const float WeightSubcategory = 0.08f;
     private const float WeightCompanyTags = 0.05f;
     private const float WeightStyleTags = 0.05f;
-    private const float WeightBudget = 0.05f;
+    private const float WeightBudget = 0.04f;
 
     public readonly record struct ScoredCandidate(Place Place, float Score, ScoreBreakdown Breakdown);
 

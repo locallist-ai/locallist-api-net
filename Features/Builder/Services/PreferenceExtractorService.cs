@@ -114,11 +114,10 @@ public class PreferenceExtractorService
 
             var totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (thinkingTokens ?? 0);
 
-            var textResult = doc.RootElement
+            var candidateContent = doc.RootElement
                 .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text").GetString() ?? "{}";
+                .GetProperty("content");
+            var textResult = GetPartsText(candidateContent) ?? "{}";
 
             _logger.LogInformation(
                 "Gemini raw extracted text: {Preview}",
@@ -291,6 +290,14 @@ public class PreferenceExtractorService
 
     private static string TruncateResponse(string response) =>
         response.Length <= 8192 ? response : response[..8192];
+
+    // Returns null when Gemini returns an empty parts array (e.g. content-filtered responses).
+    private static string? GetPartsText(System.Text.Json.JsonElement content)
+    {
+        if (!content.TryGetProperty("parts", out var parts)) return null;
+        if (parts.GetArrayLength() == 0) return null;
+        return parts[0].TryGetProperty("text", out var t) ? t.GetString() : null;
+    }
 
     private string BuildPrompt(string message, TripContextDto? context, string lang = "en")
     {

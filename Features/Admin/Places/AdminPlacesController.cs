@@ -498,7 +498,7 @@ public class AdminPlacesController : ControllerBase
             whyThisPlaceEs = draft.WhyThisPlace,
             bestTimeEs = draft.BestTime,
             neighborhoodEs = draft.Neighborhood,
-            subcategoriesEs = draft.Subcategory != null ? new List<string> { draft.Subcategory } : null,
+            subcategoriesEs = draft.Subcategories,
             bestForEs = draft.BestFor,
             suitableForEs = draft.SuitableFor,
         });
@@ -530,9 +530,14 @@ public class AdminPlacesController : ControllerBase
     public async Task<IActionResult> BackfillDescriptions(
         [FromQuery] bool dryRun = true,
         [FromQuery] int limit = 50,
+        [FromQuery] int geminiLimit = 6,
         CancellationToken ct = default)
     {
         limit = Math.Clamp(limit, 1, 200);
+        // geminiLimit caps the Gemini-fallback bucket per call. Each Gemini request has a 4s
+        // inter-request delay (15 RPM free-tier guard), so 6 places ≈ 24s — safely under the
+        // 40s Railway proxy timeout. Increase only on a paid API key with higher RPM.
+        geminiLimit = Math.Clamp(geminiLimit, 1, 20);
 
         var candidates = await _db.Places
             .Where(p => p.Status != "rejected" &&
@@ -542,14 +547,17 @@ public class AdminPlacesController : ControllerBase
             .ToListAsync(ct);
 
         var bucketGoogle = candidates.Where(p => p.GooglePlaceId != null).ToList();
-        var bucketGemini = candidates.Where(p => p.GooglePlaceId == null).ToList();
+        // Cap Gemini bucket to avoid proxy timeouts (4s/request × geminiLimit ≤ ~40s).
+        var bucketGemini = candidates.Where(p => p.GooglePlaceId == null).Take(geminiLimit).ToList();
 
+        var geminiSkipped = candidates.Count(p => p.GooglePlaceId == null) - bucketGemini.Count;
         if (dryRun)
             return Ok(new
             {
                 candidates = candidates.Count,
                 wouldFetchGoogle = bucketGoogle.Count,
                 wouldFallbackGemini = bucketGemini.Count,
+                geminiSkippedByLimit = geminiSkipped,
                 dryRun = true
             });
 
@@ -613,7 +621,18 @@ public class AdminPlacesController : ControllerBase
             "backfill-descriptions: googleFilled={G} geminiFilled={Gem} failed={F} total={T}",
             googleFilled, geminiFilled, failed, candidates.Count);
 
-        return Ok(new { candidates = candidates.Count, clearedLegacyPlaceholder = clearedLegacy, googleFilled, geminiFilled, failed, errors, dryRun = false });
+        return Ok(new
+        {
+            candidates = candidates.Count,
+            clearedLegacyPlaceholder = clearedLegacy,
+            googleFilled,
+            geminiFilled,
+            failed,
+            errors,
+            errorsTruncated = failed > errors.Count,
+            geminiSkippedByLimit = geminiSkipped,
+            dryRun = false
+        });
     }
 
     [HttpPost("translate-batch")]
@@ -653,8 +672,8 @@ public class AdminPlacesController : ControllerBase
                 place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, lang, draft.WhyThisPlace);
                 place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, lang, draft.BestTime);
                 place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, lang, draft.Neighborhood);
-                if (draft.Subcategory != null)
-                    place.SubcategoriesI18n = LanguageAccessor.SetI18nList(place.SubcategoriesI18n, lang, new List<string> { draft.Subcategory });
+                if (draft.Subcategories is { Count: > 0 })
+                    place.SubcategoriesI18n = LanguageAccessor.SetI18nList(place.SubcategoriesI18n, lang, draft.Subcategories);
                 place.BestForI18n = LanguageAccessor.SetI18nList(place.BestForI18n, lang, draft.BestFor);
                 place.SuitableForI18n = LanguageAccessor.SetI18nList(place.SuitableForI18n, lang, draft.SuitableFor);
                 place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, lang, "approved");

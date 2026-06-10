@@ -16,8 +16,8 @@ public static class ChatStrings
 
     public static string OffTopicRedirect(string lang, string nextQuestion) => lang switch
     {
-        "es" => $"Centrémonos en tu viaje — {nextQuestion}",
-        _    => $"Let's focus on your trip — {nextQuestion}"
+        "es" => $"Centrémonos en tu viaje. {nextQuestion}",
+        _    => $"Let's focus on your trip. {nextQuestion}"
     };
 
     public static string InjectionRedirect(string lang) => lang switch
@@ -53,7 +53,7 @@ public static class ChatStrings
     public static string GreetingWithCity(string lang, string city) => lang switch
     {
         "es" => $"¡Perfecto, planificamos tu viaje a {city}! ¿Cuántos días?",
-        _    => $"Great — let's plan your {city} trip! How many days?"
+        _    => $"Great, let's plan your {city} trip! How many days?"
     };
 
     public static string Quarantine(string lang) => lang switch
@@ -104,8 +104,8 @@ public static class ChatStrings
 
     public static string Tier2Question(string lang) => lang switch
     {
-        "es" => "Un último detalle — ¿tienes alguna restricción alimentaria o preferencia de ritmo?",
-        _    => "One last touch — any dietary restrictions, and what pace?"
+        "es" => "Un último detalle: ¿tienes alguna restricción alimentaria o preferencia de ritmo?",
+        _    => "One last touch: any dietary restrictions, and what pace?"
     };
 
     public static List<ChatQuickReply> Tier2Chips(string lang) => lang switch

@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
-using LocalList.API.NET.Features.Places;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
 
@@ -50,7 +50,7 @@ public record AdminPlaceDto(
     public static AdminPlaceDto FromEntity(Place p)
     {
         var subs = p.Subcategories is { Count: > 0 } ? p.Subcategories : null;
-        var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", null, isCurated: false);
+        var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", p.Subcategories, isCurated: false);
 
         return new(
             p.Id, p.Name, p.Category, subs, p.Neighborhood, p.City,
