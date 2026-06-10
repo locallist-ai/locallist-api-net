@@ -40,7 +40,7 @@ public class PlanGenerationOrderingTests(ApiFixture fixture) : IClassFixture<Api
 
         // Resolve PlanGenerationService from the DI container (real DB + fakes already wired)
         using var scope = fixture.Services.CreateScope();
-        var svc = (PlanGenerationService)scope.ServiceProvider.GetRequiredService<IPlanGenerationService>();
+        var svc = scope.ServiceProvider.GetRequiredService<PlanGenerationService>();
 
         var prefs = new ExtractedPreferences
         {

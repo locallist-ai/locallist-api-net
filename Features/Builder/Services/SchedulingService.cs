@@ -588,36 +588,34 @@ public class SchedulingService
         return true;
     }
 
-    public object ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces)
+    public IEnumerable<ScheduledStopResult> ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces)
     {
         var placeMap = allPlaces.ToDictionary(p => p.Id);
 
         return stops.Select(stop =>
         {
             placeMap.TryGetValue(stop.PlaceId, out var place);
-            return new
-            {
-                id = Guid.NewGuid(),
-                placeId = stop.PlaceId,
-                dayNumber = stop.DayNumber,
-                orderIndex = stop.OrderIndex,
-                timeBlock = stop.TimeBlock,
-                suggestedArrival = stop.SuggestedArrival,
-                suggestedDurationMin = stop.SuggestedDurationMin,
-                travelFromPrevious = stop.TravelFromPrevious,
-                place = place != null ? new
-                {
-                    id = place.Id,
-                    name = place.Name,
-                    category = place.Category,
-                    neighborhood = place.Neighborhood,
-                    whyThisPlace = place.WhyThisPlace,
-                    priceRange = place.PriceRange,
-                    photos = place.Photos,
-                    latitude = place.Latitude,
-                    longitude = place.Longitude
-                } : null
-            };
+            return new ScheduledStopResult(
+                Id: Guid.NewGuid(),
+                PlaceId: stop.PlaceId,
+                DayNumber: stop.DayNumber,
+                OrderIndex: stop.OrderIndex,
+                TimeBlock: stop.TimeBlock,
+                SuggestedArrival: stop.SuggestedArrival,
+                SuggestedDurationMin: stop.SuggestedDurationMin,
+                TravelFromPrevious: stop.TravelFromPrevious,
+                Place: place != null
+                    ? new ResolvedPlaceDto(
+                        Id: place.Id,
+                        Name: place.Name,
+                        Category: place.Category,
+                        Neighborhood: place.Neighborhood,
+                        WhyThisPlace: place.WhyThisPlace,
+                        PriceRange: place.PriceRange,
+                        Photos: place.Photos,
+                        Latitude: place.Latitude,
+                        Longitude: place.Longitude)
+                    : null);
         });
     }
 

@@ -2,7 +2,6 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
-using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Taxonomy;
 using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
 

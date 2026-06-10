@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Pgvector;
 
-namespace LocalList.API.NET.Features.Builder.Services;
+namespace LocalList.API.NET.Shared.AI.Services;
 
 public class EmbeddingService
 {

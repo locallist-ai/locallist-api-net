@@ -1,4 +1,4 @@
-using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Services;
 
 namespace LocalList.API.Tests.Unit;
 

@@ -88,13 +88,10 @@ LocalList.API.NET/
 │   │       └── JwksRetriever.cs            # Caché JWKS para Apple
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
-│   │   ├── BuilderDtos.cs              # BuilderChatRequest, ExtractedPreferences, TripContextDto
+│   │   ├── BuilderDtos.cs              # BuilderChatRequest
 │   │   ├── Services/
 │   │   │   ├── PreferenceExtractorService.cs   # Gemini → ExtractedPreferences
-│   │   │   ├── EmbeddingService.cs             # Gemini embeddings para RAG (pgvector)
 │   │   │   ├── PlaceRankingService.cs          # Reranking determinista ponderado
-│   │   │   ├── PlaceTranslatorService.cs       # Gemini → traducciones de places/plans
-│   │   │   ├── DescriptionGeneratorService.cs  # Gemini → descripciones de places
 │   │   │   ├── PlanGenerationService.cs        # Orquesta RAG + prefs + scheduler
 │   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan
 │   │   │   └── SchedulingService.cs            # Scheduler determinista por semilla
@@ -152,7 +149,8 @@ LocalList.API.NET/
     │       ├── IDescriptionGeneratorService.cs # GeneratePlaceDescriptionAsync + WithDiagnostics
     │       ├── IPlanGenerationService.cs       # GenerateAsync, ResolveStopPlaces
     │       ├── PlaceTranslatorService.cs       # Implementación (movida de Builder/Services/)
-    │       └── DescriptionGeneratorService.cs  # Implementación (movida de Builder/Services/)
+    │       ├── DescriptionGeneratorService.cs  # Implementación (movida de Builder/Services/)
+    │       └── EmbeddingService.cs             # Gemini embeddings para RAG (movida de Builder/Services/)
     ├── Auth/
     │   ├── AdminAuthorizeAttribute.cs   # Admin authorization attribute
     │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain

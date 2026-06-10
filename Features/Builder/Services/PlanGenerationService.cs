@@ -211,6 +211,6 @@ public class PlanGenerationService : IPlanGenerationService
         return clean.Length > maxLen ? clean[..maxLen] : clean;
     }
 
-    public object ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces) =>
+    public IEnumerable<ScheduledStopResult> ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces) =>
         _scheduler.ResolveStopPlaces(stops, allPlaces);
 }
