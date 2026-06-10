@@ -177,7 +177,7 @@ public class PlanGenerationService
         return ranked.Select(s => s.Place).ToList();
     }
 
-    private async Task<List<Place>> FallbackKeywordFilterAsync(
+    internal async Task<List<Place>> FallbackKeywordFilterAsync(
         string city, ExtractedPreferences prefs, CancellationToken ct)
     {
         // OrderBy(p => p.Id) is load-bearing for determinism: same seed + same city always

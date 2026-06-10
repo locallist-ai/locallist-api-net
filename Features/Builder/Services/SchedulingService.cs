@@ -3,6 +3,7 @@ using LocalList.API.NET.Features.Places;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
 
+
 namespace LocalList.API.NET.Features.Builder.Services;
 
 public class ScheduledStopDto
@@ -33,12 +34,12 @@ public sealed class ScheduleResult
 public class SchedulingService
 {
     private readonly ILogger<SchedulingService> _logger;
-    private readonly IRoutingService? _routing;
+    private readonly ISegmentResolver? _resolver;
 
-    public SchedulingService(ILogger<SchedulingService> logger, IRoutingService? routing = null)
+    public SchedulingService(ILogger<SchedulingService> logger, ISegmentResolver? resolver = null)
     {
         _logger = logger;
-        _routing = routing;
+        _resolver = resolver;
     }
 
     // ── Time-block compatibility (kept for IsGoodTimeMatch) ───────────────────
@@ -90,8 +91,10 @@ public class SchedulingService
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Async version — uses <see cref="IRoutingService"/> for real travel durations when available.
-    /// Same seed guarantees identical stop selection; real routing gives accurate arrival times.
+    /// Async version — uses <see cref="ISegmentResolver"/> for real travel durations when available.
+    /// Same seed guarantees the same candidate ranking and selection logic.
+    /// Travel times may vary (Mapbox vs haversine fallback), which can affect
+    /// which stops fit within the day's time budget.
     /// </summary>
     public async Task<ScheduleResult> BuildPlanScheduleAsync(
         List<Place> filteredPlaces, ExtractedPreferences prefs, int? seed = null, CancellationToken ct = default)
@@ -113,7 +116,7 @@ public class SchedulingService
     }
 
     /// <summary>
-    /// Sync wrapper for backward compatibility (unit tests). Production code should use
+    /// Sync wrapper for backward compatibility (unit tests). Production code should prefer
     /// <see cref="BuildPlanScheduleAsync"/>.
     /// </summary>
     public ScheduleResult BuildPlanSchedule(
@@ -397,15 +400,12 @@ public class SchedulingService
 
     private async Task<TravelInfoDto> ResolveTravelAsync(Place from, Place to, double dist, string mode, CancellationToken ct)
     {
-        if (_routing != null)
+        if (_resolver != null)
         {
             try
             {
                 var routeMode = mode == "walk" ? RoutingMode.Walking : RoutingMode.Driving;
-                var segment = await _routing.GetRouteAsync(
-                    new GeoPoint(from.Latitude!.Value, from.Longitude!.Value),
-                    new GeoPoint(to.Latitude!.Value, to.Longitude!.Value),
-                    routeMode, ct);
+                var segment = await _resolver.ResolveSegmentAsync(from, to, routeMode, ct);
                 if (segment != null)
                     return new TravelInfoDto
                     {
@@ -414,8 +414,10 @@ public class SchedulingService
                         mode         = mode
                     };
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
+                // Catches non-OCE errors (HttpRequestException, DB failures…) and OCE from
+                // internal timeouts. Does NOT catch OCE when ct is cancelled (user cancelled).
                 _logger.LogWarning(ex, "Routing failed for segment {From}→{To} — using Haversine estimate",
                     from.Name, to.Name);
             }

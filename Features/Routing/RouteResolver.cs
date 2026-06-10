@@ -7,7 +7,7 @@ using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Routing;
 
-public class RouteResolver
+public class RouteResolver : ISegmentResolver
 {
     private readonly LocalListDbContext _db;
     private readonly IRoutingService _routing;
@@ -62,6 +62,60 @@ public class RouteResolver
             .OfType<PlanRouteSegmentDto>()
             .ToList();
     }
+
+    // ── ISegmentResolver ─────────────────────────────────────────────────────
+
+    /// <inheritdoc />
+    public async Task<RouteSegment?> ResolveSegmentAsync(
+        Place from, Place to, RoutingMode mode, CancellationToken ct)
+    {
+        if (from.Latitude is null || from.Longitude is null ||
+            to.Latitude is null || to.Longitude is null)
+            return null;
+
+        var modeStr = mode.ToString().ToLowerInvariant();
+
+        var cached = await _db.RouteSegmentCaches.AsNoTracking()
+            .Where(r => r.FromPlaceId == from.Id && r.ToPlaceId == to.Id && r.Mode == modeStr)
+            .FirstOrDefaultAsync(ct);
+
+        if (cached != null)
+            return new RouteSegment(cached.EncodedPolyline, cached.DistanceMeters, cached.DurationSeconds);
+
+        var fromPoint = new GeoPoint(from.Latitude.Value, from.Longitude.Value);
+        var toPoint   = new GeoPoint(to.Latitude.Value,   to.Longitude.Value);
+        var segment   = await _routing.GetRouteAsync(fromPoint, toPoint, mode, ct);
+
+        if (segment is null) return null;
+
+        try
+        {
+            var parameters = new object[]
+            {
+                new NpgsqlParameter("@p0", Guid.NewGuid()),
+                new NpgsqlParameter("@p1", from.Id),
+                new NpgsqlParameter("@p2", to.Id),
+                new NpgsqlParameter("@p3", modeStr),
+                new NpgsqlParameter("@p4", segment.EncodedPolyline),
+                new NpgsqlParameter("@p5", segment.DistanceMeters),
+                new NpgsqlParameter("@p6", segment.DurationSeconds),
+            };
+            await _db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO route_segment_cache " +
+                "(id, from_place_id, to_place_id, mode, encoded_polyline, distance_meters, duration_seconds, computed_at) " +
+                "VALUES (@p0, @p1, @p2, @p3, @p4, @p5, @p6, NOW()) " +
+                "ON CONFLICT (from_place_id, to_place_id, mode) DO NOTHING",
+                parameters, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "RouteResolver: failed to persist segment cache {From}→{To}", from.Id, to.Id);
+        }
+
+        return segment;
+    }
+
+    // ── Batch resolver (PlansController read path) ────────────────────────────
 
     private async Task<List<RouteSegmentCache>> FetchAndPersistAsync(
         List<(PlanStop From, PlanStop To)> misses,

@@ -355,10 +355,10 @@ public class ChatAgentServiceTests
         var ctx = ChatAgentService.SlotsToTripContext(slots);
         Assert.Equal(150, ctx.BudgetAmount); // tier wired
 
-        var aiSvc = new AiProviderService(
+        var aiSvc = new PreferenceExtractorService(
             new HttpClient(),
             new ConfigurationBuilder().Build(),
-            NullLogger<AiProviderService>.Instance);
+            NullLogger<PreferenceExtractorService>.Instance);
 
         var prefs = aiSvc.MergeContextIntoPrefs(new ExtractedPreferences(), ctx);
         Assert.Equal(150, prefs.BudgetAmount); // merged into prefs

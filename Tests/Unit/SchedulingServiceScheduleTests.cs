@@ -4,6 +4,7 @@ using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.Extensions.Logging.Abstractions;
 
+
 namespace LocalList.API.Tests.Unit;
 
 /// <summary>
@@ -362,26 +363,47 @@ public class SchedulingServiceScheduleTests
             $"Top-3 hit rate {topThreeRate:P0} too low — ranking not influencing selection");
     }
 
-    // ── Real routing wired into WalkDayClock (Fix 3) ─────────────────────────
+    // ── Routing wired into WalkDayClock via ISegmentResolver ─────────────────
 
-    private sealed class FakeRoutingService : IRoutingService
+    private sealed class FakeSegmentResolver : ISegmentResolver
     {
         public int DurationSeconds { get; set; } = 900; // 15 min
         public int DistanceMeters { get; set; } = 1500; // 1.5 km
         public int Calls { get; private set; }
 
-        public Task<RouteSegment?> GetRouteAsync(GeoPoint from, GeoPoint to, RoutingMode mode, CancellationToken ct)
+        public Task<RouteSegment?> ResolveSegmentAsync(Place from, Place to, RoutingMode mode, CancellationToken ct)
         {
             Calls++;
             return Task.FromResult<RouteSegment?>(new RouteSegment("_fake_poly_", DistanceMeters, DurationSeconds));
         }
     }
 
-    [Fact]
-    public async Task BuildPlanScheduleAsync_WithRealRouting_UsesDurationFromRoutingService()
+    private sealed class FailingSegmentResolver : ISegmentResolver
     {
-        var fakeRouting = new FakeRoutingService { DurationSeconds = 600, DistanceMeters = 800 }; // 10 min, 0.8 km
-        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, fakeRouting);
+        public Task<RouteSegment?> ResolveSegmentAsync(Place from, Place to, RoutingMode mode, CancellationToken ct)
+            => throw new HttpRequestException("Segment resolver unavailable");
+    }
+
+    /// <summary>
+    /// Simulates an internal timeout by throwing <see cref="TaskCanceledException"/>
+    /// with a CancellationToken that has NOT been cancelled — i.e. the timeout fired
+    /// internally, not because the client cancelled the request.
+    /// </summary>
+    private sealed class TimeoutSegmentResolver : ISegmentResolver
+    {
+        public Task<RouteSegment?> ResolveSegmentAsync(Place from, Place to, RoutingMode mode, CancellationToken ct)
+        {
+            // Use a fresh, uncancelled token — mimics HttpClient's internal 8-second timeout
+            var source = new CancellationTokenSource();
+            throw new TaskCanceledException("Simulated internal timeout", null, source.Token);
+        }
+    }
+
+    [Fact]
+    public async Task BuildPlanScheduleAsync_WithRealRouting_UsesDurationFromSegmentResolver()
+    {
+        var fakeResolver = new FakeSegmentResolver { DurationSeconds = 600, DistanceMeters = 800 }; // 10 min, 0.8 km
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, fakeResolver);
 
         var places = new List<Place>
         {
@@ -395,19 +417,19 @@ public class SchedulingServiceScheduleTests
         var stops = result.Stops.OrderBy(s => s.OrderIndex).ToList();
         Assert.Equal(2, stops.Count);
 
-        // Second stop must have TravelFromPrevious populated by the routing service
+        // Second stop must have TravelFromPrevious populated by the resolver
         var travel = stops[1].TravelFromPrevious;
         Assert.NotNull(travel);
         Assert.Equal(10, travel.duration_min); // 600s / 60 = 10 min
         Assert.Equal(0.8, travel.distance_km); // 800m / 1000 = 0.8 km
-        Assert.True(fakeRouting.Calls >= 1, "IRoutingService.GetRouteAsync was never called");
+        Assert.True(fakeResolver.Calls >= 1, "ISegmentResolver.ResolveSegmentAsync was never called");
     }
 
     [Fact]
     public async Task BuildPlanScheduleAsync_RoutingFails_FallsBackToHaversine()
     {
-        var failingRouting = new FailingRoutingService();
-        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, failingRouting);
+        var failingResolver = new FailingSegmentResolver();
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, failingResolver);
 
         var places = new List<Place>
         {
@@ -427,9 +449,35 @@ public class SchedulingServiceScheduleTests
         Assert.True(travel.duration_min >= 1, "Haversine fallback should produce non-zero duration");
     }
 
-    private sealed class FailingRoutingService : IRoutingService
+    /// <summary>
+    /// BUG 1 regression: TaskCanceledException thrown by an internal timeout (ct NOT cancelled)
+    /// must activate the haversine fallback rather than propagating the exception.
+    /// Before the fix, the catch filter `when (ex is not OperationCanceledException)` evaluated
+    /// to false for TaskCanceledException (it IS an OCE), so the exception escaped.
+    /// </summary>
+    [Fact]
+    public async Task BuildPlanScheduleAsync_InternalTimeout_FallsBackToHaversineNotPropagates()
     {
-        public Task<RouteSegment?> GetRouteAsync(GeoPoint from, GeoPoint to, RoutingMode mode, CancellationToken ct)
-            => throw new HttpRequestException("Routing service unavailable");
+        var timeoutResolver = new TimeoutSegmentResolver();
+        var svc = new SchedulingService(NullLogger<SchedulingService>.Instance, timeoutResolver);
+
+        var places = new List<Place>
+        {
+            MakePlace("food",    lat: 25.77m, lon: -80.19m),
+            MakePlace("culture", lat: 25.78m, lon: -80.20m),
+        };
+        var prefs = Prefs(maxStops: 2);
+
+        // Must NOT throw — the internal timeout should be swallowed and haversine used
+        var result = await svc.BuildPlanScheduleAsync(places, prefs, seed: 42);
+
+        var stops = result.Stops.OrderBy(s => s.OrderIndex).ToList();
+        Assert.Equal(2, stops.Count);
+
+        // Haversine fallback must produce a non-zero duration
+        var travel = stops[1].TravelFromPrevious;
+        Assert.NotNull(travel);
+        Assert.True(travel.duration_min >= 1,
+            "Haversine fallback should produce non-zero duration when routing times out internally");
     }
 }
