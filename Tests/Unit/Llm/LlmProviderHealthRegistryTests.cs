@@ -44,6 +44,45 @@ public class LlmProviderHealthRegistryTests
     }
 
     [Fact]
+    public void HalfOpen_FailedProbe_ReopensCircuitForAnotherCooldown()
+    {
+        var time = new FakeTimeProvider();
+        var registry = new LlmProviderHealthRegistry(time);
+        for (var i = 0; i < 3; i++) registry.RecordFailure("gemini");
+
+        // Cooldown vencido: half-open, se permite un intento de sondeo.
+        time.Advance(TimeSpan.FromSeconds(61));
+        Assert.False(registry.IsOpen("gemini"));
+
+        // El intento half-open falla → el circuito reabre otros 60s desde ahora.
+        registry.RecordFailure("gemini");
+        Assert.True(registry.IsOpen("gemini"));
+
+        time.Advance(TimeSpan.FromSeconds(59));
+        Assert.True(registry.IsOpen("gemini")); // dentro del nuevo cooldown sigue abierto
+
+        time.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(registry.IsOpen("gemini")); // nuevo half-open al vencer el segundo cooldown
+    }
+
+    [Fact]
+    public void HalfOpen_SuccessfulProbe_ClosesCircuit()
+    {
+        var time = new FakeTimeProvider();
+        var registry = new LlmProviderHealthRegistry(time);
+        for (var i = 0; i < 3; i++) registry.RecordFailure("gemini");
+
+        time.Advance(TimeSpan.FromSeconds(61));
+        Assert.False(registry.IsOpen("gemini"));
+
+        // El sondeo half-open responde bien → circuito cerrado y contador a cero.
+        registry.RecordSuccess("gemini");
+        Assert.False(registry.IsOpen("gemini"));
+        registry.RecordFailure("gemini");
+        Assert.False(registry.IsOpen("gemini")); // 1 fallo < umbral: el historial previo no cuenta
+    }
+
+    [Fact]
     public void RecordSuccess_ResetsFailureCount()
     {
         var registry = new LlmProviderHealthRegistry(new FakeTimeProvider());

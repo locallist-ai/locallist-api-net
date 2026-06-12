@@ -335,6 +335,7 @@ public class ChatController : ControllerBase
             VibesJson = result.Prefs.Vibes.Count > 0
                 ? System.Text.Json.JsonSerializer.Serialize(result.Prefs.Vibes) : null,
             PromptVersion = "slot-v1",
+            AiProvider = result.LlmDiagnostics?.Provider,
             LatencyMs = result.LlmDiagnostics?.LatencyMs ?? 0,
             CostUsd = result.LlmDiagnostics?.CostUsd,
         });

@@ -192,6 +192,7 @@ public class BuilderController : ControllerBase
                 NumCategories = result.Prefs.Categories?.Count ?? 0,
                 GroupType = result.Prefs.GroupType,
                 Budget = request.TripContext?.Budget,
+                AiProvider = result.LlmDiagnostics?.Provider,
                 LatencyMs = result.LlmDiagnostics?.LatencyMs ?? 0,
                 CostUsd = result.LlmDiagnostics?.CostUsd,
             });

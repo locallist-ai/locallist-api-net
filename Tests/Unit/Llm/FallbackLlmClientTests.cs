@@ -116,6 +116,22 @@ public class FallbackLlmClientTests
     }
 
     [Fact]
+    public async Task PreCancelledToken_ThrowsWithoutCallingAnyProvider()
+    {
+        var primary = StubLlmClient.Succeeding("gemini", "{\"ok\":true}");
+        var secondary = StubLlmClient.Succeeding("openai", "{\"ok\":true}");
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Chain(primary, secondary).GenerateJsonAsync(Request, cts.Token));
+
+        // La cancelación del caller no debe quemar intentos de ningún provider.
+        Assert.Equal(0, primary.CallCount);
+        Assert.Equal(0, secondary.CallCount);
+    }
+
+    [Fact]
     public async Task EmptyChain_ReturnsMissingKeyDiagnostics()
     {
         var response = await Chain().GenerateJsonAsync(Request);
