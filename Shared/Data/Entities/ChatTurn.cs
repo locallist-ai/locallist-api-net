@@ -71,6 +71,12 @@ public class ChatTurn
     [Column("cost_usd")]
     public decimal? CostUsd { get; set; }
 
+    /// <summary>
+    /// HTTP status del provider LLM que respondió (o del último intentado si la cadena
+    /// falló) — no necesariamente Gemini desde la cadena multi-provider. El nombre de
+    /// columna es legacy (nació cuando Gemini era el único provider) y se conserva para
+    /// no migrar datos históricos.
+    /// </summary>
     [Column("gemini_status")]
     public int? GeminiStatus { get; set; }
 

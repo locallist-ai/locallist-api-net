@@ -155,8 +155,9 @@ Rules:
     {
         try
         {
-            var cleaned = json.Replace("```json\n", "").Replace("```\n", "").Replace("```", "").Trim();
-            using var doc = JsonDocument.Parse(cleaned);
+            // El texto llega ya sin fences markdown y parseable: FallbackLlmClient.TryCleanJson
+            // lo garantiza antes de devolver éxito.
+            using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
             var result = new SlotExtractorResult();

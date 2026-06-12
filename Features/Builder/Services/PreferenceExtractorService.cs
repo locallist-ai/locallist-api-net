@@ -216,8 +216,9 @@ Return JSON only, no markdown. EXACT shape:
     {
         try
         {
-            var cleaned = json.Replace("```json\n", "").Replace("```\n", "").Replace("```", "").Trim();
-            var result = JsonSerializer.Deserialize<ExtractedPreferences>(cleaned, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            // El texto llega ya sin fences markdown y parseable: FallbackLlmClient.TryCleanJson
+            // lo garantiza antes de devolver éxito.
+            var result = JsonSerializer.Deserialize<ExtractedPreferences>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                          ?? new ExtractedPreferences();
 
             if (result.Days < 1 || result.Days > 7)
