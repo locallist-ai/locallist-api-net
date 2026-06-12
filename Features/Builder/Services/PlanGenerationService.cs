@@ -67,7 +67,7 @@ public class PlanGenerationService : IPlanGenerationService
             tripContext.Categories == null ? "(null)" : string.Join(",", tripContext.Categories),
             tripContext.Budget, msg.Length);
 
-        var (prefs, geminiDiag) = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
+        var (prefs, llmDiag) = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
 
         _logger.LogInformation(
             "PlanGen: prefs days={Days} cats={Cats} vibes={Vibes} maxStops={Max} name='{Name}'",
@@ -109,7 +109,7 @@ public class PlanGenerationService : IPlanGenerationService
             PlanDescription = planDescription,
             City = city,
             Lang = lang,
-            GeminiDiagnostics = geminiDiag,
+            LlmDiagnostics = llmDiag,
         };
     }
 

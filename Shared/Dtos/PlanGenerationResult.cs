@@ -12,5 +12,6 @@ public class PlanGenerationResult
     public required string PlanDescription { get; init; }
     public required string City { get; init; }
     public required string Lang { get; init; }
-    public AiCallDiagnostics? GeminiDiagnostics { get; init; }
+    /// <summary>Diagnostics del provider LLM que respondió (multi-provider: gemini/openai/mistral/anthropic).</summary>
+    public AiCallDiagnostics? LlmDiagnostics { get; init; }
 }

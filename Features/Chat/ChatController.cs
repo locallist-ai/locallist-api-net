@@ -19,6 +19,18 @@ namespace LocalList.API.NET.Features.Chat;
 [Route("chat")]
 public class ChatController : ControllerBase
 {
+    /// <summary>
+    /// Presupuesto global del turno de chat. Con 4 providers degradados, la cadena de
+    /// fallback puede tardar 4 × TotalRequestTimeout (10s) = 40s; el token enlazado
+    /// corta la cadena entera al vencer el presupuesto. Los providers no convierten la
+    /// cancelación del caller en fallback (filtro !ct.IsCancellationRequested), así que
+    /// la OperationCanceledException sube hasta aquí.
+    /// </summary>
+    private static readonly TimeSpan TurnLlmBudget = TimeSpan.FromSeconds(25);
+
+    /// <summary>Presupuesto de /chat/generate (pipeline completo: extracción + RAG + scheduler).</summary>
+    private static readonly TimeSpan GenerateLlmBudget = TimeSpan.FromSeconds(30);
+
     private readonly ChatAgentService _agent;
     private readonly LocalListDbContext _db;
     private readonly IPlanGenerationService _planGen;
@@ -69,15 +81,27 @@ public class ChatController : ControllerBase
         var rawIp = HttpContext.Connection.RemoteIpAddress?.ToString();
         var lang = LanguageAccessor.ResolveRequestLanguage(Request);
 
-        var response = await _agent.ProcessTurnAsync(
-            request.SessionId,
-            request.Message,
-            request.QuickReplyId,
-            request.PreSeededSlots,
-            userId,
-            rawIp,
-            lang,
-            ct);
+        using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        llmBudget.CancelAfter(TurnLlmBudget);
+
+        ChatTurnResponse response;
+        try
+        {
+            response = await _agent.ProcessTurnAsync(
+                request.SessionId,
+                request.Message,
+                request.QuickReplyId,
+                request.PreSeededSlots,
+                userId,
+                rawIp,
+                lang,
+                llmBudget.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogError("Chat: turn exceeded global LLM budget ({Budget}s)", TurnLlmBudget.TotalSeconds);
+            return StatusCode(504, new { error = "ai_timeout" });
+        }
 
         if (response.Quarantined)
             return StatusCode(403, response);
@@ -159,7 +183,19 @@ public class ChatController : ControllerBase
             "Chat: generate sessionId={Session} city={City} days={Days} summary='{Summary}'",
             session.Id, tripContext.City ?? "(null)", tripContext.Days, summaryMessage);
 
-        var result = await _planGen.GenerateAsync(summaryMessage, tripContext, lang, ct);
+        using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        llmBudget.CancelAfter(GenerateLlmBudget);
+
+        PlanGenerationResult? result;
+        try
+        {
+            result = await _planGen.GenerateAsync(summaryMessage, tripContext, lang, llmBudget.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogError("Chat: generate exceeded global LLM budget ({Budget}s)", GenerateLlmBudget.TotalSeconds);
+            return StatusCode(504, new { error = "ai_timeout" });
+        }
 
         if (result == null)
             return NotFound(new { error = "no_places_available", message = "No places found for this city yet." });
@@ -167,33 +203,33 @@ public class ChatController : ControllerBase
         // Anonymous → ephemeral plan, still mark session generated
         if (isAnonymous)
         {
-            if (result.GeminiDiagnostics != null)
+            if (result.LlmDiagnostics != null)
             {
                 _db.ChatTurns.Add(new ChatTurn
                 {
                     SessionId = session.Id,
                     TurnIndex = session.TurnCount,
-                    AiProvider = result.GeminiDiagnostics.Provider,
-                    Model = result.GeminiDiagnostics.Model,
+                    AiProvider = result.LlmDiagnostics.Provider,
+                    Model = result.LlmDiagnostics.Model,
                     PromptVersion = "slot-v1",
                     ContextSignalsJson = session.SlotsJson,
-                    PromptChars = result.GeminiDiagnostics.Prompt.Length,
+                    PromptChars = result.LlmDiagnostics.Prompt.Length,
                     PromptExcerpt = PiiRedactor.Redact(
-                        result.GeminiDiagnostics.Prompt.Length > 500
-                            ? result.GeminiDiagnostics.Prompt[..500]
-                            : result.GeminiDiagnostics.Prompt),
-                    ResponseRaw = result.GeminiDiagnostics.ResponseRaw != null
-                        ? PiiRedactor.Redact(result.GeminiDiagnostics.ResponseRaw) : null,
-                    FinishReason = result.GeminiDiagnostics.FinishReason,
-                    LatencyMs = result.GeminiDiagnostics.LatencyMs,
-                    InputTokens = result.GeminiDiagnostics.InputTokens,
-                    OutputTokens = result.GeminiDiagnostics.OutputTokens,
-                    ThinkingTokens = result.GeminiDiagnostics.ThinkingTokens,
-                    TotalTokens = result.GeminiDiagnostics.TotalTokens,
-                    CostUsd = result.GeminiDiagnostics.CostUsd,
-                    GeminiStatus = result.GeminiDiagnostics.HttpStatus,
-                    ErrorCode = result.GeminiDiagnostics.ErrorCode,
-                    ErrorMessage = result.GeminiDiagnostics.ErrorMessage,
+                        result.LlmDiagnostics.Prompt.Length > 500
+                            ? result.LlmDiagnostics.Prompt[..500]
+                            : result.LlmDiagnostics.Prompt),
+                    ResponseRaw = result.LlmDiagnostics.ResponseRaw != null
+                        ? PiiRedactor.Redact(result.LlmDiagnostics.ResponseRaw) : null,
+                    FinishReason = result.LlmDiagnostics.FinishReason,
+                    LatencyMs = result.LlmDiagnostics.LatencyMs,
+                    InputTokens = result.LlmDiagnostics.InputTokens,
+                    OutputTokens = result.LlmDiagnostics.OutputTokens,
+                    ThinkingTokens = result.LlmDiagnostics.ThinkingTokens,
+                    TotalTokens = result.LlmDiagnostics.TotalTokens,
+                    CostUsd = result.LlmDiagnostics.CostUsd,
+                    GeminiStatus = result.LlmDiagnostics.HttpStatus,
+                    ErrorCode = result.LlmDiagnostics.ErrorCode,
+                    ErrorMessage = result.LlmDiagnostics.ErrorMessage,
                 });
             }
 
@@ -254,32 +290,32 @@ public class ChatController : ControllerBase
         if (stopsToInsert.Any())
             _db.PlanStops.AddRange(stopsToInsert);
 
-        var generateTurn = result.GeminiDiagnostics != null ? new ChatTurn
+        var generateTurn = result.LlmDiagnostics != null ? new ChatTurn
         {
             SessionId = session.Id,
             UserId = userId,
             TurnIndex = session.TurnCount,
-            AiProvider = result.GeminiDiagnostics.Provider,
-            Model = result.GeminiDiagnostics.Model,
+            AiProvider = result.LlmDiagnostics.Provider,
+            Model = result.LlmDiagnostics.Model,
             PromptVersion = "slot-v1",
             ContextSignalsJson = session.SlotsJson,
-            PromptChars = result.GeminiDiagnostics.Prompt.Length,
+            PromptChars = result.LlmDiagnostics.Prompt.Length,
             PromptExcerpt = PiiRedactor.Redact(
-                result.GeminiDiagnostics.Prompt.Length > 500
-                    ? result.GeminiDiagnostics.Prompt[..500]
-                    : result.GeminiDiagnostics.Prompt),
-            ResponseRaw = result.GeminiDiagnostics.ResponseRaw != null
-                ? PiiRedactor.Redact(result.GeminiDiagnostics.ResponseRaw) : null,
-            FinishReason = result.GeminiDiagnostics.FinishReason,
-            LatencyMs = result.GeminiDiagnostics.LatencyMs,
-            InputTokens = result.GeminiDiagnostics.InputTokens,
-            OutputTokens = result.GeminiDiagnostics.OutputTokens,
-            ThinkingTokens = result.GeminiDiagnostics.ThinkingTokens,
-            TotalTokens = result.GeminiDiagnostics.TotalTokens,
-            CostUsd = result.GeminiDiagnostics.CostUsd,
-            GeminiStatus = result.GeminiDiagnostics.HttpStatus,
-            ErrorCode = result.GeminiDiagnostics.ErrorCode,
-            ErrorMessage = result.GeminiDiagnostics.ErrorMessage,
+                result.LlmDiagnostics.Prompt.Length > 500
+                    ? result.LlmDiagnostics.Prompt[..500]
+                    : result.LlmDiagnostics.Prompt),
+            ResponseRaw = result.LlmDiagnostics.ResponseRaw != null
+                ? PiiRedactor.Redact(result.LlmDiagnostics.ResponseRaw) : null,
+            FinishReason = result.LlmDiagnostics.FinishReason,
+            LatencyMs = result.LlmDiagnostics.LatencyMs,
+            InputTokens = result.LlmDiagnostics.InputTokens,
+            OutputTokens = result.LlmDiagnostics.OutputTokens,
+            ThinkingTokens = result.LlmDiagnostics.ThinkingTokens,
+            TotalTokens = result.LlmDiagnostics.TotalTokens,
+            CostUsd = result.LlmDiagnostics.CostUsd,
+            GeminiStatus = result.LlmDiagnostics.HttpStatus,
+            ErrorCode = result.LlmDiagnostics.ErrorCode,
+            ErrorMessage = result.LlmDiagnostics.ErrorMessage,
         } : null;
 
         if (generateTurn != null) _db.ChatTurns.Add(generateTurn);
@@ -299,8 +335,8 @@ public class ChatController : ControllerBase
             VibesJson = result.Prefs.Vibes.Count > 0
                 ? System.Text.Json.JsonSerializer.Serialize(result.Prefs.Vibes) : null,
             PromptVersion = "slot-v1",
-            LatencyMs = result.GeminiDiagnostics?.LatencyMs ?? 0,
-            CostUsd = result.GeminiDiagnostics?.CostUsd,
+            LatencyMs = result.LlmDiagnostics?.LatencyMs ?? 0,
+            CostUsd = result.LlmDiagnostics?.CostUsd,
         });
 
         session.Status = "generated";

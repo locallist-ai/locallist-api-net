@@ -9,6 +9,10 @@ namespace LocalList.API.NET.Shared.AI.Llm.Providers;
 /// Provider Anthropic (POST /v1/messages, Claude Haiku 4.5).
 /// Structured output vía output_config.format si la request trae JsonSchema
 /// (el schema debe llevar additionalProperties:false y no usar rangos numéricos).
+/// output_config.format es GA: no requiere beta header y funciona con
+/// anthropic-version 2023-06-01 (verificado contra
+/// platform.claude.com/docs/en/build-with-claude/structured-outputs, 2026-06-12;
+/// el header beta legacy structured-outputs-2025-11-13 ya no es necesario).
 /// stop_reason "refusal" se mapea a content_filtered para que la cadena haga fallback.
 /// </summary>
 public sealed class AnthropicLlmClient(

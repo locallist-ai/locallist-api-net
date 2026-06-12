@@ -572,7 +572,8 @@ public class FakeOpenAiHandler : HttpMessageHandler
 {
     public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
 
-    public List<HttpRequestMessage> Calls { get; } = new();
+    /// <summary>Thread-safe: el mismo handler sirve a varios named clients (llm-openai/mistral/anthropic) en paralelo.</summary>
+    public ConcurrentBag<HttpRequestMessage> Calls { get; } = new();
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {

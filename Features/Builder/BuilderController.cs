@@ -17,6 +17,15 @@ namespace LocalList.API.NET.Features.Builder;
 [Route("builder")]
 public class BuilderController : ControllerBase
 {
+    /// <summary>
+    /// Presupuesto global de la generación. Con 4 providers degradados, la cadena de
+    /// fallback puede tardar 4 × TotalRequestTimeout (10s) = 40s; el token enlazado
+    /// corta el pipeline entero (extracción + RAG + scheduler) al vencer el presupuesto.
+    /// Los providers no convierten la cancelación del caller en fallback
+    /// (filtro !ct.IsCancellationRequested), así que la OperationCanceledException sube.
+    /// </summary>
+    private static readonly TimeSpan GenerateLlmBudget = TimeSpan.FromSeconds(30);
+
     private readonly LocalListDbContext _db;
     private readonly PlanGenerationService _planGen;
     private readonly SchedulingService _scheduler;
@@ -74,10 +83,13 @@ public class BuilderController : ControllerBase
             });
         }
 
+        using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        llmBudget.CancelAfter(GenerateLlmBudget);
+
         try
         {
             var lang = LanguageAccessor.ResolveRequestLanguage(Request);
-            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, ct);
+            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, llmBudget.Token);
 
             if (result == null)
             {
@@ -180,8 +192,8 @@ public class BuilderController : ControllerBase
                 NumCategories = result.Prefs.Categories?.Count ?? 0,
                 GroupType = result.Prefs.GroupType,
                 Budget = request.TripContext?.Budget,
-                LatencyMs = result.GeminiDiagnostics?.LatencyMs ?? 0,
-                CostUsd = result.GeminiDiagnostics?.CostUsd,
+                LatencyMs = result.LlmDiagnostics?.LatencyMs ?? 0,
+                CostUsd = result.LlmDiagnostics?.CostUsd,
             });
 
             await _db.SaveChangesAsync(ct);
@@ -203,6 +215,11 @@ public class BuilderController : ControllerBase
                 warnings = result.Schedule.Warnings,
                 appliedRefinements = result.Schedule.AppliedRefinements
             });
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogError("Builder: generation exceeded global LLM budget ({Budget}s)", GenerateLlmBudget.TotalSeconds);
+            return StatusCode(504, new { error = "ai_timeout" });
         }
         catch (OperationCanceledException)
         {
