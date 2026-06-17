@@ -4,6 +4,7 @@ using Npgsql;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Routing;
 
 namespace LocalList.API.NET.Features.Routing;
 

@@ -1,6 +1,6 @@
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Builder.Services;
-using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -377,12 +377,19 @@ public class SchedulingServiceScheduleTests
             Interlocked.Increment(ref _calls);
             return Task.FromResult<RouteSegment?>(new RouteSegment("_fake_poly_", DistanceMeters, DurationSeconds));
         }
+
+        // SchedulingService only exercises the per-segment path; the batch resolve is unused here.
+        public Task<List<PlanRouteSegmentDto>> ResolveAsync(ICollection<PlanStop> stops, RoutingMode mode, CancellationToken ct)
+            => throw new NotSupportedException();
     }
 
     private sealed class FailingSegmentResolver : ISegmentResolver
     {
         public Task<RouteSegment?> ResolveSegmentAsync(Place from, Place to, RoutingMode mode, CancellationToken ct)
             => throw new HttpRequestException("Segment resolver unavailable");
+
+        public Task<List<PlanRouteSegmentDto>> ResolveAsync(ICollection<PlanStop> stops, RoutingMode mode, CancellationToken ct)
+            => throw new NotSupportedException();
     }
 
     /// <summary>
@@ -398,6 +405,9 @@ public class SchedulingServiceScheduleTests
             var source = new CancellationTokenSource();
             throw new TaskCanceledException("Simulated internal timeout", null, source.Token);
         }
+
+        public Task<List<PlanRouteSegmentDto>> ResolveAsync(ICollection<PlanStop> stops, RoutingMode mode, CancellationToken ct)
+            => throw new NotSupportedException();
     }
 
     [Fact]

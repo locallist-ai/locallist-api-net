@@ -11,6 +11,7 @@ using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Features.Waitlist;
 using LocalList.API.NET.Shared.PostHog;
 using Microsoft.EntityFrameworkCore;

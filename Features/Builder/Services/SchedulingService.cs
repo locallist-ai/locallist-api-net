@@ -1,6 +1,6 @@
 using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.Dtos;
-using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Builder.Services;

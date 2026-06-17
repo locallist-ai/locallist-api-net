@@ -137,12 +137,9 @@ LocalList.API.NET/
 │   ├── Profile/
 │   │   ├── ProfileController.cs        # GET /me/profile, DELETE /me/profile
 │   │   └── ProfileDtos.cs
-│   ├── Routing/
-│   │   ├── IRoutingService.cs
-│   │   ├── ISegmentResolver.cs
-│   │   ├── MapboxRoutingService.cs     # Mapbox Directions API
-│   │   ├── RouteResolver.cs            # Caché de segmentos en RouteSegmentCache
-│   │   └── RoutingDtos.cs
+│   ├── Routing/                        # Implementaciones (contratos en Shared/Routing/)
+│   │   ├── MapboxRoutingService.cs     # Mapbox Directions API (IRoutingService)
+│   │   └── RouteResolver.cs            # ISegmentResolver — caché de segmentos en RouteSegmentCache
 │   ├── Taxonomy/
 │   │   └── TaxonomyController.cs       # GET /taxonomy (categories + subcategories)
 │   └── Waitlist/
@@ -211,6 +208,10 @@ LocalList.API.NET/
     │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
     │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
     │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
+    ├── Routing/                        # Contratos cross-slice (impl en Features/Routing/)
+    │   ├── IRoutingService.cs           # GetRouteAsync (Mapbox)
+    │   ├── ISegmentResolver.cs          # ResolveAsync (batch) + ResolveSegmentAsync
+    │   └── RoutingDtos.cs               # GeoPoint, RouteSegment, RoutingMode
     ├── Search/
     │   └── LikePatterns.cs             # Helpers para LIKE patterns en EF Core
     └── Taxonomy/

@@ -1,4 +1,4 @@
-namespace LocalList.API.NET.Features.Routing;
+namespace LocalList.API.NET.Shared.Routing;
 
 public interface IRoutingService
 {
