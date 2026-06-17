@@ -1,13 +1,13 @@
 using System.Text;
 using System.Text.Json;
 
-namespace LocalList.API.NET.Features.Builder.Services;
+namespace LocalList.API.NET.Shared.AI.Services;
 
 /// <summary>
 /// Generates short editorial descriptions for places using Gemini 2.5 Flash.
 /// Used by bulk import, import-from-urls, suggest-description, and backfill-descriptions.
 /// </summary>
-public class DescriptionGeneratorService
+public class DescriptionGeneratorService : IDescriptionGeneratorService
 {
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;

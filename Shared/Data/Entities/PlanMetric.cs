@@ -47,6 +47,14 @@ public class PlanMetric
     [Column("prompt_version")]
     public string? PromptVersion { get; set; }
 
+    /// <summary>
+    /// Provider LLM de la extracción de preferencias (gemini/openai/mistral/anthropic).
+    /// Mismas semánticas que chat_turns.ai_provider: el que respondió, o el último
+    /// intentado si toda la cadena falló. Null en planes anteriores a la columna.
+    /// </summary>
+    [Column("ai_provider")]
+    public string? AiProvider { get; set; }
+
     [Column("latency_ms")]
     public int LatencyMs { get; set; }
 

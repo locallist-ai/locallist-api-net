@@ -1,5 +1,7 @@
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Observability;
 using Microsoft.EntityFrameworkCore;
 using Pgvector;
@@ -12,7 +14,7 @@ namespace LocalList.API.NET.Features.Builder.Services;
 /// Handles: AI preference extraction → RAG retrieval → ranking → scheduling → naming.
 /// Does NOT persist to DB — the caller decides ownership and persistence.
 /// </summary>
-public class PlanGenerationService
+public class PlanGenerationService : IPlanGenerationService
 {
     private readonly LocalListDbContext _db;
     private readonly PreferenceExtractorService _aiProvider;
@@ -65,7 +67,7 @@ public class PlanGenerationService
             tripContext.Categories == null ? "(null)" : string.Join(",", tripContext.Categories),
             tripContext.Budget, msg.Length);
 
-        var (prefs, geminiDiag) = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
+        var (prefs, llmDiag) = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
 
         _logger.LogInformation(
             "PlanGen: prefs days={Days} cats={Cats} vibes={Vibes} maxStops={Max} name='{Name}'",
@@ -107,7 +109,7 @@ public class PlanGenerationService
             PlanDescription = planDescription,
             City = city,
             Lang = lang,
-            GeminiDiagnostics = geminiDiag,
+            LlmDiagnostics = llmDiag,
         };
     }
 
@@ -208,16 +210,7 @@ public class PlanGenerationService
         var clean = new string(value.Where(c => !char.IsControl(c)).ToArray()).Trim();
         return clean.Length > maxLen ? clean[..maxLen] : clean;
     }
-}
 
-public class PlanGenerationResult
-{
-    public required ExtractedPreferences Prefs { get; init; }
-    public required ScheduleResult Schedule { get; init; }
-    public required List<Place> FilteredPlaces { get; init; }
-    public required string PlanName { get; init; }
-    public required string PlanDescription { get; init; }
-    public required string City { get; init; }
-    public required string Lang { get; init; }
-    public AiCallDiagnostics? GeminiDiagnostics { get; init; }
+    public IEnumerable<ScheduledStopResult> ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces) =>
+        _scheduler.ResolveStopPlaces(stops, allPlaces);
 }

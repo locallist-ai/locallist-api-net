@@ -1,5 +1,6 @@
 using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 
 namespace LocalList.API.NET.Features.Builder.Services;
 

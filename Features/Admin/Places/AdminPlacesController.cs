@@ -5,7 +5,7 @@ using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
-using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Search;
 using LocalList.API.NET.Shared.Taxonomy;
@@ -23,8 +23,8 @@ public class AdminPlacesController : ControllerBase
     private readonly ILogger<AdminPlacesController> _logger;
     private readonly TimeProvider _clock;
     private readonly EmbeddingService _embeddings;
-    private readonly PlaceTranslatorService _translator;
-    private readonly DescriptionGeneratorService _descGen;
+    private readonly IPlaceTranslatorService _translator;
+    private readonly IDescriptionGeneratorService _descGen;
     private readonly IGooglePlacesService _googlePlaces;
     private readonly ITaxonomySvc _taxonomy;
     private readonly PlaceImportService _importSvc;
@@ -39,8 +39,8 @@ public class AdminPlacesController : ControllerBase
         ILogger<AdminPlacesController> logger,
         TimeProvider clock,
         EmbeddingService embeddings,
-        PlaceTranslatorService translator,
-        DescriptionGeneratorService descGen,
+        IPlaceTranslatorService translator,
+        IDescriptionGeneratorService descGen,
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,
         PlaceImportService importSvc)

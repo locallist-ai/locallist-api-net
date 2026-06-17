@@ -1,4 +1,4 @@
-using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 

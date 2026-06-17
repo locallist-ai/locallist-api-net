@@ -1,7 +1,7 @@
-using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Shared;
+using LocalList.API.NET.Shared.AI.Llm;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
 
@@ -9,13 +9,12 @@ namespace LocalList.API.NET.Features.Builder.Services;
 
 /// <summary>
 /// Extracts structured travel preferences from a free-text message and a wizard context,
-/// using Gemini 2.5 Flash with keyword fallback.
+/// using the LLM fallback chain with keyword fallback as the last resort.
 /// Owned by the builder pipeline — the only caller is PlanGenerationService.
 /// </summary>
 public class PreferenceExtractorService
 {
-    private readonly HttpClient _httpClient;
-    private readonly IConfiguration _config;
+    private readonly ILlmClient _llm;
     private readonly ILogger<PreferenceExtractorService> _logger;
 
     private static readonly string[] AllowedCategories =
@@ -31,148 +30,35 @@ public class PreferenceExtractorService
         ["nightlife"] = new[] { "nightlife" },
     };
 
-    public PreferenceExtractorService(HttpClient httpClient, IConfiguration config, ILogger<PreferenceExtractorService> logger)
+    public PreferenceExtractorService(ILlmClient llm, ILogger<PreferenceExtractorService> logger)
     {
-        _httpClient = httpClient;
-        _config = config;
+        _llm = llm;
         _logger = logger;
     }
 
     public async Task<(ExtractedPreferences Prefs, AiCallDiagnostics? Diagnostics)> ExtractPreferencesAsync(
         string message, TripContextDto? context, string lang = "en", CancellationToken ct = default)
     {
-        var apiKey = _config["Gemini:ApiKey"];
-        if (string.IsNullOrEmpty(apiKey))
-        {
-            _logger.LogWarning("Gemini API Key missing. Falling back to keywords.");
-            var missingKeyDiag = new AiCallDiagnostics(
-                Prompt: string.Empty, ResponseRaw: null, FinishReason: null,
-                LatencyMs: 0, InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "missing_key", ErrorMessage: "Gemini API key not configured");
-            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), missingKeyDiag);
-        }
-
         var prompt = BuildPrompt(message, context, lang);
 
-        var requestBody = new
+        var response = await _llm.GenerateJsonAsync(
+            new LlmJsonRequest(prompt, Temperature: 0.3, MaxOutputTokens: 300), ct);
+
+        if (!response.Succeeded)
         {
-            contents = new[]
-            {
-                new { parts = new[] { new { text = prompt } } }
-            },
-            generationConfig = new
-            {
-                temperature = 0.3,
-                maxOutputTokens = 300,
-                responseMimeType = "application/json"
-            }
-        };
-
-        var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-        var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-
-        var requestMessage = new HttpRequestMessage(HttpMethod.Post, url);
-        requestMessage.Headers.Add("x-goog-api-key", apiKey);
-        requestMessage.Content = content;
-
-        var sw = Stopwatch.StartNew();
-        try
-        {
-            var response = await _httpClient.SendAsync(requestMessage, ct);
-            sw.Stop();
-            var latencyMs = (int)sw.ElapsedMilliseconds;
-
-            var responseJson = await response.Content.ReadAsStringAsync(ct);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogError("Builder: Gemini API returned {Status}", (int)response.StatusCode);
-                var httpErrDiag = new AiCallDiagnostics(
-                    Prompt: TruncatePrompt(prompt),
-                    ResponseRaw: TruncateResponse(responseJson),
-                    FinishReason: null, LatencyMs: latencyMs,
-                    InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                    CostUsd: null, GeminiStatus: (int)response.StatusCode,
-                    ErrorCode: "http_error", ErrorMessage: $"HTTP {(int)response.StatusCode}");
-                return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), httpErrDiag);
-            }
-
-            using var doc = JsonDocument.Parse(responseJson);
-
-            int? inputTokens = null, outputTokens = null, thinkingTokens = null;
-            string? finishReason = null;
-            if (doc.RootElement.TryGetProperty("usageMetadata", out var usage))
-            {
-                if (usage.TryGetProperty("promptTokenCount", out var ptc)) inputTokens = ptc.GetInt32();
-                if (usage.TryGetProperty("candidatesTokenCount", out var ctc)) outputTokens = ctc.GetInt32();
-                if (usage.TryGetProperty("thoughtsTokenCount", out var ttc)) thinkingTokens = ttc.GetInt32();
-            }
-            if (doc.RootElement.TryGetProperty("candidates", out var cands) && cands.GetArrayLength() > 0)
-            {
-                if (cands[0].TryGetProperty("finishReason", out var fr)) finishReason = fr.GetString();
-            }
-
-            var totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (thinkingTokens ?? 0);
-
-            var candidateContent = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content");
-            var textResult = GetPartsText(candidateContent) ?? "{}";
-
-            _logger.LogInformation(
-                "Gemini raw extracted text: {Preview}",
-                textResult.Length > 500 ? textResult[..500] + "…" : textResult);
-
-            var diag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt),
-                ResponseRaw: TruncateResponse(responseJson),
-                FinishReason: finishReason,
-                LatencyMs: latencyMs,
-                InputTokens: inputTokens,
-                OutputTokens: outputTokens,
-                ThinkingTokens: thinkingTokens,
-                TotalTokens: totalTokens > 0 ? totalTokens : null,
-                CostUsd: GeminiCostCalculator.Calculate(inputTokens, outputTokens),
-                GeminiStatus: (int)response.StatusCode,
-                ErrorCode: null,
-                ErrorMessage: null);
-
-            var parsed = ParseAiResponse(textResult);
-            return (MergeContextIntoPrefs(parsed, context), diag);
+            _logger.LogWarning("Builder: LLM chain failed ({Error}). Falling back to keywords.",
+                response.Diagnostics.ErrorCode);
+            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), response.Diagnostics);
         }
-        catch (HttpRequestException ex)
-        {
-            sw.Stop();
-            _logger.LogError(ex, "Gemini API call failed. Falling back to keywords.");
-            var exDiag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
-                LatencyMs: (int)sw.ElapsedMilliseconds,
-                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "http_error", ErrorMessage: ex.Message);
-            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), exDiag);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            sw.Stop();
-            _logger.LogError("Gemini API call timed out. Falling back to keywords.");
-            var toDiag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
-                LatencyMs: (int)sw.ElapsedMilliseconds,
-                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "timeout", ErrorMessage: "Gemini API call timed out");
-            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), toDiag);
-        }
-        catch (JsonException ex)
-        {
-            sw.Stop();
-            _logger.LogError(ex, "Failed to parse Gemini response. Falling back to keywords.");
-            var jsonDiag = new AiCallDiagnostics(
-                Prompt: TruncatePrompt(prompt), ResponseRaw: null, FinishReason: null,
-                LatencyMs: (int)sw.ElapsedMilliseconds,
-                InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
-                CostUsd: null, GeminiStatus: null, ErrorCode: "parse_error", ErrorMessage: ex.Message);
-            return (MergeContextIntoPrefs(ExtractWithKeywords(message, context), context), jsonDiag);
-        }
+
+        var textResult = response.Text!;
+        _logger.LogInformation(
+            "LLM[{Provider}] raw extracted text: {Preview}",
+            response.Diagnostics.Provider,
+            textResult.Length > 500 ? textResult[..500] + "…" : textResult);
+
+        var parsed = ParseAiResponse(textResult);
+        return (MergeContextIntoPrefs(parsed, context), response.Diagnostics);
     }
 
     /// <summary>
@@ -285,20 +171,6 @@ public class PreferenceExtractorService
 
     // ── Private helpers ───────────────────────────────────────────────────
 
-    private static string TruncatePrompt(string prompt) =>
-        prompt.Length <= 4096 ? prompt : prompt[..4096];
-
-    private static string TruncateResponse(string response) =>
-        response.Length <= 8192 ? response : response[..8192];
-
-    // Returns null when Gemini returns an empty parts array (e.g. content-filtered responses).
-    private static string? GetPartsText(System.Text.Json.JsonElement content)
-    {
-        if (!content.TryGetProperty("parts", out var parts)) return null;
-        if (parts.GetArrayLength() == 0) return null;
-        return parts[0].TryGetProperty("text", out var t) ? t.GetString() : null;
-    }
-
     private string BuildPrompt(string message, TripContextDto? context, string lang = "en")
     {
         var sanitized = message.Replace("\"", "'").Replace("\\", "");
@@ -344,8 +216,9 @@ Return JSON only, no markdown. EXACT shape:
     {
         try
         {
-            var cleaned = json.Replace("```json\n", "").Replace("```\n", "").Replace("```", "").Trim();
-            var result = JsonSerializer.Deserialize<ExtractedPreferences>(cleaned, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            // El texto llega ya sin fences markdown y parseable: FallbackLlmClient.TryCleanJson
+            // lo garantiza antes de devolver éxito.
+            var result = JsonSerializer.Deserialize<ExtractedPreferences>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                          ?? new ExtractedPreferences();
 
             if (result.Days < 1 || result.Days > 7)

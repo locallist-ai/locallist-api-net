@@ -6,6 +6,8 @@ using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Shared.AI.Llm;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Routing;
@@ -109,11 +111,9 @@ Action<Microsoft.Extensions.Http.Resilience.HttpStandardResilienceOptions> gemin
     options.Retry.ShouldHandle = args => ValueTask.FromResult(
         args.Outcome.Exception is HttpRequestException);
 };
-builder.Services.AddHttpClient<PreferenceExtractorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+builder.Services.AddHttpClient<IPlaceTranslatorService, PlaceTranslatorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
     .AddStandardResilienceHandler(geminiResilienceOpts);
-builder.Services.AddHttpClient<PlaceTranslatorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
-    .AddStandardResilienceHandler(geminiResilienceOpts);
-builder.Services.AddHttpClient<DescriptionGeneratorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
+builder.Services.AddHttpClient<IDescriptionGeneratorService, DescriptionGeneratorService>(c => c.Timeout = TimeSpan.FromSeconds(25))
     .AddStandardResilienceHandler(geminiResilienceOpts);
 
 builder.Services.AddHttpClient<EmbeddingService>(c => c.Timeout = TimeSpan.FromSeconds(15))
@@ -131,6 +131,7 @@ builder.Services.AddScoped<LanguageAccessor>();
 builder.Services.AddScoped<PlaceRankingService>();
 builder.Services.AddScoped<SchedulingService>();
 builder.Services.AddScoped<PlanGenerationService>();
+builder.Services.AddScoped<IPlanGenerationService>(sp => sp.GetRequiredService<PlanGenerationService>());
 builder.Services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddHttpClient<IGooglePlacesService, GooglePlacesService>(c => c.Timeout = TimeSpan.FromSeconds(15))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
@@ -140,16 +141,28 @@ builder.Services.AddScoped<ISegmentResolver>(sp => sp.GetRequiredService<RouteRe
 builder.Services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
+// LLM fallback chain (camino crítico: chat slot-filling + builder preferences).
+// Timeouts cortos por provider: con varios providers en cadena el peor caso debe
+// caber en el presupuesto de ~20s del turno de chat.
+builder.Services.Configure<LlmOptions>(builder.Configuration.GetSection(LlmOptions.SectionName));
+builder.Services.AddSingleton<LlmProviderHealthRegistry>();
+foreach (var llmProviderName in new[] { "gemini", "openai", "mistral", "anthropic" })
+{
+    builder.Services.AddHttpClient($"llm-{llmProviderName}", c => c.Timeout = TimeSpan.FromSeconds(12))
+        .AddStandardResilienceHandler(options =>
+        {
+            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(8);
+            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(10);
+            options.Retry.MaxRetryAttempts = 1;
+            options.Retry.ShouldHandle = args => ValueTask.FromResult(
+                args.Outcome.Exception is HttpRequestException);
+        });
+}
+builder.Services.AddScoped<ILlmClient>(LlmClientFactory.BuildChain);
+builder.Services.AddScoped<PreferenceExtractorService>();
+
 // Chat — slot-filling agent
-builder.Services.AddHttpClient<SlotExtractorService>(c => c.Timeout = TimeSpan.FromSeconds(20))
-    .AddStandardResilienceHandler(options =>
-    {
-        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
-        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(20);
-        options.Retry.MaxRetryAttempts = 1;
-        options.Retry.ShouldHandle = args => ValueTask.FromResult(
-            args.Outcome.Exception is HttpRequestException);
-    });
+builder.Services.AddScoped<SlotExtractorService>();
 builder.Services.AddScoped<ChatAgentService>();
 builder.Services.AddScoped<ChatSecLogger>();
 builder.Services.AddHttpClient<PostHogService>(c =>
@@ -579,6 +592,9 @@ using (var scope = app.Services.CreateScope())
 var geminiPresent = !string.IsNullOrEmpty(app.Configuration["Gemini:ApiKey"]);
 var googlePlacesPresent = !string.IsNullOrEmpty(app.Configuration["GooglePlaces:ApiKey"]);
 app.Logger.LogInformation("API keys at boot — Gemini:{Gemini} GooglePlaces:{Google}", geminiPresent, googlePlacesPresent);
+
+var llmOptions = app.Configuration.GetSection(LlmOptions.SectionName).Get<LlmOptions>() ?? new LlmOptions();
+LlmClientFactory.LogEffectiveChain(app.Configuration, llmOptions, app.Logger);
 
 app.Run();
 

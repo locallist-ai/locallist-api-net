@@ -1,3 +1,5 @@
+using LocalList.API.NET.Shared.Dtos;
+
 namespace LocalList.API.NET.Features.Builder.Services;
 
 public static class PlanNamingService

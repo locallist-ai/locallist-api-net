@@ -9,7 +9,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
-| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:218-255`. |
+| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:231-255`. |
 | **AI** | Gemini 2.5 Flash. Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. |
 | **Rate Limit** | 100 req/min global. Builder 5/hr (configurable via `Builder__RateLimitPerHour`). Chat 20/hr anon · 40/hr auth. Auth 10/15min. Waitlist 5/60s. Admin 60/min. |
 
@@ -31,6 +31,14 @@ Required User Secrets / Environment Variables:
 **Gemini (Builder + RAG embeddings)**
 - `Gemini__ApiKey`
 - `Gemini__EmbeddingModel` — `gemini-embedding-001` (768 dims, L2-norm). **No** `text-embedding-004` (retirado 2026-01-14). Se usa en `EmbeddingService` para RAG.
+
+**LLM fallback chain (camino crítico: chat slot-filling + builder preferences)**
+- Cadena ordenada en `appsettings.json` → `Llm:Providers` (gemini → openai → mistral → anthropic). Abstracción en `Shared/AI/Llm/` (`ILlmClient`, `FallbackLlmClient`, circuit breaker `LlmProviderHealthRegistry`: 3 fallos seguidos → skip 60s).
+- `OpenAI__ApiKey` — opcional. Activa GPT-5 Nano como backup.
+- `Mistral__ApiKey` — opcional. Activa Mistral Small como backup.
+- `Anthropic__ApiKey` — opcional. Activa Claude Haiku 4.5 como backup (último por coste).
+- Un provider sin key se omite de la cadena (log en boot). Solo con `Gemini__ApiKey` el comportamiento es el clásico. `chat_turns.ai_provider/model` registran quién respondió realmente.
+- Traducciones, descripciones y embeddings siguen solo-Gemini (fuera de la cadena).
 
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
@@ -88,13 +96,10 @@ LocalList.API.NET/
 │   │       └── JwksRetriever.cs            # Caché JWKS para Apple
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
-│   │   ├── BuilderDtos.cs              # BuilderChatRequest, ExtractedPreferences, TripContextDto
+│   │   ├── BuilderDtos.cs              # BuilderChatRequest
 │   │   ├── Services/
 │   │   │   ├── PreferenceExtractorService.cs   # Gemini → ExtractedPreferences
-│   │   │   ├── EmbeddingService.cs             # Gemini embeddings para RAG (pgvector)
 │   │   │   ├── PlaceRankingService.cs          # Reranking determinista ponderado
-│   │   │   ├── PlaceTranslatorService.cs       # Gemini → traducciones de places/plans
-│   │   │   ├── DescriptionGeneratorService.cs  # Gemini → descripciones de places
 │   │   │   ├── PlanGenerationService.cs        # Orquesta RAG + prefs + scheduler
 │   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan
 │   │   │   └── SchedulingService.cs            # Scheduler determinista por semilla
@@ -123,9 +128,7 @@ LocalList.API.NET/
 │   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Places/
-│   │   ├── PlacesController.cs         # GET /places, GET /places/:id
-│   │   ├── PlaceDto.cs
-│   │   └── OpeningHours.cs
+│   │   └── PlacesController.cs         # GET /places, GET /places/:id
 │   ├── Plans/
 │   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
 │   │   ├── PlanDtos.cs
@@ -148,6 +151,22 @@ LocalList.API.NET/
 │       ├── IEmailMarketingService.cs
 │       └── KlaviyoService.cs           # Klaviyo email marketing integration
 └── Shared/
+    ├── AI/
+    │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
+    │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
+    │   │   ├── FallbackLlmClient.cs            # Encadena providers; limpia fences; valida JSON
+    │   │   ├── LlmProviderHealthRegistry.cs    # Circuit breaker: 3 fallos seguidos → skip 60s
+    │   │   ├── LlmClientFactory.cs             # Construye la cadena desde Llm:Providers
+    │   │   ├── LlmOptions.cs                   # Config binding de Llm:Providers
+    │   │   ├── LlmDiagnostics.cs               # Truncados compartidos
+    │   │   └── Providers/                      # GeminiLlmClient, OpenAiCompatibleLlmClient (OpenAI+Mistral), AnthropicLlmClient
+    │   └── Services/
+    │       ├── IPlaceTranslatorService.cs      # TranslatePlaceAsync, TranslatePlanAsync
+    │       ├── IDescriptionGeneratorService.cs # GeneratePlaceDescriptionAsync + WithDiagnostics
+    │       ├── IPlanGenerationService.cs       # GenerateAsync, ResolveStopPlaces
+    │       ├── PlaceTranslatorService.cs       # Implementación (movida de Builder/Services/)
+    │       ├── DescriptionGeneratorService.cs  # Implementación (movida de Builder/Services/)
+    │       └── EmbeddingService.cs             # Gemini embeddings para RAG (movida de Builder/Services/)
     ├── Auth/
     │   ├── AdminAuthorizeAttribute.cs   # Admin authorization attribute
     │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain
@@ -183,6 +202,15 @@ LocalList.API.NET/
     │   └── PiiRedactor.cs              # Redacción de PII en logs y excerpts
     ├── PostHog/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
+    ├── Dtos/
+    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Plans + Admin)
+    │   ├── OpeningHours.cs              # OpeningHoursData, OpeningPeriod, OpeningTime
+    │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
+    │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
+    │   ├── ScheduledStopDto.cs          # ScheduledStopDto, TravelInfoDto, ScheduleResult
+    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
+    │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
+    │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
     ├── Search/
     │   └── LikePatterns.cs             # Helpers para LIKE patterns en EF Core
     └── Taxonomy/

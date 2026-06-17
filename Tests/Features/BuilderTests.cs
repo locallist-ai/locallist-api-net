@@ -63,6 +63,17 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         Assert.Equal(Miami, plan.GetProperty("city").GetString());
         var stops = body.GetProperty("stops");
         Assert.True(stops.GetArrayLength() >= 1, "Se esperaba al menos una stop en el plan");
+
+        // Contrato JSON de los stops (camelCase): protege la forma que consume
+        // la app móvil frente a cambios de naming policy o del DTO tipado.
+        var firstStop = stops[0];
+        Assert.True(firstStop.TryGetProperty("id", out _), "stop sin id");
+        Assert.True(firstStop.TryGetProperty("placeId", out _), "stop sin placeId");
+        Assert.True(firstStop.TryGetProperty("dayNumber", out var dayNumber), "stop sin dayNumber");
+        Assert.True(dayNumber.GetInt32() >= 1);
+        Assert.True(firstStop.TryGetProperty("orderIndex", out _), "stop sin orderIndex");
+        Assert.True(firstStop.TryGetProperty("timeBlock", out _), "stop sin timeBlock");
+        Assert.True(firstStop.TryGetProperty("suggestedDurationMin", out _), "stop sin suggestedDurationMin");
     }
 
     [Fact]

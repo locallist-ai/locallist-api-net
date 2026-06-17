@@ -1,4 +1,5 @@
 using LocalList.API.NET.Features.Builder;
+using LocalList.API.NET.Shared.Dtos;
 
 namespace LocalList.API.Tests.Unit;
 

@@ -607,6 +607,10 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<string>("AiProvider")
+                        .HasColumnType("text")
+                        .HasColumnName("ai_provider");
+
                     b.Property<string>("Budget")
                         .HasColumnType("text")
                         .HasColumnName("budget");

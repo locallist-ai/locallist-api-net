@@ -1,8 +1,8 @@
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
-using LocalList.API.NET.Features.Plans;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Features.Routing;

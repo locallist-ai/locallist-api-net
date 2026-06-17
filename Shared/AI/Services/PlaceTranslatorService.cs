@@ -2,13 +2,13 @@ using System.Text;
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
 
-namespace LocalList.API.NET.Features.Builder.Services;
+namespace LocalList.API.NET.Shared.AI.Services;
 
 /// <summary>
 /// Translates Place and Plan content to a target language using Gemini 2.5 Flash.
 /// Used by admin translation endpoints and translate-batch backfill.
 /// </summary>
-public class PlaceTranslatorService
+public class PlaceTranslatorService : IPlaceTranslatorService
 {
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;

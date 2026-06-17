@@ -24,6 +24,7 @@ using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
@@ -77,6 +78,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// verificar flujo end-to-end sin tocar la API real de Gemini.
     /// </summary>
     public FakeEmbeddingHandler FakeEmbeddings { get; } = new();
+
+    /// <summary>
+    /// Handler que intercepta los providers no-Gemini de la cadena LLM (named clients
+    /// llm-openai / llm-mistral / llm-anthropic). Solo entra en juego en tests que
+    /// activan esos providers vía UseSetting("OpenAI:ApiKey", ...). Por defecto 503.
+    /// </summary>
+    public FakeOpenAiHandler FakeOpenAi { get; } = new();
 
     private bool _dbCreated;
 
@@ -180,19 +188,32 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             if (googleDescriptor is not null) services.Remove(googleDescriptor);
             services.AddSingleton<IGoogleIdTokenValidator>(FakeGoogle);
 
-            // Sustituir el HttpMessageHandler de los tres servicios Gemini por el fake.
+            // Sustituir el HttpMessageHandler de los servicios solo-Gemini por el fake.
             // FakeGemini.Responder se configura en cada escenario de test.
-            services.AddHttpClient<PreferenceExtractorService>()
+            services.AddHttpClient<IPlaceTranslatorService, PlaceTranslatorService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
-            services.AddHttpClient<PlaceTranslatorService>()
-                .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
-            services.AddHttpClient<DescriptionGeneratorService>()
+            services.AddHttpClient<IDescriptionGeneratorService, DescriptionGeneratorService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
 
-            // SlotExtractorService también usa Gemini — usamos el mismo FakeGemini.
-            // Tests de /chat/turn configuran FakeGemini.Responder con el schema de slot extraction.
-            services.AddHttpClient<SlotExtractorService>()
+            // La cadena LLM (SlotExtractorService + PreferenceExtractorService) usa named
+            // clients "llm-{provider}". En tests solo Gemini__ApiKey está configurada, así
+            // que la cadena efectiva es [gemini] y el comportamiento es idéntico al previo.
+            // Tests de fallback derivan el host con UseSetting("OpenAI:ApiKey", ...) para
+            // activar el segundo provider, atrapado por FakeOpenAi.
+            // Registry scoped en tests (singleton en prod): el estado del circuit breaker
+            // no debe filtrarse entre tests — 3 tests seguidos con Gemini en 503 abrirían
+            // el circuito para el resto de la suite (FakeTime nunca avanza el cooldown).
+            services.RemoveAll<LocalList.API.NET.Shared.AI.Llm.LlmProviderHealthRegistry>();
+            services.AddScoped<LocalList.API.NET.Shared.AI.Llm.LlmProviderHealthRegistry>();
+
+            services.AddHttpClient("llm-gemini")
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeGemini);
+            services.AddHttpClient("llm-openai")
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeOpenAi);
+            services.AddHttpClient("llm-mistral")
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeOpenAi);
+            services.AddHttpClient("llm-anthropic")
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeOpenAi);
 
             services.AddHttpClient<EmbeddingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeEmbeddings);
@@ -536,6 +557,35 @@ public class FakeGeminiHandler : HttpMessageHandler
                     System.Text.Encoding.UTF8, "application/json")
             };
             return Task.FromResult(fallback);
+        }
+        return Task.FromResult(responder(request));
+    }
+}
+
+/// <summary>
+/// Handler HTTP fake para los providers OpenAI-compatible y Anthropic de la cadena LLM.
+/// Los tests de fallback ajustan <see cref="Responder"/> con el shape de chat/completions
+/// (o /v1/messages para Anthropic). Si Responder es null devuelve 503, de modo que un
+/// provider activado por error en un test no responda con éxito silencioso.
+/// </summary>
+public class FakeOpenAiHandler : HttpMessageHandler
+{
+    public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
+
+    /// <summary>Thread-safe: el mismo handler sirve a varios named clients (llm-openai/mistral/anthropic) en paralelo.</summary>
+    public ConcurrentBag<HttpRequestMessage> Calls { get; } = new();
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Calls.Add(request);
+        var responder = Responder;
+        if (responder is null)
+        {
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("{\"error\":\"fake provider not configured\"}",
+                    System.Text.Encoding.UTF8, "application/json")
+            });
         }
         return Task.FromResult(responder(request));
     }
