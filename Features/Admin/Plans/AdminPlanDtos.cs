@@ -184,6 +184,16 @@ public class UpdatePlanRequest
     public string? DescriptionEs { get; set; }
     // "draft" | "approved" | null (null = no change)
     public string? TranslationStatusEs { get; set; }
+
+    /// <summary>
+    /// Optional full stop list. When present, the PATCH replaces ALL stops for the
+    /// plan atomically together with the metadata changes (single transaction).
+    /// When null, stops are left untouched (metadata-only update — backward compatible).
+    /// An empty list clears all stops. This is the atomic replacement for the old
+    /// two-call flow (PATCH metadata + PUT /stops) that could leave mixed state if
+    /// the second call failed.
+    /// </summary>
+    public List<CreatePlanStopRequest>? Stops { get; set; }
 }
 
 public class UpdatePlanStopsRequest
