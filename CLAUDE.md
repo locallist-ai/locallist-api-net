@@ -9,7 +9,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
-| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:231-255`. |
+| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Gemini 2.5 Flash. Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. |
 | **Rate Limit** | 100 req/min global. Builder 5/hr (configurable via `Builder__RateLimitPerHour`). Chat 20/hr anon · 40/hr auth. Auth 10/15min. Waitlist 5/60s. Admin 60/min. |
 
@@ -61,7 +61,7 @@ Required User Secrets / Environment Variables:
 
 ```
 LocalList.API.NET/
-├── Program.cs                          # App config, DI, JWT, CORS, rate limiting
+├── Program.cs                          # Composition root: pipeline + llama a las extensiones de Shared/Startup/
 ├── Features/
 │   ├── Account/
 │   │   └── AccountController.cs        # GET /account, DELETE /account
@@ -214,6 +214,12 @@ LocalList.API.NET/
     │   └── RoutingDtos.cs               # GeoPoint, RouteSegment, RoutingMode
     ├── Search/
     │   └── LikePatterns.cs             # Helpers para LIKE patterns en EF Core
+    ├── Startup/                        # Extension methods del composition root (llamados desde Program.cs)
+    │   ├── DatabaseServiceExtensions.cs    # AddPostgresDatabase (parse URL, pgvector, DbContext + factory)
+    │   ├── DomainServiceExtensions.cs      # AddDomainServices (AI, routing, LLM chain, chat, posthog, taxonomy)
+    │   ├── AuthenticationExtensions.cs     # AddJwtAuthentication (multi-scheme JWT + app auth services)
+    │   ├── CorsExtensions.cs               # AddCorsPolicy
+    │   └── RateLimitingExtensions.cs       # AddRateLimitingPolicies
     └── Taxonomy/
         ├── ITaxonomyService.cs
         ├── PlaceTaxonomy.cs            # Árbol de categorías/subcategorías
