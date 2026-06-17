@@ -10,6 +10,7 @@ namespace LocalList.API.Tests.Unit.Llm;
 public sealed class StubLlmClient : ILlmClient
 {
     private readonly Func<LlmJsonRequest, LlmJsonResponse> _responder;
+    private readonly Exception? _throws;
 
     public string ProviderName { get; }
     public string Model { get; }
@@ -22,14 +23,27 @@ public sealed class StubLlmClient : ILlmClient
         _responder = responder;
     }
 
+    private StubLlmClient(string providerName, Exception throws, string model = "stub-model")
+    {
+        ProviderName = providerName;
+        Model = model;
+        _throws = throws;
+        _responder = _ => throw new InvalidOperationException("unreachable");
+    }
+
     public Task<LlmJsonResponse> GenerateJsonAsync(LlmJsonRequest request, CancellationToken ct = default)
     {
         CallCount++;
+        if (_throws is not null) return Task.FromException<LlmJsonResponse>(_throws);
         return Task.FromResult(_responder(request));
     }
 
     public static StubLlmClient Succeeding(string providerName, string json = "{}") =>
         new(providerName, req => new LlmJsonResponse(json, OkDiagnostics(providerName, req)));
+
+    /// <summary>Provider que lanza una excepción en vez de devolver respuesta (cuelgue, bug, Polly timeout).</summary>
+    public static StubLlmClient Throwing(string providerName, Exception? ex = null) =>
+        new(providerName, ex ?? new InvalidOperationException("provider blew up"));
 
     public static StubLlmClient Failing(string providerName, string errorCode = "http_error", int? httpStatus = 503) =>
         new(providerName, req => new LlmJsonResponse(null, new AiCallDiagnostics(

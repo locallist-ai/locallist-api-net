@@ -90,6 +90,36 @@ public class ChatLlmFallbackTests(ApiFixture fixture) : IClassFixture<ApiFixture
     }
 
     [Fact]
+    public async Task Turn_FallbackProviderReturnsMalformed200_DegradesInsteadOf500()
+    {
+        // Gemini caído + OpenAI devuelve 200 con cuerpo NO-JSON (HTML de un gateway). Antes la
+        // JsonException escapaba de la cadena → 500. Ahora cuenta como fallo del provider y el
+        // turno degrada con mensaje fallback (200), persistiendo el error real.
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+        {
+            Content = new StringContent("{\"error\":\"overloaded\"}", Encoding.UTF8, "application/json")
+        };
+        fixture.FakeOpenAi.Responder = _ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<html><body>504 Gateway Timeout</body></html>", Encoding.UTF8, "text/html")
+        };
+
+        using var factory = WithOpenAiEnabled();
+        var client = factory.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new { message = "Dos días en Sevilla" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        var db = fixture.GetDbContext();
+        var turn = await db.ChatTurns.OrderByDescending(t => t.CreatedAt).FirstOrDefaultAsync();
+        Assert.NotNull(turn);
+        Assert.Equal("parse_error", turn.ErrorCode);
+        Assert.Equal("openai", turn.AiProvider);
+        Assert.Contains("gemini: http_error(503)", turn.ErrorMessage);
+        Assert.Contains("openai: parse_error", turn.ErrorMessage);
+    }
+
+    [Fact]
     public async Task Turn_GeminiHealthy_DoesNotTouchOpenAi()
     {
         fixture.FakeGemini.Responder = _ => GeminiSlotOk(new

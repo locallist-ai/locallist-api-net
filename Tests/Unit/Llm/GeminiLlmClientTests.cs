@@ -117,10 +117,49 @@ public class GeminiLlmClientTests
         Assert.Equal(503, response.Diagnostics.HttpStatus);
     }
 
-    /// <summary>Handler que simula fallos de transporte (timeout interno de HttpClient, red caída…).</summary>
-    private sealed class ThrowingHandler(Exception exception) : HttpMessageHandler
+    [Fact]
+    public async Task Malformed200_MapsToParseErrorNotThrow()
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            => Task.FromException<HttpResponseMessage>(exception);
+        // 200 con cuerpo no-JSON (página HTML de un proxy/gateway): debe degradar a fallo, no lanzar.
+        var handler = new CapturingHandler(HttpStatusCode.OK, "<html><body>502 Bad Gateway</body></html>");
+        var response = await Client(handler).GenerateJsonAsync(Request);
+
+        Assert.False(response.Succeeded);
+        Assert.Equal("parse_error", response.Diagnostics.ErrorCode);
+        Assert.NotNull(response.Diagnostics.ResponseRaw);
+    }
+
+    [Fact]
+    public async Task UnexpectedException_MapsToProviderErrorNotThrow()
+    {
+        // Polly TimeoutRejectedException (AttemptTimeout) no es OCE ni HttpRequestException:
+        // antes escapaba del catch y abortaba la cadena. Ahora se mapea a provider_error.
+        var handler = new ThrowingHandler(new InvalidOperationException("resilience pipeline timed out"));
+        var response = await Client(handler).GenerateJsonAsync(Request);
+
+        Assert.False(response.Succeeded);
+        Assert.Equal("provider_error", response.Diagnostics.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Ok_CostIncludesThinkingTokens()
+    {
+        // 100 in · 50 out · 10 thinking → (100·0.30 + (50+10)·2.50) / 1e6.
+        var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
+        var response = await Client(handler).GenerateJsonAsync(Request);
+
+        var expected = (100 * 0.30m + (50 + 10) * 2.50m) / 1_000_000m;
+        Assert.Equal(expected, response.Diagnostics.CostUsd);
+    }
+
+    [Fact]
+    public async Task CallerCancellation_Propagates()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new ThrowingHandler(new OperationCanceledException(cts.Token));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Client(handler).GenerateJsonAsync(Request, cts.Token));
     }
 }

@@ -18,7 +18,7 @@ public class OpenAiCompatibleLlmClientTests
         }
         """;
 
-    private static OpenAiCompatibleLlmClient OpenAiClient(CapturingHandler handler) =>
+    private static OpenAiCompatibleLlmClient OpenAiClient(HttpMessageHandler handler) =>
         new(new HttpClient(handler), "test-key", "openai", "https://api.openai.com/v1", "gpt-5-nano",
             NullLogger.Instance,
             usesMaxCompletionTokens: true, supportsTemperature: false,
@@ -104,5 +104,36 @@ public class OpenAiCompatibleLlmClientTests
 
         Assert.False(response.Succeeded);
         Assert.Equal("content_filtered", response.Diagnostics.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Malformed200_MapsToParseErrorNotThrow()
+    {
+        var handler = new CapturingHandler(HttpStatusCode.OK, "<html><body>504 Gateway Timeout</body></html>");
+        var response = await OpenAiClient(handler).GenerateJsonAsync(Request);
+
+        Assert.False(response.Succeeded);
+        Assert.Equal("parse_error", response.Diagnostics.ErrorCode);
+    }
+
+    [Fact]
+    public async Task UnexpectedException_MapsToProviderErrorNotThrow()
+    {
+        var handler = new ThrowingHandler(new InvalidOperationException("resilience pipeline timed out"));
+        var response = await OpenAiClient(handler).GenerateJsonAsync(Request);
+
+        Assert.False(response.Succeeded);
+        Assert.Equal("provider_error", response.Diagnostics.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Ok_CostIncludesReasoningTokens()
+    {
+        // gpt-5-nano: 120 in · 40 out · 32 reasoning → (120·0.05 + (40+32)·0.40) / 1e6.
+        var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
+        var response = await OpenAiClient(handler).GenerateJsonAsync(Request);
+
+        var expected = (120 * 0.05m + (40 + 32) * 0.40m) / 1_000_000m;
+        Assert.Equal(expected, response.Diagnostics.CostUsd);
     }
 }

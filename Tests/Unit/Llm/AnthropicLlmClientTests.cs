@@ -57,6 +57,42 @@ public class AnthropicLlmClientTests
     }
 
     [Fact]
+    public async Task JsonSchema_SanitizedForAnthropic_StripsRangesAndAddsAdditionalProperties()
+    {
+        // Schema en dialecto Gemini (laxo): objeto sin additionalProperties y con rangos numéricos
+        // y de longitud que Anthropic rechaza con 400. El provider debe adaptarlo antes de enviar.
+        using var schemaDoc = JsonDocument.Parse("""
+            {
+              "type": "object",
+              "properties": {
+                "days":  {"type": "integer", "minimum": 1, "maximum": 14},
+                "city":  {"type": "string", "minLength": 2, "maxLength": 80},
+                "extra": {"type": "object", "properties": {"note": {"type": "string"}}}
+              }
+            }
+            """);
+        var request = Request with { JsonSchema = schemaDoc.RootElement.Clone() };
+
+        var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
+        await Client(handler).GenerateJsonAsync(request);
+
+        using var body = JsonDocument.Parse(handler.LastRequestBody!);
+        var schema = body.RootElement.GetProperty("output_config").GetProperty("format").GetProperty("schema");
+        var props = schema.GetProperty("properties");
+
+        // Objetos (raíz y anidados) llevan additionalProperties:false.
+        Assert.False(schema.GetProperty("additionalProperties").GetBoolean());
+        Assert.False(props.GetProperty("extra").GetProperty("additionalProperties").GetBoolean());
+        // Constraints no soportados eliminados.
+        Assert.False(props.GetProperty("days").TryGetProperty("minimum", out _));
+        Assert.False(props.GetProperty("days").TryGetProperty("maximum", out _));
+        Assert.False(props.GetProperty("city").TryGetProperty("minLength", out _));
+        Assert.False(props.GetProperty("city").TryGetProperty("maxLength", out _));
+        // Lo demás se preserva.
+        Assert.Equal("integer", props.GetProperty("days").GetProperty("type").GetString());
+    }
+
+    [Fact]
     public async Task Ok_ParsesTextTokensAndCost()
     {
         var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);

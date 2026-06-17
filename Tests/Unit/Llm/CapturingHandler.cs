@@ -19,3 +19,13 @@ public sealed class CapturingHandler(HttpStatusCode status, string body) : HttpM
         };
     }
 }
+
+/// <summary>
+/// Handler que simula fallos de transporte o resiliencia: timeout interno de HttpClient
+/// (TaskCanceledException), Polly TimeoutRejectedException, red caída… Lanza la excepción dada.
+/// </summary>
+public sealed class ThrowingHandler(Exception exception) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => Task.FromException<HttpResponseMessage>(exception);
+}

@@ -52,15 +52,70 @@ public class FallbackLlmClientTests
         Assert.Equal("openai", response.Diagnostics.Provider);
     }
 
-    [Fact]
-    public async Task MarkdownFences_AreCleanedFromSuccessfulText()
+    [Theory]
+    [InlineData("```json\n{\"ok\":true}\n```")]
+    [InlineData("```json\r\n{\"ok\":true}\r\n```")]   // CRLF tras la apertura
+    [InlineData("```JSON\n{\"ok\":true}\n```")]       // lenguaje en mayúsculas
+    [InlineData("```\n{\"ok\":true}\n```")]           // sin etiqueta de lenguaje
+    [InlineData("  ```json\n{\"ok\":true}\n```  ")]   // espacios alrededor
+    public async Task MarkdownFences_AreCleanedFromSuccessfulText(string raw)
     {
-        var primary = StubLlmClient.Succeeding("gemini", "```json\n{\"ok\":true}\n```");
+        var primary = StubLlmClient.Succeeding("gemini", raw);
 
         var response = await Chain(primary).GenerateJsonAsync(Request);
 
         Assert.True(response.Succeeded);
         Assert.Equal("{\"ok\":true}", response.Text);
+    }
+
+    [Fact]
+    public async Task ProviderThrows_CaughtAndFallsBackToNext()
+    {
+        // El caso para el que existe la cadena: un provider se cuelga (lanza) en vez de devolver
+        // un fallo estructurado. Antes la excepción abortaba toda la cadena → 500. Ahora cae al siguiente.
+        var primary = StubLlmClient.Throwing("gemini", new InvalidOperationException("hung"));
+        var secondary = StubLlmClient.Succeeding("openai", "{\"ok\":true}");
+
+        var response = await Chain(primary, secondary).GenerateJsonAsync(Request);
+
+        Assert.True(response.Succeeded);
+        Assert.Equal("openai", response.Diagnostics.Provider);
+        Assert.Equal(1, primary.CallCount);
+    }
+
+    [Fact]
+    public async Task AllProvidersThrow_ReturnsProviderErrorWithSummary()
+    {
+        var primary = StubLlmClient.Throwing("gemini", new InvalidOperationException("hung"));
+        var secondary = StubLlmClient.Throwing("openai", new TimeoutException("polly timeout"));
+
+        var response = await Chain(primary, secondary).GenerateJsonAsync(Request);
+
+        Assert.False(response.Succeeded);
+        Assert.Equal("provider_error", response.Diagnostics.ErrorCode);
+        Assert.Contains("gemini: provider_error", response.Diagnostics.ErrorMessage);
+        Assert.Contains("openai: provider_error", response.Diagnostics.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ProviderThrowsOnCallerCancellation_Propagates()
+    {
+        // Si el provider lanza OCE porque el caller canceló a mitad de llamada, la cadena NO debe
+        // tragárselo como fallback — el turno se está cancelando de verdad. (ct no está cancelado al
+        // entrar al bucle, así que esto ejercita el guard del catch, no el ThrowIfCancellationRequested.)
+        using var cts = new CancellationTokenSource();
+        var primary = new StubLlmClient("gemini", _ =>
+        {
+            cts.Cancel();
+            throw new OperationCanceledException(cts.Token);
+        });
+        var secondary = StubLlmClient.Succeeding("openai", "{\"ok\":true}");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Chain(primary, secondary).GenerateJsonAsync(Request, cts.Token));
+
+        Assert.Equal(1, primary.CallCount);
+        Assert.Equal(0, secondary.CallCount);
     }
 
     [Fact]

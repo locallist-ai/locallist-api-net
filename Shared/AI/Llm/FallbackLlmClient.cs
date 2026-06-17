@@ -51,7 +51,26 @@ public sealed class FallbackLlmClient(
             }
 
             attempt++;
-            var response = await provider.GenerateJsonAsync(request, ct);
+            LlmJsonResponse response;
+            try
+            {
+                response = await provider.GenerateJsonAsync(request, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Cancelación del caller (timeout del turno) — propagar, no degradar a fallback.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Defensa en profundidad: un provider que lanza (bug, Polly TimeoutRejectedException
+                // que se escapara, etc.) no debe abortar la cadena — se cuenta como fallo y se sigue.
+                health.RecordFailure(provider.ProviderName);
+                attemptErrors.Add($"{provider.ProviderName}: provider_error({ex.GetType().Name})");
+                logger.LogWarning(ex, "LLM chain: {Provider} threw, trying next", provider.ProviderName);
+                lastResponse = ProviderThrew(request, provider, ex);
+                continue;
+            }
 
             if (response.Succeeded && TryCleanJson(response.Text!, out var cleaned))
             {
@@ -91,13 +110,24 @@ public sealed class FallbackLlmClient(
         });
     }
 
+    /// <summary>Diagnostics sintéticos para un provider que lanzó (no devolvió respuesta estructurada).</summary>
+    private static LlmJsonResponse ProviderThrew(LlmJsonRequest request, ILlmClient provider, Exception ex) =>
+        new(null, new AiCallDiagnostics(
+            Provider: provider.ProviderName, Model: provider.Model,
+            Prompt: request.Prompt.Length <= 4096 ? request.Prompt : request.Prompt[..4096],
+            ResponseRaw: null, FinishReason: null, LatencyMs: 0,
+            InputTokens: null, OutputTokens: null, ThinkingTokens: null, TotalTokens: null,
+            CostUsd: null, HttpStatus: null, ErrorCode: "provider_error",
+            ErrorMessage: $"{ex.GetType().Name}: {ex.Message}"));
+
     /// <summary>
-    /// Limpia fences markdown (```json) y verifica que el resultado sea JSON parseable.
+    /// Limpia fences markdown (```json, ```JSON, ``` con o sin lenguaje) y verifica que el
+    /// resultado sea JSON parseable. Tolera \n, \r\n o espacios tras la apertura del fence.
     /// Un modelo que devuelve prosa en vez de JSON cuenta como fallo → siguiente provider.
     /// </summary>
     private static bool TryCleanJson(string raw, out string cleaned)
     {
-        cleaned = raw.Replace("```json\n", "").Replace("```\n", "").Replace("```", "").Trim();
+        cleaned = StripFences(raw);
         try
         {
             using var _ = JsonDocument.Parse(cleaned);
@@ -107,5 +137,21 @@ public sealed class FallbackLlmClient(
         {
             return false;
         }
+    }
+
+    private static string StripFences(string raw)
+    {
+        var s = raw.Trim();
+        if (!s.StartsWith("```", StringComparison.Ordinal)) return s;
+
+        // Quitar la línea de apertura del fence (```, ```json, ```JSON …) hasta el primer salto.
+        var firstBreak = s.IndexOf('\n');
+        s = firstBreak >= 0 ? s[(firstBreak + 1)..] : s[3..];
+
+        // Quitar el fence de cierre si existe.
+        s = s.TrimEnd();
+        if (s.EndsWith("```", StringComparison.Ordinal)) s = s[..^3];
+
+        return s.Trim();
     }
 }

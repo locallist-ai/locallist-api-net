@@ -44,6 +44,7 @@ public sealed class GeminiLlmClient(
         };
 
         var sw = Stopwatch.StartNew();
+        string? rawBody = null;
         try
         {
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
@@ -57,6 +58,7 @@ public sealed class GeminiLlmClient(
             var latencyMs = (int)sw.ElapsedMilliseconds;
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
+            rawBody = LlmDiagnostics.TruncateResponse(responseJson);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -113,7 +115,7 @@ public sealed class GeminiLlmClient(
                 OutputTokens: outputTokens,
                 ThinkingTokens: thinkingTokens,
                 TotalTokens: totalTokens > 0 ? totalTokens : null,
-                CostUsd: LlmCostCalculator.Calculate(model, inputTokens, outputTokens),
+                CostUsd: LlmCostCalculator.Calculate(model, inputTokens, outputTokens, thinkingTokens),
                 HttpStatus: (int)response.StatusCode,
                 ErrorCode: null,
                 ErrorMessage: null);
@@ -124,13 +126,33 @@ public sealed class GeminiLlmClient(
         {
             sw.Stop();
             logger.LogError(ex, "LLM[gemini]: API call failed");
-            return Failure(request, null, (int)sw.ElapsedMilliseconds, null, "http_error", ex.Message);
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "http_error", ex.Message);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Cancelación del caller (timeout del turno) — propagar, no es fallo del provider.
+            throw;
+        }
+        catch (OperationCanceledException)
         {
             sw.Stop();
             logger.LogError("LLM[gemini]: API call timed out");
-            return Failure(request, null, (int)sw.ElapsedMilliseconds, null, "timeout", "Gemini API call timed out");
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "timeout", "Gemini API call timed out");
+        }
+        catch (JsonException ex)
+        {
+            // 200 con cuerpo no-JSON (HTML de un proxy/gateway, body truncado): fallo del provider, no excepción.
+            sw.Stop();
+            logger.LogError(ex, "LLM[gemini]: malformed JSON response body");
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "parse_error", ex.Message);
+        }
+        catch (Exception ex)
+        {
+            // Polly TimeoutRejectedException (AttemptTimeout/TotalRequestTimeout) y cualquier otro
+            // fallo inesperado: convertir en fallo del provider para que la cadena pruebe el siguiente.
+            sw.Stop();
+            logger.LogError(ex, "LLM[gemini]: unexpected error ({Type})", ex.GetType().Name);
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "provider_error", ex.Message);
         }
     }
 

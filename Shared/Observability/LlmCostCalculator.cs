@@ -19,12 +19,17 @@ public static class LlmCostCalculator
         ["claude-haiku-4-5"]      = (1.00m, 5.00m),
     };
 
-    public static decimal? Calculate(string model, int? inputTokens, int? outputTokens)
+    /// <summary>
+    /// Coste = input·InPerM + (output + thinking)·OutPerM. Los tokens de razonamiento
+    /// (thoughtsTokenCount en Gemini 2.5, reasoning_tokens en gpt-5-nano) se facturan a
+    /// precio de output: omitirlos infravalora sistemáticamente el coste cuando el modelo razona.
+    /// </summary>
+    public static decimal? Calculate(string model, int? inputTokens, int? outputTokens, int? thinkingTokens = null)
     {
-        if (inputTokens == null && outputTokens == null) return null;
+        if (inputTokens == null && outputTokens == null && thinkingTokens == null) return null;
         if (!Prices.TryGetValue(model, out var price)) return null;
         var inputCost = (inputTokens ?? 0) * price.InPerM / 1_000_000m;
-        var outputCost = (outputTokens ?? 0) * price.OutPerM / 1_000_000m;
+        var outputCost = ((outputTokens ?? 0) + (thinkingTokens ?? 0)) * price.OutPerM / 1_000_000m;
         return inputCost + outputCost;
     }
 

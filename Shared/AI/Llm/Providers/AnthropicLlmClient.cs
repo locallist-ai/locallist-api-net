@@ -1,14 +1,18 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using LocalList.API.NET.Shared.Observability;
 
 namespace LocalList.API.NET.Shared.AI.Llm.Providers;
 
 /// <summary>
 /// Provider Anthropic (POST /v1/messages, Claude Haiku 4.5).
-/// Structured output vía output_config.format si la request trae JsonSchema
-/// (el schema debe llevar additionalProperties:false y no usar rangos numéricos).
+/// Structured output vía output_config.format si la request trae JsonSchema.
+/// El schema se comparte con Gemini (responseSchema), cuyo dialecto es más laxo:
+/// Anthropic exige additionalProperties:false en cada objeto y rechaza constraints
+/// numéricos/de longitud (minimum/maximum, minLength/maxLength…). <see cref="SanitizeForAnthropic"/>
+/// adapta el schema compartido antes de enviarlo para que Anthropic no devuelva 400.
 /// output_config.format es GA: no requiere beta header y funciona con
 /// anthropic-version 2023-06-01 (verificado contra
 /// platform.claude.com/docs/en/build-with-claude/structured-outputs, 2026-06-12;
@@ -35,10 +39,12 @@ public sealed class AnthropicLlmClient(
         };
         if (request.JsonSchema is { } schema)
         {
-            body["output_config"] = new { format = new { type = "json_schema", schema } };
+            var safeSchema = SanitizeForAnthropic(JsonNode.Parse(schema.GetRawText()));
+            body["output_config"] = new { format = new { type = "json_schema", schema = safeSchema } };
         }
 
         var sw = Stopwatch.StartNew();
+        string? rawBody = null;
         try
         {
             var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
@@ -52,6 +58,7 @@ public sealed class AnthropicLlmClient(
             var latencyMs = (int)sw.ElapsedMilliseconds;
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
+            rawBody = LlmDiagnostics.TruncateResponse(responseJson);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -119,14 +126,66 @@ public sealed class AnthropicLlmClient(
         {
             sw.Stop();
             logger.LogError(ex, "LLM[anthropic]: API call failed");
-            return Failure(request, null, (int)sw.ElapsedMilliseconds, null, "http_error", ex.Message);
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "http_error", ex.Message);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Cancelación del caller (timeout del turno) — propagar, no es fallo del provider.
+            throw;
+        }
+        catch (OperationCanceledException)
         {
             sw.Stop();
             logger.LogError("LLM[anthropic]: API call timed out");
-            return Failure(request, null, (int)sw.ElapsedMilliseconds, null, "timeout", "Anthropic API call timed out");
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "timeout", "Anthropic API call timed out");
         }
+        catch (JsonException ex)
+        {
+            // 200 con cuerpo no-JSON (HTML de un proxy/gateway, body truncado): fallo del provider, no excepción.
+            sw.Stop();
+            logger.LogError(ex, "LLM[anthropic]: malformed JSON response body");
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "parse_error", ex.Message);
+        }
+        catch (Exception ex)
+        {
+            // Polly TimeoutRejectedException (AttemptTimeout/TotalRequestTimeout) y cualquier otro
+            // fallo inesperado: convertir en fallo del provider para que la cadena pruebe el siguiente.
+            sw.Stop();
+            logger.LogError(ex, "LLM[anthropic]: unexpected error ({Type})", ex.GetType().Name);
+            return Failure(request, rawBody, (int)sw.ElapsedMilliseconds, null, "provider_error", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Adapta el schema compartido (dialecto Gemini) a lo que acepta el structured output de
+    /// Anthropic: cada objeto necesita additionalProperties:false y no se admiten constraints
+    /// numéricos/de longitud. Recursivo sobre objetos y arrays. Devuelve el nodo mutado.
+    /// </summary>
+    private static readonly string[] UnsupportedKeywords =
+    [
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+        "minLength", "maxLength", "pattern", "format", "minItems", "maxItems", "uniqueItems",
+    ];
+
+    private static JsonNode? SanitizeForAnthropic(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var keyword in UnsupportedKeywords) obj.Remove(keyword);
+                if (obj.TryGetPropertyValue("type", out var t)
+                    && t is JsonValue tv && tv.TryGetValue<string>(out var typeName) && typeName == "object"
+                    && !obj.ContainsKey("additionalProperties"))
+                {
+                    obj["additionalProperties"] = false;
+                }
+                foreach (var kvp in obj) SanitizeForAnthropic(kvp.Value);
+                break;
+            case JsonArray arr:
+                foreach (var item in arr) SanitizeForAnthropic(item);
+                break;
+        }
+        return node;
     }
 
     private LlmJsonResponse Failure(

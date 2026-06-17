@@ -23,7 +23,9 @@ public sealed class LlmProviderHealthRegistry(TimeProvider clock)
         if (s.ConsecutiveFailures < FailureThreshold) return false;
         if (clock.GetUtcNow() >= s.OpenUntil)
         {
-            // Cooldown vencido: half-open — permitir un intento (el resultado decide).
+            // Cooldown vencido: el circuito vuelve a estar cerrado. No es half-open estricto —
+            // si varias requests entran a la vez, todas pasan; la primera que falle reabre el
+            // circuito (RecordFailure mantiene ConsecutiveFailures ≥ threshold → OpenUntil futuro).
             return false;
         }
         return true;
