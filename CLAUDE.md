@@ -9,7 +9,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Tech** | .NET 10 (Controllers), C#, Entity Framework Core, Railway PostgreSQL |
 | **Architecture** | Vertical Slice Architecture (VSA) — feature folders |
 | **Deploy** | Railway (Dockerfile) |
-| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Program.cs:231-255`. |
+| **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Gemini 2.5 Flash. Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. |
 | **Rate Limit** | 100 req/min global. Builder 5/hr (configurable via `Builder__RateLimitPerHour`). Chat 20/hr anon · 40/hr auth. Auth 10/15min. Waitlist 5/60s. Admin 60/min. |
 
@@ -61,7 +61,7 @@ Required User Secrets / Environment Variables:
 
 ```
 LocalList.API.NET/
-├── Program.cs                          # App config, DI, JWT, CORS, rate limiting
+├── Program.cs                          # Composition root: pipeline + llama a las extensiones de Shared/Startup/
 ├── Features/
 │   ├── Account/
 │   │   └── AccountController.cs        # GET /account, DELETE /account
@@ -137,12 +137,9 @@ LocalList.API.NET/
 │   ├── Profile/
 │   │   ├── ProfileController.cs        # GET /me/profile, DELETE /me/profile
 │   │   └── ProfileDtos.cs
-│   ├── Routing/
-│   │   ├── IRoutingService.cs
-│   │   ├── ISegmentResolver.cs
-│   │   ├── MapboxRoutingService.cs     # Mapbox Directions API
-│   │   ├── RouteResolver.cs            # Caché de segmentos en RouteSegmentCache
-│   │   └── RoutingDtos.cs
+│   ├── Routing/                        # Implementaciones (contratos en Shared/Routing/)
+│   │   ├── MapboxRoutingService.cs     # Mapbox Directions API (IRoutingService)
+│   │   └── RouteResolver.cs            # ISegmentResolver — caché de segmentos en RouteSegmentCache
 │   ├── Taxonomy/
 │   │   └── TaxonomyController.cs       # GET /taxonomy (categories + subcategories)
 │   └── Waitlist/
@@ -211,8 +208,18 @@ LocalList.API.NET/
     │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
     │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
     │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
+    ├── Routing/                        # Contratos cross-slice (impl en Features/Routing/)
+    │   ├── IRoutingService.cs           # GetRouteAsync (Mapbox)
+    │   ├── ISegmentResolver.cs          # ResolveAsync (batch) + ResolveSegmentAsync
+    │   └── RoutingDtos.cs               # GeoPoint, RouteSegment, RoutingMode
     ├── Search/
     │   └── LikePatterns.cs             # Helpers para LIKE patterns en EF Core
+    ├── Startup/                        # Extension methods del composition root (llamados desde Program.cs)
+    │   ├── DatabaseServiceExtensions.cs    # AddPostgresDatabase (parse URL, pgvector, DbContext + factory)
+    │   ├── DomainServiceExtensions.cs      # AddDomainServices (AI, routing, LLM chain, chat, posthog, taxonomy)
+    │   ├── AuthenticationExtensions.cs     # AddJwtAuthentication (multi-scheme JWT + app auth services)
+    │   ├── CorsExtensions.cs               # AddCorsPolicy
+    │   └── RateLimitingExtensions.cs       # AddRateLimitingPolicies
     └── Taxonomy/
         ├── ITaxonomyService.cs
         ├── PlaceTaxonomy.cs            # Árbol de categorías/subcategorías
@@ -249,7 +256,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Taxonomy | `GET /taxonomy` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
 | Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
-| Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id`, `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `DELETE /admin/plans/:id` |
+| Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
 | Admin — Analytics | `GET /admin/chat-turns`, `GET /admin/chat-turns/stats`, `GET /admin/plan-metrics`, `GET /admin/plan-metrics/stats` |
 | Admin — Cities | `DELETE /admin/cities/:id` |
 | Admin — Subcategories | `GET /admin/subcategories`, `POST /admin/subcategories`, `PATCH /admin/subcategories/:id`, `DELETE /admin/subcategories/:id` |

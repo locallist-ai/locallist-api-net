@@ -126,7 +126,7 @@ public class PlaceRankingService
             if (!string.IsNullOrWhiteSpace(place.Neighborhood)
                 && !seenNeighborhoods.Add(place.Neighborhood))
             {
-                penalty = 1f; // flat penalty, multiplicado por WeightNeighborhoodPenalty = 0.05
+                penalty = 1f; // flat penalty, multiplicado por WeightNeighborhoodPenalty = 0.04
             }
             var finalBd = new ScoreBreakdown(
                 bd.Similarity, bd.CategoryMatch, bd.BestForMatch,
@@ -169,7 +169,7 @@ public class PlaceRankingService
     //   - family/family-kids + place contiene family/kids/all-ages → 1.0.
     //   - family/family-kids + place contiene adults-only/21+ → 0.0 (hard exclusion).
     //   - otros cases → 0.7 (match parcial/ambiguo).
-    // El peso (0.15) hace que un match vs un no-match genere ~+0.105 de diferencia, suficiente
+    // El peso (0.12) hace que un match vs un no-match genere ~+0.084 de diferencia, suficiente
     // para reordenar en top-5 sin dominar sobre cosine similarity.
     private static float ScoreSuitableForMatch(Place place, ExtractedPreferences prefs)
     {

@@ -26,6 +26,7 @@ using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
 

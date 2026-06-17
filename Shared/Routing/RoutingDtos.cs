@@ -1,4 +1,4 @@
-namespace LocalList.API.NET.Features.Routing;
+namespace LocalList.API.NET.Shared.Routing;
 
 public record GeoPoint(decimal Lat, decimal Lng);
 

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
+using LocalList.API.NET.Shared.Routing;
 
 namespace LocalList.API.NET.Features.Routing;
 

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
+using Microsoft.EntityFrameworkCore;
 
 namespace LocalList.API.Tests.Features;
 
@@ -238,6 +239,107 @@ public class AdminPlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("too_many_stops_day_1", body.GetProperty("error").GetString());
+    }
+
+    // ── Atomic metadata + stops PATCH ───────────────────────────────────────
+
+    [Fact]
+    public async Task UpdatePlan_AtomicMetaAndStops_PersistsBoth()
+    {
+        var db = fixture.GetDbContext();
+        var placeA = new Place
+        {
+            Id = Guid.NewGuid(), Name = $"Atomic A {Guid.NewGuid():N}",
+            Category = "Food", City = "Miami", WhyThisPlace = "atomic", Status = "published"
+        };
+        var placeB = new Place
+        {
+            Id = Guid.NewGuid(), Name = $"Atomic B {Guid.NewGuid():N}",
+            Category = "Food", City = "Miami", WhyThisPlace = "atomic", Status = "published"
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Name = $"Atomic Plan {Guid.NewGuid():N}",
+            City = "Miami", Type = "curated", Source = "curated", DurationDays = 1
+        };
+        db.Places.AddRange(placeA, placeB);
+        db.Plans.Add(plan);
+        db.PlanStops.Add(new PlanStop
+        {
+            Id = Guid.NewGuid(), PlanId = plan.Id, PlaceId = placeA.Id, DayNumber = 1, OrderIndex = 0
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var payload = new
+        {
+            name = "Atomic Renamed",
+            stops = new[] { new { placeId = placeB.Id, dayNumber = 1, orderIndex = 0 } }
+        };
+
+        var response = await client.PatchAsJsonAsync($"/admin/plans/{plan.Id}", payload);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Atomic Renamed", body.GetProperty("name").GetString());
+        var stop = body.GetProperty("days").EnumerateArray().First()
+            .GetProperty("stops").EnumerateArray().Single();
+        Assert.Equal(placeB.Id, stop.GetProperty("placeId").GetGuid());
+
+        // Both metadata and stops persisted (fresh context).
+        var verify = fixture.GetDbContext();
+        var saved = await verify.Plans.AsNoTracking()
+            .Include(p => p.Stops)
+            .FirstAsync(p => p.Id == plan.Id);
+        Assert.Equal("Atomic Renamed", saved.Name);
+        Assert.Single(saved.Stops);
+        Assert.Equal(placeB.Id, saved.Stops.First().PlaceId);
+    }
+
+    [Fact]
+    public async Task UpdatePlan_AtomicStopsWithBadPlace_RollsBackMetadataAndStops()
+    {
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(), Name = $"Rollback Place {Guid.NewGuid():N}",
+            Category = "Food", City = "Miami", WhyThisPlace = "rollback", Status = "published"
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(), Name = "Original Name",
+            City = "Miami", Type = "curated", Source = "curated", DurationDays = 1
+        };
+        var originalStopId = Guid.NewGuid();
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        db.PlanStops.Add(new PlanStop
+        {
+            Id = originalStopId, PlanId = plan.Id, PlaceId = place.Id, DayNumber = 1, OrderIndex = 0
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        // New metadata + a stop pointing at a non-existent place. The INSERT fails on the
+        // place FK halfway through the transaction; the whole write must roll back.
+        var payload = new
+        {
+            name = "Should Not Persist",
+            stops = new[] { new { placeId = Guid.NewGuid(), dayNumber = 1, orderIndex = 0 } }
+        };
+
+        var response = await client.PatchAsJsonAsync($"/admin/plans/{plan.Id}", payload);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        // Rollback: metadata unchanged AND the original stop is still the only stop.
+        var verify = fixture.GetDbContext();
+        var saved = await verify.Plans.AsNoTracking()
+            .Include(p => p.Stops)
+            .FirstAsync(p => p.Id == plan.Id);
+        Assert.Equal("Original Name", saved.Name);
+        Assert.Single(saved.Stops);
+        Assert.Equal(originalStopId, saved.Stops.First().Id);
+        Assert.Equal(place.Id, saved.Stops.First().PlaceId);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────

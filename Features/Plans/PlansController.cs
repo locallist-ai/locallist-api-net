@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -17,10 +17,10 @@ public class PlansController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlansController> _logger;
     private readonly LanguageAccessor _lang;
-    private readonly RouteResolver _routeResolver;
+    private readonly ISegmentResolver _routeResolver;
     private readonly PostHogService _posthog;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, RouteResolver routeResolver, PostHogService posthog)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog)
     {
         _db = db;
         _logger = logger;
