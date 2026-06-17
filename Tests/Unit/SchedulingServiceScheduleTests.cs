@@ -227,33 +227,37 @@ public class SchedulingServiceScheduleTests
     // ── Meal anchoring ────────────────────────────────────────────────────────
 
     [Fact]
-    public void MealAnchor_FoodPlaceAppearsNearLunchSlot_WhenScheduleReachesLunchWindow()
+    public void MealAnchor_FoodNotLast_AndNearLunch_WhenNightlifePresent()
     {
         var svc = Svc();
-        // 5 places with coords so travel spreads the clock into lunch territory
+        // Deterministic mix: two morning culture stops push the clock toward midday,
+        // food should anchor in the lunch window, and nightlife is forced last —
+        // so food must NOT be the final stop. Coords spread travel into the day.
         var places = new List<Place>
         {
-            MakePlace("culture",  lat: 25.770m, lon: -80.190m),
-            MakePlace("culture",  lat: 25.775m, lon: -80.195m),
-            MakePlace("food",     lat: 25.780m, lon: -80.200m),
-            MakePlace("culture",  lat: 25.785m, lon: -80.205m),
-            MakePlace("outdoors", lat: 25.790m, lon: -80.210m),
+            MakePlace("culture",   lat: 25.770m, lon: -80.190m),
+            MakePlace("culture",   lat: 25.775m, lon: -80.195m),
+            MakePlace("food",      lat: 25.780m, lon: -80.200m),
+            MakePlace("nightlife", lat: 25.785m, lon: -80.205m),
         };
-        var prefs  = Prefs(maxStops: 5);
+        var prefs  = Prefs(maxStops: 4);
         var result = svc.BuildPlanSchedule(places, prefs, seed: 42);
 
         var stops = result.Stops.OrderBy(s => s.OrderIndex).ToList();
-        // If food exists in the plan and the day reaches lunch window, check it appears in a lunch-adjacent position
-        var foodStops = stops
-            .Where(s => places.First(p => p.Id == s.PlaceId).Category == "food")
-            .ToList();
+        Assert.Equal(4, stops.Count);
 
-        if (foodStops.Any())
-        {
-            // Food should not appear last if there's room to anchor it earlier
-            bool foodIsLastButNightlifeExists = false; // no nightlife here, so no displacement
-            Assert.True(!foodIsLastButNightlifeExists || foodStops.All(s => s.OrderIndex < stops.Count - 1));
-        }
+        var foodStop = stops.Single(s =>
+            places.First(p => p.Id == s.PlaceId).Category == "food");
+        var nightlifeStop = stops.Single(s =>
+            places.First(p => p.Id == s.PlaceId).Category == "nightlife");
+
+        // Nightlife anchors last; food is displaced earlier, so it is NOT the final stop.
+        Assert.Equal(stops.Count - 1, nightlifeStop.OrderIndex);
+        Assert.True(foodStop.OrderIndex < stops.Count - 1,
+            $"food at index {foodStop.OrderIndex} should not be last when nightlife is present");
+
+        // Food anchors into the lunch window (TimeBlock == "lunch").
+        Assert.Equal("lunch", foodStop.TimeBlock);
     }
 
     // ── Nightlife ordering ────────────────────────────────────────────────────

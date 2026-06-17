@@ -92,7 +92,7 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<Place>().Property(p => p.Photos).HasColumnType("text[]");
         modelBuilder.Entity<Place>().Property(p => p.Flags).HasColumnType("text[]");
 
-        // pgvector — 768-dim embeddings (Gemini text-embedding-004)
+        // pgvector — 768-dim embeddings (Gemini gemini-embedding-001, L2-norm)
         modelBuilder.Entity<Place>().Property(p => p.Embedding).HasColumnType("vector(768)");
 
         modelBuilder.Entity<Plan>().HasIndex(p => p.CreatedById);
