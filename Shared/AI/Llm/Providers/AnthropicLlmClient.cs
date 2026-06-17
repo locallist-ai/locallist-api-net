@@ -14,9 +14,11 @@ namespace LocalList.API.NET.Shared.AI.Llm.Providers;
 /// numéricos/de longitud (minimum/maximum, minLength/maxLength…). <see cref="SanitizeForAnthropic"/>
 /// adapta el schema compartido antes de enviarlo para que Anthropic no devuelva 400.
 /// output_config.format es GA: no requiere beta header y funciona con
-/// anthropic-version 2023-06-01 (verificado contra
-/// platform.claude.com/docs/en/build-with-claude/structured-outputs, 2026-06-12;
-/// el header beta legacy structured-outputs-2025-11-13 ya no es necesario).
+/// anthropic-version 2023-06-01. Re-verificado contra
+/// platform.claude.com/docs/en/build-with-claude/structured-outputs el 2026-06-17:
+/// la nota de migración dice textualmente "beta headers are no longer required" y
+/// el header legacy structured-outputs-2025-11-13 solo sobrevive por compatibilidad
+/// transitoria. Haiku 4.5 (modelo de este cliente) está en la lista de soportados.
 /// stop_reason "refusal" se mapea a content_filtered para que la cadena haga fallback.
 /// </summary>
 public sealed class AnthropicLlmClient(
