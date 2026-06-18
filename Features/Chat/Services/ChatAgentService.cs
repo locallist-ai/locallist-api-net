@@ -720,9 +720,17 @@ public class ChatAgentService
         return Convert.ToHexString(bytes)[..16].ToLowerInvariant();
     }
 
+    // Lectura tolerante a casing: el slot blob se persiste en PascalCase
+    // (JsonSerializer.Serialize(slots)), pero leerlo case-insensitive evita
+    // perder slots si la forma serializada cambia (p. ej. defaults web camelCase).
+    private static readonly JsonSerializerOptions SlotsReadOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
     private static ChatSlots DeserializeSlots(string json)
     {
-        try { return JsonSerializer.Deserialize<ChatSlots>(json) ?? new(); }
+        try { return JsonSerializer.Deserialize<ChatSlots>(json, SlotsReadOptions) ?? new(); }
         catch { return new(); }
     }
 
