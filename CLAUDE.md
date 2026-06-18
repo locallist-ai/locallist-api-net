@@ -39,6 +39,7 @@ Required User Secrets / Environment Variables:
 - `Anthropic__ApiKey` — opcional. Activa Claude Haiku 4.5 como backup (último por coste).
 - Un provider sin key se omite de la cadena (log en boot). Solo con `Gemini__ApiKey` el comportamiento es el clásico. `chat_turns.ai_provider/model` registran quién respondió realmente.
 - Traducciones, descripciones y embeddings siguen solo-Gemini (fuera de la cadena).
+- `GeminiLlmClient` envía `thinkingConfig.thinkingBudget=0` (slot/preference extraction no razonan; con thinking ON los thinking-tokens truncaban el JSON contra `maxOutputTokens` → `finishReason=MAX_TOKENS` → `invalid_json`) y aplica un suelo `minOutputTokens=1024` (espejo de `reasoning_effort:minimal`+floor del cliente OpenAI). `MAX_TOKENS` se reporta como `truncated`, no `invalid_json`. El id del modelo vive en `Llm:Providers` (campo `Model`); el cliente es agnóstico.
 
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
