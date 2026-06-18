@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Search;
@@ -35,13 +36,53 @@ public class CitiesController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly ILogger<CitiesController> _logger;
+    private readonly ICityCoverageService _coverage;
 
     private const int MinSearchLength = 2;
 
-    public CitiesController(LocalListDbContext db, ILogger<CitiesController> logger)
+    public CitiesController(LocalListDbContext db, ILogger<CitiesController> logger, ICityCoverageService coverage)
     {
         _db = db;
         _logger = logger;
+        _coverage = coverage;
+    }
+
+    /// <summary>
+    /// Ciudades LIVE (allowlist <c>Coverage:LiveCities</c>). La app pinta el
+    /// selector solo con estas; <c>/cities/search</c> sigue sirviendo el registry
+    /// completo (autocomplete) y no debe usarse para el gate de cobertura.
+    ///
+    /// Enriquece cada nombre con su fila seed (Id/country) si existe, pero la
+    /// fuente de verdad es la allowlist, no la tabla: una ciudad LIVE sin fila
+    /// seed igualmente se devuelve (con Id null).
+    /// </summary>
+    [HttpGet("live")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Live(CancellationToken ct)
+    {
+        var liveNames = _coverage.LiveCities;
+        if (liveNames.Count == 0)
+            return Ok(new { cities = Array.Empty<LiveCityDto>() });
+
+        var normalized = liveNames.Select(CityNameNormalizer.Normalize).ToList();
+
+        // Una sola query: trae las filas seed cuyo normalized esté en la allowlist.
+        var seeds = await _db.Cities
+            .Where(c => c.Source == "seed" && normalized.Contains(c.NormalizedName))
+            .ToListAsync(ct);
+
+        var cities = liveNames.Select(name =>
+        {
+            var match = seeds.FirstOrDefault(s => s.NormalizedName == CityNameNormalizer.Normalize(name));
+            return new LiveCityDto
+            {
+                Id = match?.Id,
+                Name = match?.Name ?? name,
+                Country = match?.Country,
+            };
+        }).ToList();
+
+        return Ok(new { cities });
     }
 
     /// <summary>
@@ -190,6 +231,17 @@ public class CityDto
     public string Name { get; set; } = string.Empty;
     public string? Country { get; set; }
     public string Source { get; set; } = "user";
+}
+
+/// <summary>
+/// Ciudad LIVE para el selector de la app. <see cref="Id"/> es nullable: una
+/// ciudad de la allowlist puede no tener fila seed todavía.
+/// </summary>
+public class LiveCityDto
+{
+    public Guid? Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string? Country { get; set; }
 }
 
 public class CreateCityRequest

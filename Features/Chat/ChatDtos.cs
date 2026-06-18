@@ -58,6 +58,8 @@ public class ChatTurnResponse
     public List<ChatQuickReply> QuickReplies { get; set; } = new();
     public bool Ready { get; set; }
     public bool Quarantined { get; set; }
+    /// <summary>True cuando la ciudad pedida no está en la cobertura LIVE: el slot-filling se detiene hasta que se elige una ciudad cubierta.</summary>
+    public bool CityUnsupported { get; set; }
     public int TurnCount { get; set; }
     public int TurnLimit { get; set; } = 6;
 }

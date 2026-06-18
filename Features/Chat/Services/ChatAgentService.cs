@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Shared.Data;
@@ -68,6 +69,7 @@ public class ChatAgentService
     private readonly ChatSecLogger _secLog;
     private readonly IConfiguration _config;
     private readonly PostHogService _posthog;
+    private readonly ICityCoverageService _coverage;
 
     public ChatAgentService(
         LocalListDbContext db,
@@ -75,7 +77,8 @@ public class ChatAgentService
         ILogger<ChatAgentService> logger,
         ChatSecLogger secLog,
         IConfiguration config,
-        PostHogService posthog)
+        PostHogService posthog,
+        ICityCoverageService coverage)
     {
         _db = db;
         _extractor = extractor;
@@ -83,6 +86,7 @@ public class ChatAgentService
         _secLog = secLog;
         _config = config;
         _posthog = posthog;
+        _coverage = coverage;
     }
 
     public async Task<ChatTurnResponse> ProcessTurnAsync(
@@ -109,6 +113,15 @@ public class ChatAgentService
         // ── PreSeededSlots: honor client-supplied city on brand-new sessions only ──
         if (session.TurnCount == 0 && !string.IsNullOrWhiteSpace(preSeededSlots?.City))
         {
+            // Coverage gate: una ciudad de TEST puede existir en la tabla Cities con
+            // places y aun así NO estar cubierta. La allowlist manda sobre la DB.
+            if (!_coverage.IsLive(preSeededSlots.City))
+            {
+                _secLog.CityNotWhitelisted(session.Id, preSeededSlots.City);
+                return await BuildCityUnsupportedResponseAsync(
+                    session, slots, history, suspicion, preSeededSlots.City, lang, ct);
+            }
+
             var normalizedCity = preSeededSlots.City.Trim().ToLowerInvariant();
             var cityExists = await _db.Cities.AnyAsync(c => c.NormalizedName == normalizedCity, ct);
             if (cityExists && string.IsNullOrEmpty(slots.City))
@@ -259,6 +272,16 @@ public class ChatAgentService
             }
         }
 
+        // Coverage gate: si la extracción (o un FavoriteCity de perfil) coló una
+        // ciudad no cubierta, no seguimos el slot-filling — avisamos y ofrecemos
+        // una ciudad LIVE. El slot se limpia para que la sesión siga pidiendo ciudad.
+        if (!string.IsNullOrWhiteSpace(slots.City) && !_coverage.IsLive(slots.City))
+        {
+            _secLog.CityNotWhitelisted(session.Id, slots.City);
+            return await BuildCityUnsupportedResponseAsync(
+                session, slots, history, suspicion, slots.City!, lang, ct);
+        }
+
         suspicion.RecordCleanTurn();
         history.Add(new HistoryEntry { Role = "assistant", Content = aiMessage, Timestamp = DateTimeOffset.UtcNow });
 
@@ -384,6 +407,47 @@ public class ChatAgentService
             MissingCritical = GetMissingCritical(slots),
             QuickReplies = nextSlot != null ? QuickRepliesForSlot(nextSlot, lang) : new(),
             Ready = false,
+            TurnCount = session.TurnCount,
+            TurnLimit = TurnLimit
+        };
+    }
+
+    /// <summary>
+    /// Respuesta cuando la ciudad pedida no está en la cobertura LIVE. Limpia el
+    /// slot de ciudad (la sesión vuelve a "necesita ciudad"), persiste el estado y
+    /// devuelve <c>cityUnsupported=true</c> sin avanzar el slot-filling.
+    /// </summary>
+    private async Task<ChatTurnResponse> BuildCityUnsupportedResponseAsync(
+        ChatSession session, ChatSlots slots, List<HistoryEntry> history,
+        SuspicionTracker suspicion, string attemptedCity, string lang, CancellationToken ct)
+    {
+        slots.City = null;
+
+        var message = OutputSanitizer.Sanitize(
+            ChatStrings.CityUnsupported(lang, attemptedCity, _coverage.LiveCities));
+        history.Add(new HistoryEntry { Role = "assistant", Content = message, Timestamp = DateTimeOffset.UtcNow });
+
+        session.LastTurnAt = DateTimeOffset.UtcNow;
+        session.Status = "active";
+        session.SlotsJson = JsonSerializer.Serialize(slots);
+        session.SuspicionJson = JsonSerializer.Serialize(suspicion);
+        session.HistoryJson = JsonSerializer.Serialize(history.TakeLast(20).ToList());
+        session.LastOfferedChips = Array.Empty<string>();
+        _db.Update(session);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Chat: city not covered sessionId={Session} attempted={City}",
+            session.Id, attemptedCity);
+
+        return new ChatTurnResponse
+        {
+            SessionId = session.Id,
+            AiMessage = message,
+            Slots = slots,
+            MissingCritical = GetMissingCritical(slots),
+            QuickReplies = new(),
+            Ready = false,
+            CityUnsupported = true,
             TurnCount = session.TurnCount,
             TurnLimit = TurnLimit
         };
