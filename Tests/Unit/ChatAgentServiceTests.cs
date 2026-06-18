@@ -254,6 +254,50 @@ public class ChatAgentServiceTests
         Assert.Contains("Miami", msg);
     }
 
+    // ── GetSlots: tolerancia de casing al deserializar (DeserializeSlots) ────
+
+    [Fact]
+    public void GetSlots_CamelCaseSlotsJson_ReadsCityAndSlots()
+    {
+        // El slot blob se persiste en PascalCase, pero la lectura debe tolerar
+        // camelCase (defensa anti data-loss). Sin PropertyNameCaseInsensitive,
+        // City saldría null y el gate de cobertura / generación leerían mal.
+        var session = new ChatSession
+        {
+            SlotsJson = """
+                {"city":"Miami","days":3,"groupType":"couple","categories":["food"],"budget":"moderate"}
+                """
+        };
+
+        var slots = ChatAgentService.GetSlots(session);
+
+        Assert.Equal("Miami", slots.City);
+        Assert.Equal(3, slots.Days);
+        Assert.Equal("couple", slots.GroupType);
+        Assert.Equal(new[] { "food" }, slots.Categories);
+        Assert.Equal("moderate", slots.Budget);
+    }
+
+    [Fact]
+    public void GetSlots_PascalCaseSlotsJson_StillReadsSlots()
+    {
+        // El formato de escritura real (JsonSerializer.Serialize → PascalCase)
+        // sigue funcionando: la tolerancia de casing no rompe el camino normal.
+        var session = new ChatSession
+        {
+            SlotsJson = """
+                {"City":"Sevilla","Days":2,"GroupType":"solo","Categories":["culture"],"Budget":"budget"}
+                """
+        };
+
+        var slots = ChatAgentService.GetSlots(session);
+
+        Assert.Equal("Sevilla", slots.City);
+        Assert.Equal(2, slots.Days);
+        Assert.Equal("solo", slots.GroupType);
+        Assert.Equal("budget", slots.Budget);
+    }
+
     // ── Helper (mirrors ChatAgentService internal logic) ──
 
     private static List<string> GetMissingCritical(ChatSlots slots)

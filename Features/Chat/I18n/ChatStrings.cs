@@ -56,6 +56,26 @@ public static class ChatStrings
         _    => $"Great, let's plan your {city} trip! How many days?"
     };
 
+    /// <summary>
+    /// Aviso cuando la ciudad pedida no está en la cobertura LIVE. Si solo hay
+    /// una ciudad cubierta, ofrece replanificar con ella; si hay varias, lista
+    /// las opciones.
+    /// </summary>
+    public static string CityUnsupported(string lang, string city, IReadOnlyList<string> liveCities)
+    {
+        var single = liveCities.Count == 1 ? liveCities[0] : null;
+        var list = string.Join(", ", liveCities);
+        return lang switch
+        {
+            "es" => single != null
+                ? $"Todavía no cubrimos {city}; de momento solo {single}. ¿Planeamos {single}?"
+                : $"Todavía no cubrimos {city}; de momento cubrimos {list}. ¿Eliges una de estas?",
+            _ => single != null
+                ? $"We don't cover {city} yet; for now only {single}. Shall we plan {single}?"
+                : $"We don't cover {city} yet; for now we cover {list}. Want to pick one of these?"
+        };
+    }
+
     public static string Quarantine(string lang) => lang switch
     {
         "es" => "Esta conversación ha sido reiniciada por seguridad. Prueba el asistente paso a paso.",

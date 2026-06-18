@@ -41,6 +41,9 @@ Required User Secrets / Environment Variables:
 - Traducciones, descripciones y embeddings siguen solo-Gemini (fuera de la cadena).
 - `GeminiLlmClient` envía `thinkingConfig.thinkingBudget=0` (slot/preference extraction no razonan; con thinking ON los thinking-tokens truncaban el JSON contra `maxOutputTokens` → `finishReason=MAX_TOKENS` → `invalid_json`) y aplica un suelo `minOutputTokens=1024` (espejo de `reasoning_effort:minimal`+floor del cliente OpenAI). `MAX_TOKENS` se reporta como `truncated`, no `invalid_json`. El id del modelo vive en `Llm:Providers` (campo `Model`); el cliente es agnóstico.
 
+**Coverage gate (ciudades en vivo)**
+- `Coverage__LiveCities` — allowlist explícita de ciudades expuestas (default `["Miami"]`). Soporta índices (`Coverage__LiveCities__0=Miami`) o escalar separado por comas (`Coverage__LiveCities=Miami,Sevilla`). NO se deriva de "la ciudad tiene places" — hay ciudades de TEST con places que no deben exponerse. Helper central `ICityCoverageService` (impl en `Features/Cities/CityCoverageService.cs`, normaliza con `CityNameNormalizer`). Consumido por `GET /cities/live` (selector de la app), `/chat/turn` (bloquea ciudad no cubierta con `cityUnsupported:true`) y `/chat/generate` (defensa: 400 `city_unsupported` estructurado, no 404 seco).
+
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
 
@@ -123,7 +126,8 @@ LocalList.API.NET/
 │   │       ├── SuspicionTracker.cs         # Trackea sesiones sospechosas (rate de fallos)
 │   │       └── ChatSecLogger.cs            # Log estructurado de eventos de seguridad
 │   ├── Cities/
-│   │   ├── CitiesController.cs         # GET /cities/search, POST /cities
+│   │   ├── CitiesController.cs         # GET /cities/search, GET /cities/live, POST /cities
+│   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
 │   ├── Follow/
 │   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
@@ -174,6 +178,9 @@ LocalList.API.NET/
     ├── Constants/
     │   ├── PlanLimits.cs               # Límites de stops por día, etc.
     │   └── PriceRanges.cs              # Rangos de precio normalizados
+    ├── Coverage/                       # Gate de ciudades en vivo (contrato cross-slice)
+    │   ├── ICityCoverageService.cs      # IsLive(city) + LiveCities (impl en Features/Cities/)
+    │   └── CoverageOptions.cs           # Section name + default allowlist (["Miami"])
     ├── Data/
     │   ├── LocalListDbContext.cs        # EF Core DbContext, entity configs, indices
     │   ├── DesignTimeDbContextFactory.cs
@@ -249,7 +256,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
 | Builder | `POST /builder/chat` |
 | Chat | `POST /chat/turn`, `POST /chat/generate`, `DELETE /chat/session/:id` |
-| Cities | `GET /cities/search`, `POST /cities` |
+| Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Places | `GET /places/`, `GET /places/:id` |
 | Plans | `GET /plans/`, `GET /plans/:id`, `DELETE /plans/:id` |

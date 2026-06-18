@@ -1,10 +1,12 @@
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
 using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.AI.Services;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.PostHog;
 using LocalList.API.NET.Shared.Routing;
@@ -93,6 +95,10 @@ public static class DomainServiceExtensions
             c.BaseAddress = new Uri(configuration["PostHog:Host"] ?? "https://eu.i.posthog.com");
             c.Timeout = TimeSpan.FromSeconds(5);
         });
+
+        // Coverage gate — allowlist de ciudades LIVE (Coverage:LiveCities). Singleton:
+        // la allowlist se resuelve una vez en boot (config fija).
+        services.AddSingleton<ICityCoverageService, CityCoverageService>();
 
         services.AddMemoryCache();
         services.AddScoped<LocalList.API.NET.Shared.Taxonomy.ITaxonomyService, LocalList.API.NET.Shared.Taxonomy.TaxonomyService>();

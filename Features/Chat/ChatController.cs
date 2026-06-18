@@ -4,7 +4,9 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using LocalList.API.NET.Shared.AI.Services;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Dtos;
+using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
@@ -36,19 +38,22 @@ public class ChatController : ControllerBase
     private readonly IPlanGenerationService _planGen;
     private readonly ILogger<ChatController> _logger;
     private readonly PostHogService _posthog;
+    private readonly ICityCoverageService _coverage;
 
     public ChatController(
         ChatAgentService agent,
         LocalListDbContext db,
         IPlanGenerationService planGen,
         ILogger<ChatController> logger,
-        PostHogService posthog)
+        PostHogService posthog,
+        ICityCoverageService coverage)
     {
         _agent = agent;
         _db = db;
         _planGen = planGen;
         _logger = logger;
         _posthog = posthog;
+        _coverage = coverage;
     }
 
     /// <summary>
@@ -178,6 +183,22 @@ public class ChatController : ControllerBase
         var tripContext = ChatAgentService.SlotsToTripContext(slots);
         var summaryMessage = ChatAgentService.BuildSummaryMessage(slots);
         var lang = LanguageAccessor.ResolveRequestLanguage(Request);
+
+        // Defensa de cobertura: /chat/turn ya debería haber bloqueado las ciudades
+        // no cubiertas, pero si una sesión llega aquí con una (prefill antiguo, etc.)
+        // respondemos estructurado y amable en vez de un 404 seco de "no places".
+        if (!_coverage.IsLive(slots.City))
+        {
+            _logger.LogInformation("Chat: generate blocked, city not covered sessionId={Session} city={City}",
+                session.Id, slots.City ?? "(null)");
+            return BadRequest(new
+            {
+                error = "city_unsupported",
+                message = ChatStrings.CityUnsupported(lang, slots.City ?? string.Empty, _coverage.LiveCities),
+                city = slots.City,
+                liveCities = _coverage.LiveCities,
+            });
+        }
 
         _logger.LogInformation(
             "Chat: generate sessionId={Session} city={City} days={Days} summary='{Summary}'",
