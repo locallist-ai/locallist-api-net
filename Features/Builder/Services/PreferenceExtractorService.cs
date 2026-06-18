@@ -42,7 +42,7 @@ public class PreferenceExtractorService
         var prompt = BuildPrompt(message, context, lang);
 
         var response = await _llm.GenerateJsonAsync(
-            new LlmJsonRequest(prompt, Temperature: 0.3, MaxOutputTokens: 300), ct);
+            new LlmJsonRequest(prompt, Temperature: 0.3, MaxOutputTokens: 512), ct);
 
         if (!response.Succeeded)
         {

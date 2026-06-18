@@ -15,26 +15,37 @@ public sealed class GeminiLlmClient(
     HttpClient httpClient,
     string apiKey,
     string model,
-    ILogger logger) : ILlmClient
+    ILogger logger,
+    int minOutputTokens = 0) : ILlmClient
 {
     public string ProviderName => "gemini";
     public string Model => model;
 
     public async Task<LlmJsonResponse> GenerateJsonAsync(LlmJsonRequest request, CancellationToken ct = default)
     {
+        // gemini-2.5-flash trae thinking ON por defecto y los thinking-tokens cuentan
+        // contra maxOutputTokens: con budgets pequeños el JSON sale truncado
+        // (finishReason=MAX_TOKENS). thinkingBudget=0 desactiva el razonamiento (slot y
+        // preference extraction no lo necesitan) y el suelo minOutputTokens da holgura,
+        // espejo del reasoning_effort:minimal + minOutputTokens del cliente OpenAI.
+        var maxTokens = Math.Max(request.MaxOutputTokens, minOutputTokens);
+        var thinkingConfig = new { thinkingBudget = 0 };
+
         object generationConfig = request.JsonSchema is { } schema
             ? new
             {
                 temperature = request.Temperature,
-                maxOutputTokens = request.MaxOutputTokens,
+                maxOutputTokens = maxTokens,
                 responseMimeType = "application/json",
                 responseSchema = schema,
+                thinkingConfig,
             }
             : new
             {
                 temperature = request.Temperature,
-                maxOutputTokens = request.MaxOutputTokens,
+                maxOutputTokens = maxTokens,
                 responseMimeType = "application/json",
+                thinkingConfig,
             };
 
         var requestBody = new
@@ -83,6 +94,22 @@ public sealed class GeminiLlmClient(
             }
 
             var totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (thinkingTokens ?? 0);
+
+            // Truncación: MAX_TOKENS deja el JSON cortado. Devolver un fallo explícito
+            // "truncated" (en vez de dejar que TryCleanJson lo reporte como invalid_json
+            // genérico) hace el diagnóstico legible y deja claro que el siguiente provider
+            // debe intentarlo. Con thinkingBudget=0 + suelo de tokens esto ya no debería
+            // dispararse, pero queda como defensa.
+            if (finishReason == "MAX_TOKENS")
+            {
+                logger.LogWarning(
+                    "LLM[gemini]: response truncated (MAX_TOKENS) out={Out} thinking={Think} max={Max}",
+                    outputTokens, thinkingTokens, maxTokens);
+                return Failure(request, LlmDiagnostics.TruncateResponse(responseJson), latencyMs,
+                    (int)response.StatusCode, "truncated",
+                    $"Response truncated (finishReason=MAX_TOKENS, outputTokens={outputTokens}, thinkingTokens={thinkingTokens})",
+                    finishReason, inputTokens, outputTokens, thinkingTokens);
+            }
 
             // parts puede venir vacío en respuestas filtradas por SAFETY.
             string? text = null;

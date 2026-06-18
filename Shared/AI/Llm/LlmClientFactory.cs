@@ -29,7 +29,7 @@ public static class LlmClientFactory
 
             ILlmClient? client = entry.Name.ToLowerInvariant() switch
             {
-                "gemini" => new GeminiLlmClient(http, apiKey, entry.Model, logger),
+                "gemini" => new GeminiLlmClient(http, apiKey, entry.Model, logger, minOutputTokens: 1024),
                 "openai" => new OpenAiCompatibleLlmClient(
                     http, apiKey, "openai", entry.BaseUrl ?? "https://api.openai.com/v1", entry.Model, logger,
                     usesMaxCompletionTokens: true, supportsTemperature: false,

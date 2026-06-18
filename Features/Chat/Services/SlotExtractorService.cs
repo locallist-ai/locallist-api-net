@@ -47,7 +47,7 @@ public class SlotExtractorService
         var prompt = BuildPrompt(sanitizedMessage, currentSlots, recentHistory, lang);
 
         var response = await _llm.GenerateJsonAsync(
-            new LlmJsonRequest(prompt, Temperature: 0.2, MaxOutputTokens: 200), ct);
+            new LlmJsonRequest(prompt, Temperature: 0.2, MaxOutputTokens: 512), ct);
 
         if (!response.Succeeded)
             return (null, response.Diagnostics);

@@ -17,8 +17,8 @@ public class GeminiLlmClientTests
         }
         """;
 
-    private static GeminiLlmClient Client(HttpMessageHandler handler) =>
-        new(new HttpClient(handler), "test-key", "gemini-2.5-flash", NullLogger.Instance);
+    private static GeminiLlmClient Client(HttpMessageHandler handler, int minOutputTokens = 0) =>
+        new(new HttpClient(handler), "test-key", "gemini-2.5-flash", NullLogger.Instance, minOutputTokens);
 
     [Fact]
     public async Task RequestShape_UsesGoogApiKeyHeaderAndGenerationConfig()
@@ -41,6 +41,66 @@ public class GeminiLlmClientTests
         Assert.Equal("application/json", generationConfig.GetProperty("responseMimeType").GetString());
         // Sin JsonSchema en la request no se envía responseSchema (JSON pedido por mimeType).
         Assert.False(generationConfig.TryGetProperty("responseSchema", out _));
+    }
+
+    [Fact]
+    public async Task RequestShape_DisablesThinking_WithThinkingBudgetZero()
+    {
+        // gemini-2.5-flash trae thinking ON por defecto; thinkingBudget=0 lo desactiva
+        // para que los thinking-tokens no truncen el JSON contra maxOutputTokens.
+        var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
+        await Client(handler).GenerateJsonAsync(Request);
+
+        using var body = JsonDocument.Parse(handler.LastRequestBody!);
+        var thinking = body.RootElement.GetProperty("generationConfig").GetProperty("thinkingConfig");
+        Assert.Equal(0, thinking.GetProperty("thinkingBudget").GetInt32());
+    }
+
+    [Fact]
+    public async Task MinOutputTokens_FloorsMaxOutputTokens()
+    {
+        // Request pide 200, pero el suelo (1024) gana — espejo del cliente OpenAI.
+        var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
+        await Client(handler, minOutputTokens: 1024).GenerateJsonAsync(Request);
+
+        using var body = JsonDocument.Parse(handler.LastRequestBody!);
+        var maxOutputTokens = body.RootElement.GetProperty("generationConfig")
+            .GetProperty("maxOutputTokens").GetInt32();
+        Assert.Equal(1024, maxOutputTokens);
+    }
+
+    [Fact]
+    public async Task MinOutputTokens_DoesNotLowerLargerRequest()
+    {
+        // Si la request pide más que el suelo, se respeta la request.
+        var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
+        await Client(handler, minOutputTokens: 1024).GenerateJsonAsync(Request with { MaxOutputTokens = 2048 });
+
+        using var body = JsonDocument.Parse(handler.LastRequestBody!);
+        var maxOutputTokens = body.RootElement.GetProperty("generationConfig")
+            .GetProperty("maxOutputTokens").GetInt32();
+        Assert.Equal(2048, maxOutputTokens);
+    }
+
+    [Fact]
+    public async Task MaxTokensFinishReason_MapsToTruncatedNotInvalidJson()
+    {
+        // JSON cortado por MAX_TOKENS: fallo explícito "truncated", no se entrega como éxito
+        // ni se deja a TryCleanJson reportarlo como invalid_json genérico.
+        const string truncated = """
+            {
+              "candidates": [{"content": {"parts": [{"text": "{\"city\":\"Mia"}]}, "finishReason": "MAX_TOKENS"}],
+              "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 512, "thoughtsTokenCount": 480}
+            }
+            """;
+        var handler = new CapturingHandler(HttpStatusCode.OK, truncated);
+        var response = await Client(handler).GenerateJsonAsync(Request);
+
+        Assert.False(response.Succeeded);
+        Assert.Equal("truncated", response.Diagnostics.ErrorCode);
+        Assert.Equal("MAX_TOKENS", response.Diagnostics.FinishReason);
+        Assert.Equal(512, response.Diagnostics.OutputTokens);
+        Assert.Equal(480, response.Diagnostics.ThinkingTokens);
     }
 
     [Fact]
