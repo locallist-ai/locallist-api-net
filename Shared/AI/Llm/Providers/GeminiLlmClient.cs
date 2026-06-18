@@ -73,9 +73,13 @@ public sealed class GeminiLlmClient(
 
             if (!response.IsSuccessStatusCode)
             {
+                // El motivo real (cuota/429, modelo inválido…) vive en el body. Lo guardamos
+                // redactado y recortado en ErrorMessage para diagnóstico admin; el log se queda
+                // en el status para no derramar PII a los logs. La API key va en headers, no aquí.
                 logger.LogError("LLM[gemini]: API returned {Status}", (int)response.StatusCode);
+                var errorBody = PiiRedactor.Redact(LlmDiagnostics.TruncateErrorBody(responseJson));
                 return Failure(request, LlmDiagnostics.TruncateResponse(responseJson), latencyMs,
-                    (int)response.StatusCode, "http_error", $"HTTP {(int)response.StatusCode}");
+                    (int)response.StatusCode, "http_error", $"HTTP {(int)response.StatusCode}: {errorBody}");
             }
 
             using var doc = JsonDocument.Parse(responseJson);

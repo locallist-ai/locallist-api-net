@@ -111,6 +111,38 @@ public class ChatObservabilityTests(ApiFixture fixture) : IClassFixture<ApiFixtu
     }
 
     [Fact]
+    public async Task Turn_GeminiFailure_CapturesRedactedErrorBodyInErrorMessage()
+    {
+        await EnsureMiamiCity();
+
+        // 429 con cuerpo de cuota: el motivo real debe quedar en chat_turns.error_message
+        // (truncado + redactado), no solo el status. Esto es lo que ve el admin.
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent(
+                "{\"error\":{\"code\":429,\"message\":\"Quota exceeded for quota metric 'generate_requests'\",\"status\":\"RESOURCE_EXHAUSTED\"}}",
+                Encoding.UTF8, "application/json")
+        };
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new { message = "I want to visit restaurants" });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        var db = fixture.GetDbContext();
+        var turn = await db.ChatTurns
+            .OrderByDescending(t => t.CreatedAt)
+            .FirstOrDefaultAsync();
+
+        Assert.NotNull(turn);
+        Assert.Equal("http_error", turn!.ErrorCode);
+        Assert.Equal(429, turn.GeminiStatus);
+        Assert.NotNull(turn.ErrorMessage);
+        // El body real (cuota) queda consultable, no solo "HTTP 429".
+        Assert.Contains("Quota exceeded", turn.ErrorMessage!);
+        Assert.Contains("RESOURCE_EXHAUSTED", turn.ErrorMessage!);
+    }
+
+    [Fact]
     public async Task Turn_PiiInUserMessage_IsRedactedInChatTurn()
     {
         await EnsureMiamiCity();

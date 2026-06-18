@@ -14,6 +14,16 @@ public static class ChatStrings
         _    => "Sorry, I didn't catch that. Could you rephrase?"
     };
 
+    /// <summary>
+    /// Fallo de infraestructura de la cadena LLM (no un "no te he entendido" legítimo).
+    /// Mensaje genérico: no expone provider, status ni detalles internos.
+    /// </summary>
+    public static string AiUnavailable(string lang) => lang switch
+    {
+        "es" => "Ahora mismo no puedo procesar tu mensaje, inténtalo en un momento.",
+        _    => "I can't process your message right now, please try again in a moment."
+    };
+
     public static string OffTopicRedirect(string lang, string nextQuestion) => lang switch
     {
         "es" => $"Centrémonos en tu viaje. {nextQuestion}",

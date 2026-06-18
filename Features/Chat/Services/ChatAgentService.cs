@@ -231,6 +231,7 @@ public class ChatAgentService
         string aiMessage;
         SlotExtractorResult? extracted = null;
         AiCallDiagnostics? aiDiagnostics = null;
+        var aiUnavailable = false;
         var preTurnSlotsJson = session.SlotsJson; // capture before merge for context_signals
 
         if (suspicion.ShouldSuppressGemini)
@@ -243,7 +244,19 @@ public class ChatAgentService
 
             if (extracted == null)
             {
-                aiMessage = ChatStrings.ParseFallback(lang);
+                // Distinguir un fallo real de la cadena LLM (ErrorCode poblado: http_error,
+                // timeout, truncated, provider_error, parse_error…) de un "no te he entendido"
+                // legítimo (cadena OK pero el modelo no devolvió slots parseables). El fallo de
+                // infra da un mensaje genérico de indisponibilidad + flag, sin exponer detalles.
+                if (aiDiagnostics?.ErrorCode != null)
+                {
+                    aiUnavailable = true;
+                    aiMessage = ChatStrings.AiUnavailable(lang);
+                }
+                else
+                {
+                    aiMessage = ChatStrings.ParseFallback(lang);
+                }
             }
             else
             {
@@ -318,7 +331,8 @@ public class ChatAgentService
         }
 
         return await BuildResponseAsync(session, slots, history, suspicion, aiMessage, lang, ct,
-            geminiQuickReplies: extracted?.QuickReplies);
+            geminiQuickReplies: extracted?.QuickReplies,
+            error: aiUnavailable ? "ai_unavailable" : null);
     }
 
     // ── Private helpers ──
@@ -331,24 +345,34 @@ public class ChatAgentService
         string? aiMessage,
         string lang,
         CancellationToken ct,
-        List<ChatQuickReply>? geminiQuickReplies = null)
+        List<ChatQuickReply>? geminiQuickReplies = null,
+        string? error = null)
     {
         var missing = GetMissingCritical(slots);
         var ready = missing.Count == 0;
 
         List<ChatQuickReply> quickReplies = geminiQuickReplies ?? new();
 
-        if (ready && !AreAllTier2Filled(slots) && quickReplies.Count == 0)
+        if (error == null)
         {
-            (aiMessage, quickReplies) = BuildTier2Question(slots, lang);
+            if (ready && !AreAllTier2Filled(slots) && quickReplies.Count == 0)
+            {
+                (aiMessage, quickReplies) = BuildTier2Question(slots, lang);
+                ready = false;
+            }
+            else if (ready && quickReplies.Count == 0)
+            {
+                aiMessage ??= ChatStrings.ReadyToBuild(lang);
+            }
+
+            if (session.TurnCount + 1 >= TurnLimit) ready = true;
+        }
+        else
+        {
+            // Fallo de infra: no avanzar a ready/tier2 ni forzar ready por turn cap;
+            // conservar el mensaje genérico de indisponibilidad.
             ready = false;
         }
-        else if (ready && quickReplies.Count == 0)
-        {
-            aiMessage ??= ChatStrings.ReadyToBuild(lang);
-        }
-
-        if (session.TurnCount + 1 >= TurnLimit) ready = true;
 
         // L6: sanitize aiMessage before persisting and returning
         aiMessage = OutputSanitizer.Sanitize(aiMessage ?? ChatStrings.GreetingNoCity(lang));
@@ -391,6 +415,7 @@ public class ChatAgentService
             MissingCritical = missing,
             QuickReplies = quickReplies.Take(4).ToList(),
             Ready = ready,
+            Error = error,
             TurnCount = session.TurnCount,
             TurnLimit = TurnLimit
         };

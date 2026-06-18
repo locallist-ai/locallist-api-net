@@ -19,6 +19,7 @@ public record AdminChatTurnDto(
     decimal? CostUsd,
     int? GeminiStatus,
     string? ErrorCode,
+    string? ErrorMessage,
     short? SlotCompleteness);
 
 public record AdminChatTurnsListResponse(

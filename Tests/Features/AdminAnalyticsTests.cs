@@ -61,6 +61,32 @@ public class AdminAnalyticsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task ChatTurns_List_ExposesErrorMessage()
+    {
+        // El motivo real del fallo (body redactado del provider) debe ser consultable
+        // por el admin vía el DTO, no solo el código de error.
+        var marker = $"HTTP 429: quota-{Guid.NewGuid():N}";
+        var db = fixture.GetDbContext();
+        db.ChatTurns.Add(new ChatTurn
+        {
+            Id = Guid.NewGuid(), TurnIndex = 0, AiProvider = "gemini",
+            Model = "gemini-2.5-flash", PromptVersion = "slot-v1",
+            PromptChars = 50, LatencyMs = 200, GeminiStatus = 429,
+            ErrorCode = "http_error", ErrorMessage = marker
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var res = await client.GetAsync("/admin/analytics/chat-turns?hasError=true&limit=200");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        var turns = body.GetProperty("turns").EnumerateArray().ToList();
+        Assert.Contains(turns, t =>
+            t.TryGetProperty("errorMessage", out var em) && em.GetString() == marker);
+    }
+
+    [Fact]
     public async Task ChatTurns_List_RequiresAdmin()
     {
         var client = fixture.CreateClient();

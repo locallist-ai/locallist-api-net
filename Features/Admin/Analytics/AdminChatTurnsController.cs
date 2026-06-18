@@ -54,7 +54,7 @@ public class AdminChatTurnsController : ControllerBase
                 t.AiProvider, t.Model, t.PromptVersion, t.PromptChars,
                 t.FinishReason, t.LatencyMs, t.InputTokens, t.OutputTokens,
                 t.ThinkingTokens, t.TotalTokens, t.CostUsd, t.GeminiStatus,
-                t.ErrorCode, t.SlotCompleteness))
+                t.ErrorCode, t.ErrorMessage, t.SlotCompleteness))
             .ToListAsync(ct);
 
         return Ok(new AdminChatTurnsListResponse(turns, total, limit, offset));

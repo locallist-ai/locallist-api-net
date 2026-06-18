@@ -60,6 +60,8 @@ public class ChatTurnResponse
     public bool Quarantined { get; set; }
     /// <summary>True cuando la ciudad pedida no está en la cobertura LIVE: el slot-filling se detiene hasta que se elige una ciudad cubierta.</summary>
     public bool CityUnsupported { get; set; }
+    /// <summary>Código de error de cara al cliente cuando un fallo de infra impide procesar el turno (p. ej. "ai_unavailable"). Null en operación normal (se omite del JSON).</summary>
+    public string? Error { get; set; }
     public int TurnCount { get; set; }
     public int TurnLimit { get; set; } = 6;
 }
