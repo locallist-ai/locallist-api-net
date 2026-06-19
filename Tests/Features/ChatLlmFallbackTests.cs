@@ -141,7 +141,7 @@ public class ChatLlmFallbackTests(ApiFixture fixture) : IClassFixture<ApiFixture
         var turn = await db.ChatTurns.OrderByDescending(t => t.CreatedAt).FirstOrDefaultAsync();
         Assert.NotNull(turn);
         Assert.Equal("gemini", turn.AiProvider);
-        Assert.Equal("gemini-2.5-flash", turn.Model);
+        Assert.Equal("gemini-3.1-flash-lite", turn.Model);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
