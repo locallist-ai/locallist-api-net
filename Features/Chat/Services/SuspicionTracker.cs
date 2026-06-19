@@ -11,6 +11,15 @@ public class SuspicionTracker
     public const int QuarantineThreshold = 80;
     public const int SuppressGeminiThreshold = 50;
 
+    /// <summary>
+    /// Mínimo de intentos de injection genuinos para quarantinear. Evita el falso
+    /// positivo de un usuario normal que acumula score con preguntas off-topic (benignas,
+    /// +10) y una sola frase que dispara un patrón de injection: off-topic NUNCA debe, por
+    /// sí solo o con un único falso positivo, quarantinear. Un ataque real de injection
+    /// (3 patrones → 90) sigue quarantineándose igual que antes.
+    /// </summary>
+    public const int MinInjectionsToQuarantine = 2;
+
     // Score deltas
     public const int InjectionDelta = 30;
     public const int OffTopicDelta = 10;
@@ -22,6 +31,7 @@ public class SuspicionTracker
     public int InjectionAttempts { get; set; }
     public int OffTopicCount { get; set; }
     public int DriftCount { get; set; }
+    public int CanaryLeaks { get; set; }
     public DateTimeOffset? FirstSuspicionAt { get; set; }
     public string? LastTrigger { get; set; }
 
@@ -52,6 +62,7 @@ public class SuspicionTracker
     public void RecordCanaryLeak()
     {
         Score += CanaryLeakDelta;
+        CanaryLeaks++;
         FirstSuspicionAt ??= DateTimeOffset.UtcNow;
         LastTrigger = "canary_leak";
     }
@@ -61,6 +72,15 @@ public class SuspicionTracker
         Score = Math.Max(0, Score + CleanTurnDecay);
     }
 
-    public bool ShouldQuarantine => Score >= QuarantineThreshold;
+    /// <summary>
+    /// Quarantine ante una fuga de canary (señal definitiva: el modelo reflejó el system
+    /// prompt) o ante injection sostenida (score alto Y al menos
+    /// <see cref="MinInjectionsToQuarantine"/> intentos genuinos). El off-topic sube el
+    /// score (suprime Gemini para ahorrar tokens) pero no quarantinea por sí solo.
+    /// </summary>
+    public bool ShouldQuarantine =>
+        CanaryLeaks > 0
+        || (Score >= QuarantineThreshold && InjectionAttempts >= MinInjectionsToQuarantine);
+
     public bool ShouldSuppressGemini => Score >= SuppressGeminiThreshold;
 }
