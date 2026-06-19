@@ -465,18 +465,31 @@ public class ChatSecurityTests
     }
 
     [Fact]
-    public void SuspicionTracker_MultiTurnBuildup_EvenIfEachAloneIsBelow()
+    public void SuspicionTracker_OffTopicBuildupPlusSingleInjection_DoesNotQuarantine()
     {
+        // Falso positivo a evitar: off-topic (benigno) sube el score, pero una SOLA frase
+        // que dispara un patrón de injection no debe quarantinear a un usuario normal.
         var tracker = new SuspicionTracker();
-        // 5 off-topic messages (10 each) + 1 hypothetical (counted as injection = 30)
-        tracker.RecordOffTopic();  // 10
-        tracker.RecordOffTopic();  // 20
-        tracker.RecordOffTopic();  // 30
-        tracker.RecordOffTopic();  // 40
-        tracker.RecordOffTopic();  // 50 → should suppress Gemini
+        for (var i = 0; i < 5; i++) tracker.RecordOffTopic(); // 50 → suprime Gemini
         Assert.True(tracker.ShouldSuppressGemini);
-        tracker.RecordInjection("hypothetical"); // 80 → quarantine
+
+        tracker.RecordInjection("hypothetical"); // score 80 pero solo 1 injection
+        Assert.False(tracker.ShouldQuarantine);
+
+        tracker.RecordInjection("persona"); // 2ª injection genuina (>= umbral) → quarantine
         Assert.True(tracker.ShouldQuarantine);
+    }
+
+    [Fact]
+    public void SuspicionTracker_SingleInjectionAtThreshold_DoesNotQuarantine()
+    {
+        // Score puede llegar al umbral con padding de off-topic, pero con < 2 injections
+        // genuinas no se quarantinea (sí se suprime Gemini).
+        var tracker = new SuspicionTracker();
+        for (var i = 0; i < 5; i++) tracker.RecordOffTopic(); // 50
+        tracker.RecordInjection("a");                          // 80, attempts=1
+        Assert.True(tracker.Score >= SuspicionTracker.QuarantineThreshold);
+        Assert.False(tracker.ShouldQuarantine);
     }
 
     // ── Edge cases ────────────────────────────────────────────────────────────

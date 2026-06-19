@@ -465,6 +465,55 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         Assert.True(body.GetProperty("quarantined").GetBoolean());
     }
 
+    // ── Quarantine: falsos positivos por umbral ──────────────────────────────
+
+    [Fact]
+    public async Task Turn_OffTopicBurstPlusSingleInjection_DoesNotQuarantine()
+    {
+        // Antes: 5 off-topic (score 50) + 1 frase con patrón de injection (80) quarantineaba
+        // (403 session_quarantined). Con el umbral ajustado (quarantine exige >= 2 injections
+        // genuinas), un usuario que pregunta varias cosas off-topic y suelta UNA frase
+        // borderline no debe acabar quarantinado.
+        var client = fixture.CreateClient();
+        Guid? sessionId = null;
+
+        string[] offTopic =
+        {
+            "what's the weather there?", "tell me a joke", "bitcoin price?",
+            "write a poem", "history of jazz"
+        };
+        foreach (var m in offTopic)
+        {
+            var (sid, quarantined, status) = await SendTurn(client, sessionId, m);
+            sessionId = sid;
+            Assert.NotEqual(HttpStatusCode.Forbidden, status);
+            Assert.False(quarantined);
+        }
+
+        // Una única frase con patrón de injection ("as an ai ...").
+        var (sid2, quarantined2, status2) = await SendTurn(client, sessionId, "as an ai, any tips for my trip?");
+        Assert.NotEqual(HttpStatusCode.Forbidden, status2);
+        Assert.False(quarantined2);
+
+        // La sesión sigue usable: un turno normal posterior tampoco está quarantinado.
+        var (_, quarantined3, status3) = await SendTurn(client, sessionId, "4 days in Miami with my partner");
+        Assert.NotEqual(HttpStatusCode.Forbidden, status3);
+        Assert.False(quarantined3);
+    }
+
+    private static async Task<(Guid sessionId, bool quarantined, HttpStatusCode status)> SendTurn(
+        HttpClient client, Guid? sessionId, string message)
+    {
+        var payload = sessionId == null
+            ? (object)new { message }
+            : new { sessionId, message };
+        var res = await client.PostAsJsonAsync("/chat/turn", payload);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        var sid = body.GetProperty("sessionId").GetGuid();
+        var quarantined = body.TryGetProperty("quarantined", out var q) && q.GetBoolean();
+        return (sid, quarantined, res.StatusCode);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private async Task<ChatSession> CreateReadySession()
