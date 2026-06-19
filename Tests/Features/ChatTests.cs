@@ -397,9 +397,32 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
     }
 
     [Fact]
-    public async Task Turn_SpanishLocale_GeminiFailure_ParseFallbackInSpanish()
+    public async Task Turn_ChainFailure_ReturnsAiUnavailableNotParseFallback()
     {
-        // Force Gemini to return a non-JSON response → triggers ParseFallback
+        // La cadena LLM cae (503) → mensaje genérico de indisponibilidad + error:"ai_unavailable",
+        // NO el "Sorry, I didn't catch that" (reservado para input legítimamente no entendido).
+        fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+        {
+            Content = new StringContent("{\"error\":{\"message\":\"backend overloaded\"}}", Encoding.UTF8, "application/json")
+        };
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn", new { message = "I want to visit restaurants" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("ai_unavailable", body.GetProperty("error").GetString());
+        var aiMsg = body.GetProperty("aiMessage").GetString()!;
+        Assert.DoesNotContain("didn't catch", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("can't process", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.False(body.GetProperty("ready").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Turn_SpanishLocale_ChainFailure_AiUnavailableInSpanish()
+    {
+        // Fallo de infra de la cadena (500) → mensaje de indisponibilidad en español + flag
+        // error:"ai_unavailable", NO el "no te he entendido" (ParseFallback) ni el inglés.
         fixture.FakeGemini.Responder = _ => new HttpResponseMessage(HttpStatusCode.InternalServerError);
 
         var client = fixture.CreateClient();
@@ -409,11 +432,12 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
 
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("ai_unavailable", body.GetProperty("error").GetString());
         var aiMsg = body.GetProperty("aiMessage").GetString();
         Assert.NotNull(aiMsg);
-        // Spanish fallback must not be the English default
-        Assert.DoesNotContain("Sorry", aiMsg, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("didn't catch", aiMsg, StringComparison.OrdinalIgnoreCase);
+        // No es el "no te he entendido" legítimo ni la variante inglesa.
+        Assert.DoesNotContain("no te he entendido", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("I can't process", aiMsg, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

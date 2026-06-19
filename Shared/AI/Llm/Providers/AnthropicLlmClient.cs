@@ -64,9 +64,12 @@ public sealed class AnthropicLlmClient(
 
             if (!response.IsSuccessStatusCode)
             {
+                // Body redactado + recortado en ErrorMessage para diagnóstico admin (cuota/429,
+                // etc.); el log se queda en el status. La API key va en headers, no en el body.
                 logger.LogError("LLM[anthropic]: API returned {Status}", (int)response.StatusCode);
+                var errorBody = PiiRedactor.Redact(LlmDiagnostics.TruncateErrorBody(responseJson));
                 return Failure(request, LlmDiagnostics.TruncateResponse(responseJson), latencyMs,
-                    (int)response.StatusCode, "http_error", $"HTTP {(int)response.StatusCode}");
+                    (int)response.StatusCode, "http_error", $"HTTP {(int)response.StatusCode}: {errorBody}");
             }
 
             using var doc = JsonDocument.Parse(responseJson);

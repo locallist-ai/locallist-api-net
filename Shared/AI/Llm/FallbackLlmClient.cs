@@ -103,10 +103,17 @@ public sealed class FallbackLlmClient(
             ErrorMessage: "All providers skipped (circuits open)");
 
         logger.LogError("LLM chain: all providers failed: {Errors}", string.Join("; ", attemptErrors));
+        var summary = string.Join("; ", attemptErrors);
+        // Conservar el detalle del último intento (body redactado del provider, que trae
+        // error.message/quotaId) junto al resumen, para que el motivo real quede consultable
+        // en chat_turns.error_message y no solo el código compacto por provider.
+        var lastDetail = lastDiag.ErrorMessage;
         return new LlmJsonResponse(null, lastDiag with
         {
             Attempt = attempt,
-            ErrorMessage = string.Join("; ", attemptErrors),
+            ErrorMessage = !string.IsNullOrEmpty(lastDetail) && lastDetail != summary
+                ? $"{summary} | last: {lastDetail}"
+                : summary,
         });
     }
 
