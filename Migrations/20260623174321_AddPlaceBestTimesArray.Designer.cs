@@ -5,6 +5,7 @@ using System.Text.Json;
 using LocalList.API.NET.Shared.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -14,9 +15,11 @@ using Pgvector;
 namespace LocalList.API.NET.Migrations
 {
     [DbContext(typeof(LocalListDbContext))]
-    partial class LocalListDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260623174321_AddPlaceBestTimesArray")]
+    partial class AddPlaceBestTimesArray
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -339,6 +342,15 @@ namespace LocalList.API.NET.Migrations
                     b.Property<JsonDocument>("BestForI18n")
                         .HasColumnType("jsonb")
                         .HasColumnName("best_for_i18n");
+
+                    b.Property<string>("BestTime")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("best_time");
+
+                    b.Property<JsonDocument>("BestTimeI18n")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("best_time_i18n");
 
                     b.PrimitiveCollection<List<string>>("BestTimes")
                         .HasColumnType("text[]")

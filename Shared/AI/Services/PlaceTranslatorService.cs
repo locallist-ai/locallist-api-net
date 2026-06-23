@@ -32,9 +32,9 @@ public class PlaceTranslatorService : IPlaceTranslatorService
 
         var bestForJson = place.BestFor is { Count: > 0 } ? JsonSerializer.Serialize(place.BestFor) : "[]";
         var suitableForJson = place.SuitableFor is { Count: > 0 } ? JsonSerializer.Serialize(place.SuitableFor) : "[]";
+        var bestTimesJson = place.BestTimes is { Count: > 0 } ? JsonSerializer.Serialize(place.BestTimes) : "[]";
         var eName = EscapeJson(place.Name);
         var eWhy = EscapeJson(place.WhyThisPlace);
-        var eBestTime = EscapeJson(place.BestTime ?? string.Empty);
         var eNeighborhood = EscapeJson(place.Neighborhood ?? string.Empty);
         var subcategoriesJson = place.Subcategories is { Count: > 0 }
             ? JsonSerializer.Serialize(place.Subcategories)
@@ -48,14 +48,14 @@ public class PlaceTranslatorService : IPlaceTranslatorService
               Pinecrest, Little Havana, Edgewater, Design District), cuisine names (Cuban, Peruvian,
               American, Italian), and any value of "name" in the input.
             - Maintain an editorial, inspiring, first-person-plural travel tone.
-            - subcategories, bestFor and suitableFor must remain as JSON arrays of strings.
+            - subcategories, bestTimes, bestFor and suitableFor must remain as JSON arrays of strings.
             - Return ONLY valid JSON with the exact keys shown below. No extra text.
 
             Input:
             {
               "name": "{{eName}}",
               "whyThisPlace": "{{eWhy}}",
-              "bestTime": "{{eBestTime}}",
+              "bestTimes": {{bestTimesJson}},
               "neighborhood": "{{eNeighborhood}}",
               "subcategories": {{subcategoriesJson}},
               "bestFor": {{bestForJson}},
@@ -66,7 +66,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             {
               "name": "...",
               "whyThisPlace": "...",
-              "bestTime": "...",
+              "bestTimes": [...],
               "neighborhood": "...",
               "subcategories": [...],
               "bestFor": [...],
@@ -109,7 +109,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             return new PlaceTranslationDraft(
                 Name: GetStr(root, "name"),
                 WhyThisPlace: GetStr(root, "whyThisPlace"),
-                BestTime: GetStr(root, "bestTime"),
+                BestTimes: GetStrList(root, "bestTimes"),
                 Neighborhood: GetStr(root, "neighborhood"),
                 Subcategories: GetStrList(root, "subcategories"),
                 BestFor: GetStrList(root, "bestFor"),
@@ -230,7 +230,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
 public record PlaceTranslationDraft(
     string? Name,
     string? WhyThisPlace,
-    string? BestTime,
+    List<string>? BestTimes,
     string? Neighborhood,
     List<string>? Subcategories,
     List<string>? BestFor,

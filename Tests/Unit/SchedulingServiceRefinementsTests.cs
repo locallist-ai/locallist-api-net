@@ -21,7 +21,7 @@ public class SchedulingServiceRefinementsTests
         Category = category,
         City = "Miami",
         Status = "published",
-        BestTime = "any",
+        BestTimes = new List<string> { "any" },
         WhyThisPlace = "Test",
         SuitableFor = suitableFor,
         GooglePlaceId = Guid.NewGuid().ToString("N")[..20],

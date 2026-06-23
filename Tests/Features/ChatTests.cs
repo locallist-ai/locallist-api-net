@@ -551,7 +551,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
                 City = Miami,
                 WhyThisPlace = "Seeded for chat tests",
                 Status = "published",
-                BestTime = "any",
+                BestTimes = new List<string> { "any" },
                 Latitude = 25.77m + (decimal)(i * 0.01),
                 Longitude = -80.19m + (decimal)(i * 0.01),
                 GooglePlaceId = $"gpid-chat-{tag}-{i}",

@@ -322,7 +322,7 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
                 City = Miami,
                 WhyThisPlace = "Golden set seed",
                 Status = "published",
-                BestTime = "any",
+                BestTimes = new List<string> { "any" },
                 Latitude = 25.77m + (decimal)(i * 0.01),
                 Longitude = -80.19m + (decimal)(i * 0.01),
                 GooglePlaceId = $"gpid-golden-{tag}-{i}",

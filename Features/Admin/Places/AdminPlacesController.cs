@@ -178,7 +178,7 @@ public class AdminPlacesController : ControllerBase
             Longitude = request.Longitude,
             BestFor = request.BestFor,
             SuitableFor = request.SuitableFor,
-            BestTime = request.BestTime?.Trim(),
+            BestTimes = request.BestTimes,
             PriceRange = request.PriceRange?.Trim(),
             Photos = request.Photos,
             GooglePlaceId = request.GooglePlaceId?.Trim(),
@@ -259,7 +259,7 @@ public class AdminPlacesController : ControllerBase
         if (request.Longitude.HasValue) place.Longitude = request.Longitude;
         if (request.BestFor != null) place.BestFor = request.BestFor;
         if (request.SuitableFor != null) place.SuitableFor = request.SuitableFor;
-        if (request.BestTime != null) place.BestTime = request.BestTime.Trim();
+        if (request.BestTimes != null) place.BestTimes = request.BestTimes;
         if (request.PriceRange != null) place.PriceRange = request.PriceRange.Trim();
         if (request.Photos != null) place.Photos = request.Photos;
         if (request.GooglePlaceId != null) place.GooglePlaceId = request.GooglePlaceId.Trim();
@@ -276,8 +276,8 @@ public class AdminPlacesController : ControllerBase
             place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, "es", request.NameEs);
         if (request.WhyThisPlaceEs != null)
             place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, "es", request.WhyThisPlaceEs);
-        if (request.BestTimeEs != null)
-            place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, "es", request.BestTimeEs);
+        if (request.BestTimesEs != null)
+            place.BestTimesI18n = LanguageAccessor.SetI18nList(place.BestTimesI18n, "es", request.BestTimesEs);
         if (request.NeighborhoodEs != null)
             place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, "es", request.NeighborhoodEs);
         if (request.SubcategoriesEs != null)
@@ -496,7 +496,7 @@ public class AdminPlacesController : ControllerBase
         {
             nameEs = draft.Name,
             whyThisPlaceEs = draft.WhyThisPlace,
-            bestTimeEs = draft.BestTime,
+            bestTimesEs = draft.BestTimes,
             neighborhoodEs = draft.Neighborhood,
             subcategoriesEs = draft.Subcategories,
             bestForEs = draft.BestFor,
@@ -670,7 +670,8 @@ public class AdminPlacesController : ControllerBase
 
                 place.NameI18n = LanguageAccessor.SetI18nString(place.NameI18n, lang, draft.Name);
                 place.WhyThisPlaceI18n = LanguageAccessor.SetI18nString(place.WhyThisPlaceI18n, lang, draft.WhyThisPlace);
-                place.BestTimeI18n = LanguageAccessor.SetI18nString(place.BestTimeI18n, lang, draft.BestTime);
+                if (draft.BestTimes is { Count: > 0 })
+                    place.BestTimesI18n = LanguageAccessor.SetI18nList(place.BestTimesI18n, lang, draft.BestTimes);
                 place.NeighborhoodI18n = LanguageAccessor.SetI18nString(place.NeighborhoodI18n, lang, draft.Neighborhood);
                 if (draft.Subcategories is { Count: > 0 })
                     place.SubcategoriesI18n = LanguageAccessor.SetI18nList(place.SubcategoriesI18n, lang, draft.Subcategories);

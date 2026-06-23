@@ -345,7 +345,7 @@ public class PlaceImportService
                 Longitude = req.Longitude,
                 BestFor = req.BestFor,
                 SuitableFor = req.SuitableFor,
-                BestTime = req.BestTime?.Trim(),
+                BestTimes = req.BestTimes,
                 PriceRange = req.PriceRange?.Trim(),
                 Photos = req.Photos,
                 GooglePlaceId = req.GooglePlaceId?.Trim(),
