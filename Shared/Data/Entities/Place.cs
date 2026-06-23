@@ -52,9 +52,8 @@ public class Place
     [Column("suitable_for", TypeName = "text[]")]
     public List<string>? SuitableFor { get; set; }
 
-    [Column("best_time")]
-    [StringLength(50)]
-    public string? BestTime { get; set; }
+    [Column("best_times", TypeName = "text[]")]
+    public List<string>? BestTimes { get; set; }
 
     [Column("price_range")]
     [StringLength(10)]
@@ -82,8 +81,8 @@ public class Place
     [Column("why_this_place_i18n", TypeName = "jsonb")]
     public JsonDocument? WhyThisPlaceI18n { get; set; }
 
-    [Column("best_time_i18n", TypeName = "jsonb")]
-    public JsonDocument? BestTimeI18n { get; set; }
+    [Column("best_times_i18n", TypeName = "jsonb")]
+    public JsonDocument? BestTimesI18n { get; set; }
 
     [Column("neighborhood_i18n", TypeName = "jsonb")]
     public JsonDocument? NeighborhoodI18n { get; set; }

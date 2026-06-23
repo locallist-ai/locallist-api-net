@@ -211,7 +211,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         await db.SaveChangesAsync();
 
         // Return a valid place translation for each Gemini call
-        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTime":"Tarde","neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
+        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTimes":["Tarde"],"neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
         try
         {
             var client = CreateAdminClient();
@@ -248,7 +248,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         }
         await db.SaveChangesAsync();
 
-        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTime":"Tarde","neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
+        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTimes":["Tarde"],"neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
         try
         {
             var client = CreateAdminClient();

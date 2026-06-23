@@ -19,6 +19,8 @@ public record PlaceDto(
     string WhyThisPlace,
     List<string>? BestFor,
     List<string>? SuitableFor,
+    List<string>? BestTimes,
+    // deprecated: primer best time, compat app
     string? BestTime,
     string? PriceRange,
     List<string>? Photos,
@@ -41,6 +43,8 @@ public record PlaceDto(
             ? LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, lang, p.Subcategories, isCurated, ts)
             : (p.Subcategories is { Count: > 0 } ? p.Subcategories : null);
 
+        var bestTimes = LanguageAccessor.ResolveStringList(p.BestTimesI18n, lang, p.BestTimes, isCurated, ts);
+
         return new(
             p.Id,
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated, ts) ?? p.Name,
@@ -53,7 +57,8 @@ public record PlaceDto(
             LanguageAccessor.ResolveString(p.WhyThisPlaceI18n, lang, p.WhyThisPlace, isCurated, ts) ?? p.WhyThisPlace,
             LanguageAccessor.ResolveStringList(p.BestForI18n, lang, p.BestFor, isCurated, ts),
             LanguageAccessor.ResolveStringList(p.SuitableForI18n, lang, p.SuitableFor, isCurated, ts),
-            LanguageAccessor.ResolveString(p.BestTimeI18n, lang, p.BestTime, isCurated, ts),
+            bestTimes,
+            bestTimes?.FirstOrDefault(),
             p.PriceRange,
             p.Photos,
             p.GooglePlaceId,

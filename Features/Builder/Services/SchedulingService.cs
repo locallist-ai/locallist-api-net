@@ -581,9 +581,10 @@ public class SchedulingService
             }
         }
 
-        if (string.IsNullOrEmpty(place.BestTime) || place.BestTime.ToLower() == "any") return true;
+        if (place.BestTimes is not { Count: > 0 }) return true;
+        if (place.BestTimes.Any(bt => string.IsNullOrEmpty(bt) || bt.ToLower() == "any")) return true;
         if (BestTimeMatches.TryGetValue(timeBlock, out var matchingTimes))
-            return matchingTimes.Any(t => place.BestTime.ToLower().Contains(t));
+            return place.BestTimes.Any(bt => matchingTimes.Any(t => bt.ToLower().Contains(t)));
 
         return true;
     }

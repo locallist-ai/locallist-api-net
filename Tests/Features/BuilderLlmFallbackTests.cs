@@ -152,7 +152,7 @@ public class BuilderLlmFallbackTests(ApiFixture fixture) : IClassFixture<ApiFixt
                 City = Miami,
                 WhyThisPlace = "Seeded para test de fallback de /builder/chat",
                 Status = "published",
-                BestTime = "any",
+                BestTimes = new List<string> { "any" },
                 Latitude = 25.77m + (decimal)(i * 0.01),
                 Longitude = -80.19m + (decimal)(i * 0.01),
                 GooglePlaceId = $"gpid-builder-fallback-{tag}-{i}",

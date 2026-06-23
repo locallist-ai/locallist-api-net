@@ -18,7 +18,7 @@ public record AdminPlaceDto(
     string WhyThisPlace,
     List<string>? BestFor,
     List<string>? SuitableFor,
-    string? BestTime,
+    List<string>? BestTimes,
     string? PriceRange,
     List<string>? Photos,
     string? GooglePlaceId,
@@ -38,7 +38,7 @@ public record AdminPlaceDto(
     // i18n fields — ES draft/approved content
     string? NameEs,
     string? WhyThisPlaceEs,
-    string? BestTimeEs,
+    List<string>? BestTimesEs,
     string? NeighborhoodEs,
     List<string>? SubcategoriesEs,
     List<string>? BestForEs,
@@ -51,17 +51,18 @@ public record AdminPlaceDto(
     {
         var subs = p.Subcategories is { Count: > 0 } ? p.Subcategories : null;
         var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", p.Subcategories, isCurated: false);
+        var bestTimes = p.BestTimes is { Count: > 0 } ? p.BestTimes : null;
 
         return new(
             p.Id, p.Name, p.Category, subs, p.Neighborhood, p.City,
             p.Latitude, p.Longitude, p.WhyThisPlace, p.BestFor, p.SuitableFor,
-            p.BestTime, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
+            bestTimes, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
             p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
             p.RejectionReason, p.AiVibeScore, p.VisitDurationMin, p.Flags,
             p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
             NameEs: LanguageAccessor.ResolveString(p.NameI18n, "es", null, isCurated: false),
             WhyThisPlaceEs: LanguageAccessor.ResolveString(p.WhyThisPlaceI18n, "es", null, isCurated: false),
-            BestTimeEs: LanguageAccessor.ResolveString(p.BestTimeI18n, "es", null, isCurated: false),
+            BestTimesEs: LanguageAccessor.ResolveStringList(p.BestTimesI18n, "es", null, isCurated: false),
             NeighborhoodEs: LanguageAccessor.ResolveString(p.NeighborhoodI18n, "es", null, isCurated: false),
             SubcategoriesEs: subsEs,
             BestForEs: LanguageAccessor.ResolveStringList(p.BestForI18n, "es", null, isCurated: false),
@@ -96,8 +97,7 @@ public class CreatePlaceRequest
     public List<string>? BestFor { get; set; }
     public List<string>? SuitableFor { get; set; }
 
-    [StringLength(50)]
-    public string? BestTime { get; set; }
+    public List<string>? BestTimes { get; set; }
 
     [StringLength(10)]
     public string? PriceRange { get; set; }
@@ -156,8 +156,7 @@ public class UpdatePlaceRequest
     public List<string>? BestFor { get; set; }
     public List<string>? SuitableFor { get; set; }
 
-    [StringLength(50)]
-    public string? BestTime { get; set; }
+    public List<string>? BestTimes { get; set; }
 
     [StringLength(10)]
     public string? PriceRange { get; set; }
@@ -182,7 +181,7 @@ public class UpdatePlaceRequest
     // i18n ES fields — null means "no change", empty string clears the field
     public string? NameEs { get; set; }
     public string? WhyThisPlaceEs { get; set; }
-    public string? BestTimeEs { get; set; }
+    public List<string>? BestTimesEs { get; set; }
     public string? NeighborhoodEs { get; set; }
     public List<string>? SubcategoriesEs { get; set; }
     public List<string>? BestForEs { get; set; }

@@ -88,6 +88,7 @@ public class LocalListDbContext : DbContext
 
         // Explicit array column types for Npgsql
         modelBuilder.Entity<Place>().Property(p => p.BestFor).HasColumnType("text[]");
+        modelBuilder.Entity<Place>().Property(p => p.BestTimes).HasColumnType("text[]");
         modelBuilder.Entity<Place>().Property(p => p.SuitableFor).HasColumnType("text[]");
         modelBuilder.Entity<Place>().Property(p => p.Photos).HasColumnType("text[]");
         modelBuilder.Entity<Place>().Property(p => p.Flags).HasColumnType("text[]");
