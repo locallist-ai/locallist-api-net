@@ -89,6 +89,15 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
     private bool _dbCreated;
 
+    /// <summary>
+    /// Por defecto los tests desactivan el rate limiter (GetNoLimiter) para no acoplar
+    /// la lógica de negocio a los límites. Las suites que verifican el propio rate-limiting
+    /// (p. ej. <c>BuilderRateLimitTests</c>) sobreescriben esto a <c>false</c> para dejar
+    /// activas las políticas reales de <see cref="RateLimitingExtensions"/>, y ajustan los
+    /// límites vía <c>UseSetting</c>.
+    /// </summary>
+    protected virtual bool DisableRateLimiting => true;
+
     static ApiFixture()
     {
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", "");
@@ -231,7 +240,11 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             foreach (var d in googlePlacesDesc) services.Remove(d);
             services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
 
-            // Disable rate limiting in tests
+            // Disable rate limiting in tests (default). Las suites que testean el propio
+            // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
+            // reales registradas por AddRateLimitingPolicies.
+            if (!DisableRateLimiting) return;
+
             var rateLimiterDescriptors = services
                 .Where(d => d.ServiceType == typeof(IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
                 .ToList();
@@ -334,6 +347,34 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             await db.SaveChangesAsync();
         }
         return CreateAuthenticatedClient(userId, firebaseUid, email);
+    }
+
+    /// <summary>
+    /// Cliente autenticado con un token de la APP (HS256, AppScheme) — a diferencia de
+    /// <see cref="CreateAuthenticatedClientWithUser"/>, que emite un token Firebase (RS256).
+    /// El rate-limit de generación solo concede el bucket alto a tokens AppScheme, así que
+    /// los tests de ese bucket deben usar este helper.
+    /// </summary>
+    public async Task<HttpClient> CreateAppAuthenticatedClientWithUser(
+        Guid userId, string email)
+    {
+        var db = GetDbContext();
+        var existing = await db.Users.FindAsync(userId);
+        if (existing == null)
+        {
+            db.Users.Add(new LocalList.API.NET.Shared.Data.Entities.User
+            {
+                Id = userId,
+                Email = email,
+                FirebaseUid = "app-" + userId,
+                Role = "user"
+            });
+            await db.SaveChangesAsync();
+        }
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email));
+        return client;
     }
 
     public LocalListDbContext GetDbContext()

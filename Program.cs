@@ -134,10 +134,15 @@ app.UseResponseCompression();
 
 app.UseHttpsRedirection();
 app.UseCors("AllowSpecificOrigins");
-app.UseRateLimiter();
 
 // Setup Pipeline Security & Mapping
 app.UseAuthentication();
+
+// El rate limiter DEBE correr después de UseAuthentication: las políticas identity-aware
+// (BuilderLimit, ChatTurnLimit, CityCreateLimit) particionan por el userId del JWT, y
+// context.User solo está poblado tras la autenticación. Con UseRateLimiter antes de
+// UseAuthentication, todo request (incluso autenticado) caía en el bucket anónimo por IP.
+app.UseRateLimiter();
 
 // Push UserId into Serilog LogContext for every authenticated request.
 // Must run after UseAuthentication (so context.User is populated) and before MapControllers.

@@ -61,11 +61,13 @@ public class ChatController : ControllerBase
     /// Anonymous users are supported (plan is ephemeral). Authenticated users get sessions
     /// persisted and tied to their account.
     ///
-    /// Rate limiting (4 layers):
-    ///   - ChatBurst: 5 req / 10s per IP (token-bucket)
-    ///   - ChatTurnLimit: 20/hr anon, 40/hr auth (sliding window)
-    ///   - ChatNewSession: 5 new sessions / hr / IP (applied conditionally below)
-    ///   - ChatDaily: 200 turns / 24h / IP
+    /// Rate limiting (3 capas reales encadenadas, ver RateLimitingExtensions):
+    ///   - GlobalLimiter burst: 100/min por IP (todos los endpoints).
+    ///   - Techo por IP anti-farming: 120/hr por IP (namespace chatturn_ip_ceiling); ninguna
+    ///     IP lo supera por más cuentas que registre.
+    ///   - ChatTurnLimit (esta política): sliding window 20/hr anónimo por IP · 40/hr
+    ///     autenticado por userId — bucket alto SOLO para tokens AppScheme (un token
+    ///     Firebase/Anonymous cae al bucket por IP).
     /// </summary>
     [HttpPost("turn")]
     [AllowAnonymous]
