@@ -234,9 +234,10 @@ public class PlanGenerationServiceTests
     [Fact]
     public void ComputeRequestSeed_ListOrderPermutations_SameSeed()
     {
-        // Las listas del contexto se canonicalizan ordenadas (como Subcategories):
-        // el mismo set de selecciones del wizard → misma semilla → mismo plan,
-        // aunque el cliente serialice las listas en otro orden.
+        // Todas las listas del contexto se canonicalizan ordenadas — top-level Y
+        // los valores de cada bucket de Subcategories: el mismo set de selecciones
+        // del wizard → misma semilla → misma selección de candidatos, aunque el
+        // cliente serialice las listas (incluidas las de subcategoría) en otro orden.
         static TripContextDto Build(bool reversed)
         {
             List<string> L(params string[] xs) =>
@@ -247,6 +248,13 @@ public class PlanGenerationServiceTests
                 Days = 2,
                 GroupType = "couple",
                 Categories = L("food", "culture"),
+                // Valores de subcategoría permutados: sin ordenarlos, "sushi,italian"
+                // y "italian,sushi" darían semillas distintas para la misma selección.
+                Subcategories = new Dictionary<string, List<string>>
+                {
+                    ["food"] = L("sushi", "italian"),
+                    ["culture"] = L("museum", "gallery"),
+                },
                 CompanyTags = L("honeymoon", "anniversary"),
                 Dietary = L("vegan", "halal"),
                 Exclusions = L("nightlife", "touristy"),

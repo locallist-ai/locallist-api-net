@@ -85,10 +85,14 @@ public class PlanGenerationService : IPlanGenerationService
             return null;
         }
 
-        // Semilla determinista derivada del request: misma petición → mismo plan
-        // (contrato "determinista por semilla" del scheduler). Antes era
-        // Random.Shared.Next(), que hacía cada regeneración una lotería y ocultaba
-        // los parámetros del usuario tras el muestreo aleatorio.
+        // Semilla determinista derivada del request: fija la selección y el orden
+        // de candidatos del scheduler (contrato "determinista por semilla" del
+        // scheduler, dado un conjunto de candidatos). NO garantiza plan idéntico
+        // end-to-end: la query de embedding incorpora prefs.Vibes, extraídas por
+        // el LLM con temperatura > 0, así que el pool RAG puede variar entre
+        // peticiones idénticas. Antes la semilla era Random.Shared.Next(), que
+        // hacía cada regeneración una lotería aun con el mismo pool y ocultaba los
+        // parámetros del usuario tras el muestreo aleatorio.
         var seed = ComputeRequestSeed(msg, city, lang, tripContext);
         _logger.LogInformation("PlanGen: schedule seed={Seed}", seed);
         var schedule = await _scheduler.BuildPlanScheduleAsync(places, prefs, seed, ct);
@@ -270,6 +274,18 @@ public class PlanGenerationService : IPlanGenerationService
     /// slots del scheduler.
     /// Preserva el orden de entrada (ranking o Id), que es load-bearing para el
     /// determinismo y para la selección rank-first del scheduler.
+    ///
+    /// LIMITACIÓN CONOCIDA (gap de escala, no aborda este PR): la exención de food
+    /// solo protege a los food que YA están en <paramref name="orderedPlaces"/>.
+    /// En la ruta RAG ese pool es el top-K por cosine (RetrievalTopK=50) más el
+    /// top-up por categoría — que también está capado a RetrievalTopK. En una
+    /// ciudad con catálogo grande dominado por la categoría pedida, los food
+    /// pueden quedar fuera de ambos cortes y EnsureFoodPerDay no tendría nada que
+    /// colocar → días sin comida. No dispara a escala Miami; es la misma clase de
+    /// problema que "gate sobre top-50 vs catálogo" y se abordará cuando el
+    /// catálogo crezca (p. ej. query dedicada de food garantizada, sin cap por
+    /// cosine). La ruta keyword (FallbackKeywordHardCap=500 sin ranking) no sufre
+    /// este corte.
     /// </summary>
     internal static List<Place> ApplyCategoryGate(List<Place> orderedPlaces, ExtractedPreferences prefs)
     {
@@ -299,11 +315,16 @@ public class PlanGenerationService : IPlanGenerationService
 
     /// <summary>
     /// FNV-1a 32-bit sobre los campos del request. Estable entre procesos
-    /// (string.GetHashCode está aleatorizado por proceso) — misma petición
-    /// siempre produce la misma semilla y por tanto el mismo plan.
-    /// Las listas se canonicalizan ordenadas (Ordinal), igual que Subcategories:
+    /// (string.GetHashCode está aleatorizado por proceso) — la misma petición
+    /// siempre produce la misma semilla, por lo que la selección de candidatos
+    /// del scheduler es reproducible (determinismo a nivel de scheduler dado un
+    /// conjunto de candidatos fijo, no de la petición end-to-end: la query de
+    /// embedding incorpora prefs.Vibes, que salen de la extracción LLM con
+    /// temperatura > 0 y no son deterministas).
+    /// Todas las listas se canonicalizan ordenadas (Ordinal), tanto las
+    /// top-level como las CLAVES y los VALORES de cada bucket de Subcategories:
     /// el mismo set de selecciones del wizard produce la misma semilla aunque
-    /// el cliente las envíe en otro orden.
+    /// el cliente lo serialice en otro orden.
     /// </summary>
     internal static int ComputeRequestSeed(string message, string city, string lang, TripContextDto context)
     {
@@ -320,7 +341,7 @@ public class PlanGenerationService : IPlanGenerationService
                 ? ""
                 : string.Join(";", context.Subcategories
                     .OrderBy(kv => kv.Key, StringComparer.Ordinal)
-                    .Select(kv => $"{kv.Key}:{string.Join(",", kv.Value ?? new List<string>())}")),
+                    .Select(kv => $"{kv.Key}:{CanonicalList(kv.Value)}")),
             CanonicalList(context.CompanyTags),
             context.Pace ?? "",
             CanonicalList(context.Dietary),
