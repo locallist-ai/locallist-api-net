@@ -88,11 +88,16 @@ public class PlanGenerationService : IPlanGenerationService
         // Semilla determinista derivada del request: fija la selección y el orden
         // de candidatos del scheduler (contrato "determinista por semilla" del
         // scheduler, dado un conjunto de candidatos). NO garantiza plan idéntico
-        // end-to-end: la query de embedding incorpora prefs.Vibes, extraídas por
-        // el LLM con temperatura > 0, así que el pool RAG puede variar entre
-        // peticiones idénticas. Antes la semilla era Random.Shared.Next(), que
-        // hacía cada regeneración una lotería aun con el mismo pool y ocultaba los
-        // parámetros del usuario tras el muestreo aleatorio.
+        // end-to-end en la ruta RAG por dos motivos: (1) la query de embedding
+        // incorpora prefs.Vibes, extraídas por el LLM con temperatura > 0; (2) el
+        // texto de esa query es sensible al ORDEN de serialización de categorías/
+        // vibes (ver RetrieveCandidatesAsync ~L141-142) — no se canonicaliza aquí
+        // porque cambiar el orden alteraría el embedding y no se ha evaluado su
+        // efecto en la calidad del plan. La semilla SÍ canonicaliza el orden para
+        // la selección del scheduler, y la ruta keyword-fallback es determinista
+        // end-to-end. Antes la semilla era Random.Shared.Next(), que hacía cada
+        // regeneración una lotería aun con el mismo pool y ocultaba los parámetros
+        // del usuario tras el muestreo aleatorio.
         var seed = ComputeRequestSeed(msg, city, lang, tripContext);
         _logger.LogInformation("PlanGen: schedule seed={Seed}", seed);
         var schedule = await _scheduler.BuildPlanScheduleAsync(places, prefs, seed, ct);
