@@ -42,6 +42,15 @@ public class ExtractedPreferences
     public bool CategoriesExplicit { get; set; }
 
     // ── Refinements — carried from TripContext through to SchedulingService ───
+
+    /// <summary>
+    /// Trip pace: "slow" | "normal" | "fast". JsonIgnore: solo lo asigna
+    /// MergeContextIntoPrefs desde TripContextDto — el JSON del LLM no puede
+    /// inyectarlo. Si el LLM pudiera setearlo, ResolveEffectiveMaxStops
+    /// (scheduler) y el needed del gate de categoría divergirían del clamp
+    /// que MergeContextIntoPrefs aplica sobre MaxStopsPerDay.
+    /// </summary>
+    [JsonIgnore]
     public string? Pace { get; set; }
     public List<string>? Dietary { get; set; }
     public List<string>? Exclusions { get; set; }

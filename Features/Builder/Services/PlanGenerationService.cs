@@ -169,6 +169,40 @@ public class PlanGenerationService : IPlanGenerationService
             return await FallbackKeywordFilterAsync(city, prefs, ct);
         }
 
+        // Top-up por categoría explícita: el top-K por cosine se calcula sobre TODO
+        // el catálogo de la ciudad, así que en ciudades grandes los places de la
+        // categoría pedida pueden quedar fuera del top-K y disparar el fallback
+        // mixto del gate aunque el catálogo sí tenga suficientes. Segunda query
+        // restringida a las categorías pedidas (+ food, exenta del gate para los
+        // meal slots) para que el gate vea el catálogo real de la categoría.
+        // Mismas semánticas de match que FilterByCategory (substring, case-insensitive).
+        if (prefs.CategoriesExplicit && prefs.Categories.Count > 0)
+        {
+            var cats = prefs.Categories
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Select(c => c.ToLowerInvariant())
+                .ToList();
+            if (!cats.Contains("food")) cats.Add("food");
+
+            var seenIds = candidates.Select(c => c.Place.Id).ToHashSet();
+            var topUp = await _db.Places.AsNoTracking()
+                .Where(p => p.Status == "published" && p.City == city && p.Embedding != null)
+                .Where(p => cats.Any(c => p.Category.ToLower().Contains(c)))
+                .OrderBy(p => p.Embedding!.CosineDistance(qvec))
+                .Take(RetrievalTopK)
+                .Select(p => new { Place = p, Distance = (float)p.Embedding!.CosineDistance(qvec) })
+                .ToListAsync(ct);
+
+            var added = topUp.Where(t => !seenIds.Contains(t.Place.Id)).ToList();
+            if (added.Count > 0)
+            {
+                candidates.AddRange(added);
+                _logger.LogInformation(
+                    "RAG: category top-up [{Cats}] +{Added} candidates ({Total} total)",
+                    string.Join(",", cats), added.Count, candidates.Count);
+            }
+        }
+
         var ranked = _ranker.RankWithScores(
             candidates.Select(c => (c.Place, c.Distance)).ToList(),
             prefs);
@@ -225,8 +259,15 @@ public class PlanGenerationService : IPlanGenerationService
     /// <summary>
     /// Filtro duro por categoría con fallback graceful: si el catálogo no tiene
     /// suficientes places de las categorías pedidas para llenar el plan
-    /// (days × maxStops), completa con el resto de candidatos manteniendo a los
-    /// de la categoría pedida primero. Mejor un plan mixto que uno vacío.
+    /// (days × maxStops efectivos, con el clamp de pace del scheduler), completa
+    /// con el resto de candidatos manteniendo a los de la categoría pedida
+    /// primero. Mejor un plan mixto que uno vacío.
+    /// Food está exento del gate: EnsureFoodPerDay (scheduler) solo puede
+    /// garantizar ≥1 parada de comida por día si el pool conserva candidatos
+    /// food — un wizard con categories=["culture"] no debe producir días sin
+    /// comer. Los food no pedidos van al final del pool: no ocupan los slots
+    /// rank-first de la categoría elegida y quedan disponibles para los meal
+    /// slots del scheduler.
     /// Preserva el orden de entrada (ranking o Id), que es load-bearing para el
     /// determinismo y para la selección rank-first del scheduler.
     /// </summary>
@@ -235,10 +276,22 @@ public class PlanGenerationService : IPlanGenerationService
         if (prefs.Categories == null || prefs.Categories.Count == 0) return orderedPlaces;
 
         var matching = FilterByCategory(orderedPlaces, prefs);
-        int needed = Math.Max(1, prefs.Days * prefs.MaxStopsPerDay);
-        if (matching.Count >= needed) return matching;
-
         var matchingIds = matching.Select(p => p.Id).ToHashSet();
+
+        // Mismo cálculo de slots que el scheduler (pace clamp incluido) — si
+        // divergen, el gate cree que faltan candidatos y mete el fallback mixto
+        // en planes que el scheduler llenaría solo con la categoría pedida.
+        int needed = Math.Max(1, prefs.Days * SchedulingService.ResolveEffectiveMaxStops(prefs));
+        if (matching.Count >= needed)
+        {
+            var unmatchedFood = orderedPlaces
+                .Where(p => !matchingIds.Contains(p.Id)
+                            && p.Category.Equals("food", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            return matching.Concat(unmatchedFood).ToList();
+        }
+
+        // Fallback mixto: el resto de candidatos ya incluye los food no pedidos.
         return matching
             .Concat(orderedPlaces.Where(p => !matchingIds.Contains(p.Id)))
             .ToList();
@@ -248,6 +301,9 @@ public class PlanGenerationService : IPlanGenerationService
     /// FNV-1a 32-bit sobre los campos del request. Estable entre procesos
     /// (string.GetHashCode está aleatorizado por proceso) — misma petición
     /// siempre produce la misma semilla y por tanto el mismo plan.
+    /// Las listas se canonicalizan ordenadas (Ordinal), igual que Subcategories:
+    /// el mismo set de selecciones del wizard produce la misma semilla aunque
+    /// el cliente las envíe en otro orden.
     /// </summary>
     internal static int ComputeRequestSeed(string message, string city, string lang, TripContextDto context)
     {
@@ -259,16 +315,16 @@ public class PlanGenerationService : IPlanGenerationService
             context.GroupType ?? "",
             context.Budget ?? "",
             context.BudgetAmount?.ToString() ?? "",
-            context.Categories is null ? "" : string.Join(",", context.Categories),
+            CanonicalList(context.Categories),
             context.Subcategories is null
                 ? ""
                 : string.Join(";", context.Subcategories
                     .OrderBy(kv => kv.Key, StringComparer.Ordinal)
                     .Select(kv => $"{kv.Key}:{string.Join(",", kv.Value ?? new List<string>())}")),
-            context.CompanyTags is null ? "" : string.Join(",", context.CompanyTags),
+            CanonicalList(context.CompanyTags),
             context.Pace ?? "",
-            context.Dietary is null ? "" : string.Join(",", context.Dietary),
-            context.Exclusions is null ? "" : string.Join(",", context.Exclusions),
+            CanonicalList(context.Dietary),
+            CanonicalList(context.Exclusions),
             context.VibesPrimary ?? "");
 
         unchecked
@@ -282,6 +338,9 @@ public class PlanGenerationService : IPlanGenerationService
             return (int)(hash & int.MaxValue);
         }
     }
+
+    private static string CanonicalList(List<string>? values) =>
+        values is null ? "" : string.Join(",", values.OrderBy(v => v, StringComparer.Ordinal));
 
     private static string Sanitize(string value, int maxLen)
     {

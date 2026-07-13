@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.Tests.Features;
@@ -114,6 +115,117 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             var cat = s.GetProperty("place").GetProperty("category").GetString() ?? "";
             Assert.True(string.Equals(cat, "food", StringComparison.OrdinalIgnoreCase),
                 $"RAG path: el usuario pidió solo 'food' pero el plan trae '{cat}'");
+        }
+    }
+
+    // ── 2b. Food exenta del gate: categoría explícita no-food sigue comiendo ──
+
+    [Fact]
+    public async Task Builder_RagPath_ExplicitCultureCategory_EveryDayHasFoodStop()
+    {
+        // Wizard con categories=["culture"] y catálogo con culture de sobra: el gate
+        // duro no puede dejar el pool sin food, o EnsureFoodPerDay queda inoperante
+        // y salen días enteros sin parada de comida (regresión vs main).
+        var city = IsolatedCity("meals");
+        await SeedPlaces(city, "culture", 6);
+        await SeedPlaces(city, "food", 3);
+        await SeedPlaces(city, "nightlife", 3);
+        await ReindexEmbeddings();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(new
+        {
+            days = 2,
+            categories = new[] { "culture" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "Culture Meals Test",
+            maxStopsPerDay = 3,
+        }));
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "dos días de museos",
+            tripContext = new { city, days = 2, groupType = "couple", categories = new[] { "culture" } },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        var stops = body.GetProperty("stops").EnumerateArray().ToList();
+        Assert.NotEmpty(stops);
+
+        // El gate sigue aplicando a las no-food: solo culture o food, nada de nightlife.
+        foreach (var s in stops)
+        {
+            var cat = s.GetProperty("place").GetProperty("category").GetString() ?? "";
+            Assert.True(
+                string.Equals(cat, "culture", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(cat, "food", StringComparison.OrdinalIgnoreCase),
+                $"Con categories=['culture'] solo se esperaba culture+food, llegó '{cat}'");
+        }
+
+        // Invariante de EnsureFoodPerDay: cada día del plan tiene ≥1 parada food.
+        var days = stops.GroupBy(s => s.GetProperty("dayNumber").GetInt32()).ToList();
+        Assert.Equal(2, days.Count);
+        foreach (var day in days)
+        {
+            Assert.True(
+                day.Any(s => string.Equals(
+                    s.GetProperty("place").GetProperty("category").GetString(), "food",
+                    StringComparison.OrdinalIgnoreCase)),
+                $"El día {day.Key} no tiene ninguna parada de comida");
+        }
+    }
+
+    // ── 2c. Gate sobre el catálogo, no sobre el top-K por cosine ───────────────
+
+    [Fact]
+    public async Task Builder_RagPath_RequestedCategoryBeyondTopK_StillFillsPlan()
+    {
+        // Ciudad grande: 52 culture semánticamente pegados a la query saturan el
+        // top-50 por cosine y los food quedan fuera, aunque el catálogo tiene
+        // suficientes. La query de top-up por categoría explícita debe rescatarlos
+        // — sin ella el gate cree que no hay food y mete el fallback mixto.
+        var city = IsolatedCity("topk");
+        await SeedPlaces(city, "culture", 52);
+        await SeedPlaces(city, "food", 3);
+
+        // Embeddings dirigidos: query y culture → e1 (distancia 0 entre sí);
+        // food → e2 (distancia 1 de la query). Así el top-50 es 100% culture.
+        fixture.FakeEmbeddings.Responder = req => DirectedEmbeddings(req);
+        await ReindexEmbeddings();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(new
+        {
+            days = 1,
+            categories = new[] { "food" },
+            vibes = new string[] { },
+            groupType = "couple",
+            planName = "TopK Gate Test",
+            maxStopsPerDay = 3,
+        }));
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "best eats in town",
+            tripContext = new { city, days = 1, groupType = "couple", categories = new[] { "food" } },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+
+        // Path RAG activo de verdad: reindex + query embed.
+        Assert.True(fixture.FakeEmbeddings.Calls.Count >= 2,
+            $"Se esperaba path RAG activo (≥2 llamadas embedding), hubo {fixture.FakeEmbeddings.Calls.Count}");
+
+        var stops = body.GetProperty("stops").EnumerateArray().ToList();
+        Assert.NotEmpty(stops);
+        foreach (var s in stops)
+        {
+            var cat = s.GetProperty("place").GetProperty("category").GetString() ?? "";
+            Assert.True(string.Equals(cat, "food", StringComparison.OrdinalIgnoreCase),
+                $"El catálogo tiene 3 food pero el plan trae '{cat}' — el gate miró solo el top-50");
         }
     }
 
@@ -281,6 +393,40 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
         return new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(JsonSerializer.Serialize(envelope), Encoding.UTF8, "application/json")
+        };
+    }
+
+    /// <summary>
+    /// Responder de embeddings dirigido para simular una ciudad grande donde la
+    /// categoría pedida queda fuera del top-K por cosine: los textos de places
+    /// food (nombre "…-food-…") van al eje e2; todo lo demás (query incluida y
+    /// places culture) al eje e1. Distancia cosine query↔culture = 0,
+    /// query↔food = 1.
+    /// </summary>
+    private static HttpResponseMessage DirectedEmbeddings(HttpRequestMessage request)
+    {
+        var body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? "{}";
+        using var doc = JsonDocument.Parse(body);
+
+        var embeddings = new List<object>();
+        if (doc.RootElement.TryGetProperty("requests", out var reqs))
+        {
+            foreach (var r in reqs.EnumerateArray())
+            {
+                var text = r.GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString() ?? "";
+                var values = new float[EmbeddingService.Dimensions];
+                if (text.Contains("-food-", StringComparison.OrdinalIgnoreCase))
+                    values[1] = 1f;
+                else
+                    values[0] = 1f;
+                embeddings.Add(new { values });
+            }
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(new { embeddings }), Encoding.UTF8, "application/json")
         };
     }
 

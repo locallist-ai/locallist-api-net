@@ -1,3 +1,4 @@
+using System.Text.Json;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -119,6 +120,59 @@ public class PlanGenerationServiceTests
     }
 
     [Fact]
+    public void ApplyCategoryGate_ExplicitNonFoodCategory_KeepsFoodCandidatesInPool()
+    {
+        // Wizard con categories=["culture"] y catálogo con suficientes culture:
+        // el gate duro NO puede vaciar el pool de food, porque EnsureFoodPerDay
+        // (scheduler) necesita candidatos food para garantizar ≥1 comida al día.
+        // Los food no pedidos van al final; el resto de categorías sí se excluye.
+        var culture = new[] { Pl("culture", "1"), Pl("culture", "2"), Pl("culture", "3"), Pl("culture", "4") };
+        var food    = new[] { Pl("food", "1"), Pl("food", "2") };
+        var places  = new List<Place>
+        {
+            culture[0], food[0], Pl("nightlife", "1"), culture[1],
+            culture[2], food[1], Pl("shopping", "1"), culture[3],
+        };
+        var prefs = new ExtractedPreferences
+        {
+            Days = 1, MaxStopsPerDay = 3,
+            Categories = new List<string> { "culture" },
+        };
+
+        var result = PlanGenerationService.ApplyCategoryGate(places, prefs);
+
+        // Culture primero (orden de entrada), después los food; nada más.
+        Assert.Equal(6, result.Count);
+        Assert.Equal(culture.Select(p => p.Id), result.Take(4).Select(p => p.Id));
+        Assert.Equal(food.Select(p => p.Id), result.Skip(4).Select(p => p.Id));
+        Assert.DoesNotContain(result, p => p.Category is "nightlife" or "shopping");
+    }
+
+    [Fact]
+    public void ApplyCategoryGate_PaceSlow_NeededMatchesSchedulerEffectiveMaxStops()
+    {
+        // needed debe usar el MISMO cálculo que el scheduler (ResolveEffectiveMaxStops):
+        // pace=slow clampa 5 → 3, así que 4 culture bastan para el gate duro.
+        // Con Days × MaxStopsPerDay a secas (5), el gate metería el fallback mixto
+        // (coffee dentro) en un plan que el scheduler llena solo con culture.
+        var places = new List<Place>
+        {
+            Pl("culture", "1"), Pl("coffee", "1"), Pl("culture", "2"),
+            Pl("culture", "3"), Pl("coffee", "2"), Pl("culture", "4"),
+        };
+        var prefs = new ExtractedPreferences
+        {
+            Days = 1, MaxStopsPerDay = 5, Pace = "slow",
+            Categories = new List<string> { "culture" },
+        };
+
+        var result = PlanGenerationService.ApplyCategoryGate(places, prefs);
+
+        Assert.Equal(4, result.Count);
+        Assert.All(result, p => Assert.Equal("culture", p.Category));
+    }
+
+    [Fact]
     public void ApplyCategoryGate_NoCategories_ReturnsInputUnchanged()
     {
         var places = new List<Place> { Pl("food"), Pl("culture") };
@@ -175,5 +229,56 @@ public class PlanGenerationServiceTests
         var variant = PlanGenerationService.ComputeRequestSeed(message, "Miami", "en", ctx);
 
         Assert.NotEqual(baseline, variant);
+    }
+
+    [Fact]
+    public void ComputeRequestSeed_ListOrderPermutations_SameSeed()
+    {
+        // Las listas del contexto se canonicalizan ordenadas (como Subcategories):
+        // el mismo set de selecciones del wizard → misma semilla → mismo plan,
+        // aunque el cliente serialice las listas en otro orden.
+        static TripContextDto Build(bool reversed)
+        {
+            List<string> L(params string[] xs) =>
+                reversed ? xs.Reverse().ToList() : xs.ToList();
+            return new TripContextDto
+            {
+                City = "Miami",
+                Days = 2,
+                GroupType = "couple",
+                Categories = L("food", "culture"),
+                CompanyTags = L("honeymoon", "anniversary"),
+                Dietary = L("vegan", "halal"),
+                Exclusions = L("nightlife", "touristy"),
+            };
+        }
+
+        var s1 = PlanGenerationService.ComputeRequestSeed("romantic days", "Miami", "en", Build(false));
+        var s2 = PlanGenerationService.ComputeRequestSeed("romantic days", "Miami", "en", Build(true));
+
+        Assert.Equal(s1, s2);
+    }
+
+    // ── Pace: solo inyectable desde el contexto, nunca desde el JSON del LLM ──
+
+    [Fact]
+    public void ExtractedPreferences_PaceAndBudgetTier_NotDeserializableFromLlmJson()
+    {
+        // Pace lleva [JsonIgnore] (como BudgetTier y CategoriesExplicit): si el LLM
+        // emitiera "pace", ResolveEffectiveMaxStops (scheduler) y el needed del gate
+        // divergirían del clamp aplicado en MergeContextIntoPrefs. Mismas opciones
+        // de deserialización que PreferenceExtractorService.
+        const string llmJson = """
+            {"days":2,"pace":"slow","budgetTier":"premium","categoriesExplicit":true}
+            """;
+
+        var prefs = JsonSerializer.Deserialize<ExtractedPreferences>(
+            llmJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.NotNull(prefs);
+        Assert.Equal(2, prefs.Days);          // los campos normales sí bindan
+        Assert.Null(prefs.Pace);
+        Assert.Null(prefs.BudgetTier);
+        Assert.False(prefs.CategoriesExplicit);
     }
 }

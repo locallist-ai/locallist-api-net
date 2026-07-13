@@ -109,7 +109,10 @@ public class SchedulingService
 
     // ── Step 2: weighted sampling across days ─────────────────────────────────
 
-    // filteredPlaces arrives pre-ranked desc by PlaceRankingService (index 0 = best).
+    // filteredPlaces llega con orden determinista y "mejor primero": pre-ranked desc
+    // por PlaceRankingService en la ruta RAG (index 0 = mejor score), u ordenado por
+    // Id en el fallback keyword (sin ranking semántico). En ambos casos el gate de
+    // categoría antepone la categoría pedida, así que index 0 = mejor disponible.
     private static Dictionary<int, List<Place>> SelectPlacesForDays(
         List<Place> ranked, ExtractedPreferences prefs, int maxStops, Random rng)
     {
