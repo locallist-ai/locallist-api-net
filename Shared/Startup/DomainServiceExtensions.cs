@@ -68,6 +68,9 @@ public static class DomainServiceExtensions
         services.AddScoped<IEmailMarketingService, KlaviyoService>();
 
         // Billing — RevenueCat webhook → User.Tier writer (scoped: uses the request DbContext).
+        // The processor derives the tier from RevenueCat's authoritative REST state, not the
+        // (untrusted) webhook payload, via IRevenueCatClient.
+        services.AddHttpClient<IRevenueCatClient, RevenueCatClient>(c => c.Timeout = TimeSpan.FromSeconds(8));
         services.AddScoped<BillingEventProcessor>();
 
         // LLM fallback chain (camino crítico: chat slot-filling + builder preferences).

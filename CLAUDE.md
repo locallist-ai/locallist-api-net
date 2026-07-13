@@ -60,7 +60,9 @@ Required User Secrets / Environment Variables:
 - `Klaviyo__WaitlistListId` — ID de lista de Klaviyo para la waitlist.
 
 **Monetización (F4 — RevenueCat / tier)**
-- `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Sin él el webhook rechaza todo (503, fail-closed). También legible como `RevenueCat__WebhookAuthToken`.
+- El webhook es un TRIGGER, NO la fuente de verdad. El tier se deriva del estado autoritativo consultado a la REST API de RevenueCat (`GET /subscribers/{app_user_id}`), no del payload — un secreto filtrado no permite forjar grants ni congelar pro con `event_timestamp_ms` falso.
+- `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Verificado antes de deserializar el body (fail-closed 503 si falta). También legible como `RevenueCat__WebhookAuthToken`.
+- `REVENUECAT_REST_API_KEY` — **requerido** para conceder tier. Secret API key (sk_...) de RC para verificar el suscriptor. Distinta del secreto del webhook. Sin ella no se concede upgrade (webhook 503, RC reintenta). También `RevenueCat__RestApiKey`.
 - `RevenueCat__PlusEntitlementId` — id del entitlement que mapea a tier `pro` (default `plus`).
 - Enforcement: `[RequirePro]` (`Shared/Auth/`) re-consulta el tier en la DB, NO el claim `tier` del JWT. Registrado y listo, **aún sin aplicar a ningún endpoint** — el catálogo "Plus vs free" es decisión de producto no tomada (ver `Features/Billing/README.md`).
 
@@ -105,10 +107,12 @@ LocalList.API.NET/
 │   │       ├── AppleIdTokenValidator.cs    # Valida ID token Apple vs JWKS
 │   │       └── JwksRetriever.cs            # Caché JWKS para Apple
 │   ├── Billing/
-│   │   ├── BillingController.cs        # POST /webhooks/revenuecat (anonymous, secreto Authorization)
-│   │   ├── BillingEventProcessor.cs    # Único escritor de User.Tier guiado por billing (idempotente, reorder-safe)
-│   │   ├── RevenueCatDtos.cs           # RevenueCatWebhookRequest/Event
-│   │   └── README.md                   # Doc F4 + PENDIENTE producto: catálogo features Plus
+│   │   ├── BillingController.cs        # POST /webhooks/revenuecat (anonymous, secreto Authorization verificado pre-body)
+│   │   ├── BillingEventProcessor.cs    # Único escritor de User.Tier; deriva tier de RC (no del payload), idempotente
+│   │   ├── IRevenueCatClient.cs        # Contrato + status; el webhook es trigger, RC REST es la fuente de verdad
+│   │   ├── RevenueCatClient.cs         # GET /subscribers/{app_user_id} con secret API key → entitlement activo?
+│   │   ├── RevenueCatDtos.cs           # RevenueCatWebhookRequest/Event (payload NO confiable para el tier)
+│   │   └── README.md                   # Doc F4 + modelo de seguridad + PENDIENTE producto: catálogo features Plus
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
 │   │   ├── BuilderDtos.cs              # BuilderChatRequest

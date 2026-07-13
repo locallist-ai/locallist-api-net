@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Claims;
+using LocalList.API.NET.Features.Billing;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.AspNetCore.Http;
@@ -139,9 +140,11 @@ public class BillingTests : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Webhook_Expiration_RevertsToFree()
+    public async Task Webhook_Expiration_RevertsToFree_WhenRcInactive()
     {
         var userId = await SeedUserAsync(tier: "pro", rcCustomerId: null);
+        // RevenueCat authoritatively reports the entitlement as gone.
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Inactive;
         var client = _fixture.CreateClient();
 
         var req = BuildWebhook(Event("evt-expire", "EXPIRATION", userId.ToString(), 2000));
@@ -154,35 +157,38 @@ public class BillingTests : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Webhook_Cancellation_KeepsProUntilExpiration()
+    public async Task Webhook_Cancellation_KeepsPro_WhileRcStillActive()
     {
         var userId = await SeedUserAsync(tier: "pro");
+        // CANCELLATION = auto-renew off; RevenueCat still reports the entitlement active until
+        // expiration, so the tier must stay pro (driven by RC state, not the event type).
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Active;
         var client = _fixture.CreateClient();
 
-        // CANCELLATION = auto-renew off; access persists until EXPIRATION → no tier change.
         var req = BuildWebhook(Event("evt-cancel", "CANCELLATION", userId.ToString(), 1500));
         var res = await client.SendAsync(req);
 
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<WebhookResult>();
-        Assert.Equal("NoTierChange", body!.Outcome);
+        Assert.Equal("GrantedPro", body!.Outcome);
         Assert.Equal("pro", await GetTierAsync(userId));
     }
 
     [Fact]
-    public async Task Webhook_PurchaseForOtherEntitlement_DoesNotGrantPro()
+    public async Task Webhook_PayloadClaimsPlus_ButRcSaysInactive_DoesNotGrantPro()
     {
+        // The payload asserts the "plus" entitlement, but RevenueCat's authoritative state says
+        // inactive. We trust RC, not the payload → no pro.
         var userId = await SeedUserAsync();
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Inactive;
         var client = _fixture.CreateClient();
 
-        var req = BuildWebhook(Event(
-            "evt-other-ent", "INITIAL_PURCHASE", userId.ToString(), 1000,
-            entitlements: new[] { "some_other_product" }));
+        var req = BuildWebhook(Event("evt-payload-lies", "INITIAL_PURCHASE", userId.ToString(), 1000));
         var res = await client.SendAsync(req);
 
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<WebhookResult>();
-        Assert.Equal("NoTierChange", body!.Outcome);
+        Assert.Equal("RevokedToFree", body!.Outcome);
         Assert.Equal("free", await GetTierAsync(userId));
     }
 
@@ -227,24 +233,95 @@ public class BillingTests : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Webhook_StaleExpirationAfterRenewal_DoesNotDowngrade()
+    public async Task Webhook_OldExpirationForActiveSubscriber_DoesNotDowngrade()
     {
+        // A genuinely-active subscriber (RevenueCat says active) whose OLD, out-of-order
+        // EXPIRATION webhook is delivered late. Because the tier is re-derived from RC state on
+        // every event, the stale delivery re-confirms pro instead of downgrading — no dependence
+        // on a payload timestamp guard.
         var userId = await SeedUserAsync();
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Active;
         var client = _fixture.CreateClient();
 
-        // Newer RENEWAL (ts=2000) processed first → pro.
         var renewal = await client.SendAsync(BuildWebhook(
             Event("evt-renew", "RENEWAL", userId.ToString(), 2000)));
         Assert.Equal(HttpStatusCode.OK, renewal.StatusCode);
         Assert.Equal("pro", await GetTierAsync(userId));
 
-        // Older EXPIRATION (ts=1000) arrives out of order → must NOT downgrade.
+        // Old EXPIRATION arrives out of order but RC still reports active → stays pro.
         var expire = await client.SendAsync(BuildWebhook(
-            Event("evt-stale-expire", "EXPIRATION", userId.ToString(), 1000)));
+            Event("evt-old-expire", "EXPIRATION", userId.ToString(), 1000)));
         Assert.Equal(HttpStatusCode.OK, expire.StatusCode);
         var body = await expire.Content.ReadFromJsonAsync<WebhookResult>();
-        Assert.Equal("StaleReorder", body!.Outcome);
+        Assert.Equal("GrantedPro", body!.Outcome);
         Assert.Equal("pro", await GetTierAsync(userId));
+    }
+
+    [Fact]
+    public async Task Webhook_ForgedAppUserId_NotBackedByRc_DoesNotGrantPro()
+    {
+        // Attacker with only the shared secret forges a grant naming a victim who never
+        // purchased. RevenueCat reports the victim inactive → no pro.
+        var victimId = await SeedUserAsync();
+        _fixture.FakeRevenueCat.ByAppUserId[victimId.ToString()] = RevenueCatEntitlementStatus.Inactive;
+        var client = _fixture.CreateClient();
+
+        var req = BuildWebhook(Event("evt-forged", "INITIAL_PURCHASE", victimId.ToString(), 1000));
+        var res = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("free", await GetTierAsync(victimId));
+    }
+
+    [Fact]
+    public async Task Webhook_RcUnavailable_Returns503_DoesNotRecord_AndRetrySucceeds()
+    {
+        var userId = await SeedUserAsync();
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Unavailable;
+        var client = _fixture.CreateClient();
+        const string eventId = "evt-rc-down";
+
+        // First delivery: RC unreachable → 503, tier untouched, event NOT recorded (retryable).
+        var first = await client.SendAsync(BuildWebhook(
+            Event(eventId, "INITIAL_PURCHASE", userId.ToString(), 1000)));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
+        Assert.Equal("free", await GetTierAsync(userId));
+
+        var db = _fixture.GetDbContext();
+        Assert.Equal(0, await db.BillingEvents.CountAsync(be => be.RcEventId == eventId));
+
+        // RevenueCat recovers and reports active; RevenueCat re-delivers the SAME event id.
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Active;
+        var retry = await client.SendAsync(BuildWebhook(
+            Event(eventId, "INITIAL_PURCHASE", userId.ToString(), 1000)));
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Equal("GrantedPro", (await retry.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("pro", await GetTierAsync(userId));
+    }
+
+    [Fact]
+    public async Task Webhook_LegitimateGrant_NotSwallowed_WhenRcCustomerIdCollides()
+    {
+        // A genuine grant for user A whose app_user_id (its Guid) is ALSO already held as the
+        // rc_customer_id of an unrelated user B. The old broad 23505 catch would have rolled the
+        // whole tx back and returned a silent Duplicate — losing the upgrade. Now: the grant
+        // applies, the colliding link is skipped, and no unique violation is swallowed.
+        var userAId = await SeedUserAsync(tier: "free");
+        // User B squats userA's Guid as its rc_customer_id.
+        await SeedUserAsync(tier: "free", rcCustomerId: userAId.ToString());
+        _fixture.FakeRevenueCat.ByAppUserId[userAId.ToString()] = RevenueCatEntitlementStatus.Active;
+        var client = _fixture.CreateClient();
+
+        var res = await client.SendAsync(BuildWebhook(
+            Event("evt-collide", "INITIAL_PURCHASE", userAId.ToString(), 1000)));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+
+        var db = _fixture.GetDbContext();
+        var userA = await db.Users.FirstAsync(u => u.Id == userAId);
+        Assert.Equal("pro", userA.Tier);            // upgrade NOT lost
+        Assert.Null(userA.RcCustomerId);            // colliding link skipped, not throwing
     }
 
     // ---- RequirePro guard (re-queries DB, ignores JWT claim) ---------------

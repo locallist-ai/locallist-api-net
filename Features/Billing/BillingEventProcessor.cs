@@ -4,69 +4,70 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LocalList.API.NET.Features.Billing;
 
-/// <summary>Outcome of processing a single RevenueCat event — used only for logging/tests.</summary>
+/// <summary>Outcome of processing a single RevenueCat event — used for logging/tests and status mapping.</summary>
 public enum BillingEventOutcome
 {
     /// <summary>Event id already in the ledger — no-op (idempotent replay).</summary>
     Duplicate,
-    /// <summary>Applied and set the user to the "pro" tier.</summary>
+    /// <summary>RevenueCat confirms the entitlement is active → user set/kept "pro".</summary>
     GrantedPro,
-    /// <summary>Applied and reverted the user to the "free" tier.</summary>
+    /// <summary>RevenueCat confirms the entitlement is inactive → user set/kept "free".</summary>
     RevokedToFree,
-    /// <summary>Recorded but no tier change (e.g. CANCELLATION keeps access until EXPIRATION).</summary>
-    NoTierChange,
-    /// <summary>Recorded but skipped the tier change because a newer event already applied.</summary>
-    StaleReorder,
     /// <summary>Recorded with a null user — the app_user_id did not map to any LocalList user.</summary>
     UserNotFound,
+    /// <summary>
+    /// RevenueCat could not be verified (down / not configured). Tier UNCHANGED and the event
+    /// is NOT recorded, so the caller returns a retryable error and RevenueCat re-delivers.
+    /// </summary>
+    RcUnavailable,
 }
 
 /// <summary>
 /// Applies RevenueCat subscriber events to <see cref="User.Tier"/>. This is the ONLY
-/// server-side writer of the tier column driven by billing. Every mutation is:
-///   - idempotent (deduped by <see cref="BillingEvent.RcEventId"/> + a UNIQUE index race guard),
-///   - reorder-safe (a stale event, by <c>event_timestamp_ms</c>, never clobbers newer state),
-///   - transactional (ledger insert + tier write commit together).
+/// server-side writer of the tier column driven by billing.
+///
+/// SECURITY MODEL: the webhook is a TRIGGER, not the source of truth. Past the shared-secret
+/// gate, the payload is still attacker-shaped (a leaked secret lets anyone POST an arbitrary
+/// app_user_id / entitlement / event_timestamp_ms). So the tier is derived from RevenueCat's
+/// authoritative REST state (<see cref="IRevenueCatClient"/>), never from the payload. A forged
+/// grant naming a victim, or a pinned <c>event_timestamp_ms=long.MaxValue</c>, therefore cannot
+/// grant or freeze "pro": we ask RevenueCat what the subscriber actually has, right now.
+///
+/// Idempotent (deduped by <see cref="BillingEvent.RcEventId"/> + its UNIQUE index race guard,
+/// scoped to that constraint only) and transactional (ledger insert + tier write commit together).
 /// Slice-local service (VSA): lives in Features/Billing, imports no other slice.
 /// </summary>
 public class BillingEventProcessor
 {
-    // Event types that grant "pro" when the plus entitlement is active.
-    private static readonly HashSet<string> GrantTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "INITIAL_PURCHASE",
-        "RENEWAL",
-        "PRODUCT_CHANGE",
-        "UNCANCELLATION",
-        "SUBSCRIPTION_EXTENDED",
-        "NON_RENEWING_PURCHASE",
-    };
-
-    // Event types that revoke access (back to "free").
-    private static readonly HashSet<string> RevokeTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "EXPIRATION",
-        "SUBSCRIPTION_PAUSED",
-    };
-
     private const string TierPro = "pro";
     private const string TierFree = "free";
+    private const string RcEventIdIndexName = "IX_billing_events_rc_event_id";
+
+    // Defense-in-depth: an absurdly-future event_timestamp_ms is stored clamped so it can never
+    // pollute audit queries. It no longer drives any tier decision (RevenueCat state does).
+    private static readonly TimeSpan FutureTolerance = TimeSpan.FromHours(24);
 
     private readonly LocalListDbContext _db;
+    private readonly IRevenueCatClient _revenueCat;
     private readonly TimeProvider _clock;
     private readonly ILogger<BillingEventProcessor> _logger;
 
     public BillingEventProcessor(
-        LocalListDbContext db, TimeProvider clock, ILogger<BillingEventProcessor> logger)
+        LocalListDbContext db,
+        IRevenueCatClient revenueCat,
+        TimeProvider clock,
+        ILogger<BillingEventProcessor> logger)
     {
         _db = db;
+        _revenueCat = revenueCat;
         _clock = clock;
         _logger = logger;
     }
 
     /// <summary>
     /// Processes one event. Assumes the caller already verified the webhook authorization.
-    /// Returns the outcome; never throws for business cases (only for infra failures).
+    /// Returns the outcome; never throws for business cases (only for infra failures other than
+    /// the deduped-insert race).
     /// </summary>
     public async Task<BillingEventOutcome> ProcessAsync(
         RevenueCatEvent evt, string plusEntitlementId, CancellationToken ct)
@@ -83,8 +84,7 @@ public class BillingEventProcessor
 
         var user = await ResolveUserAsync(evt, ct);
 
-        // Decide the tier effect from the event type + entitlement, honoring reorder.
-        var outcome = BillingEventOutcome.NoTierChange;
+        BillingEventOutcome outcome;
         if (user is null)
         {
             outcome = BillingEventOutcome.UserNotFound;
@@ -92,32 +92,34 @@ public class BillingEventProcessor
                 "RevenueCat event {EventId} ({Type}): no user for app_user_id {AppUserId}; recorded unresolved",
                 rcEventId, evt.Type, appUserId);
         }
-        else if (evt.AffectsEntitlement(plusEntitlementId))
+        else
         {
-            var isNewest = await IsNewestForUserAsync(user.Id, evt.EventTimestampMs, ct);
-            if (!isNewest)
+            // Ask RevenueCat for the CURRENT, verified state — ignore the payload's claims.
+            var status = await _revenueCat.GetEntitlementStatusAsync(appUserId!, plusEntitlementId, ct);
+
+            if (status == RevenueCatEntitlementStatus.Unavailable)
             {
-                outcome = BillingEventOutcome.StaleReorder;
-                _logger.LogInformation(
-                    "RevenueCat event {EventId} ({Type}) for user {UserId} is stale (ts {Ts}); tier unchanged",
-                    rcEventId, evt.Type, user.Id, evt.EventTimestampMs);
+                // Do NOT change the tier and do NOT record the event: return a retryable signal
+                // so RevenueCat re-delivers once its API is reachable again. Never grant blindly.
+                _logger.LogWarning(
+                    "RevenueCat event {EventId} ({Type}) for user {UserId}: RC state unavailable; tier unchanged, will retry",
+                    rcEventId, evt.Type, user.Id);
+                return BillingEventOutcome.RcUnavailable;
             }
-            else if (GrantTypes.Contains(evt.Type ?? string.Empty))
+
+            if (status == RevenueCatEntitlementStatus.Active)
             {
                 if (user.Tier != TierPro) user.Tier = TierPro;
-                // Persist the RevenueCat customer link so /account and future events resolve.
-                if (string.IsNullOrEmpty(user.RcCustomerId) && !string.IsNullOrEmpty(appUserId))
-                    user.RcCustomerId = appUserId;
+                LinkRcCustomer(user, appUserId);
                 user.UpdatedAt = _clock.GetUtcNow();
                 outcome = BillingEventOutcome.GrantedPro;
             }
-            else if (RevokeTypes.Contains(evt.Type ?? string.Empty))
+            else
             {
                 if (user.Tier != TierFree) user.Tier = TierFree;
                 user.UpdatedAt = _clock.GetUtcNow();
                 outcome = BillingEventOutcome.RevokedToFree;
             }
-            // CANCELLATION / BILLING_ISSUE / TRANSFER / TEST → recorded, no tier change.
         }
 
         _db.BillingEvents.Add(new BillingEvent
@@ -126,7 +128,7 @@ public class BillingEventProcessor
             UserId = user?.Id,
             AppUserId = appUserId,
             EventType = evt.Type ?? "UNKNOWN",
-            EventTimestampMs = evt.EventTimestampMs,
+            EventTimestampMs = ClampTimestamp(evt.EventTimestampMs),
             ProcessedAt = _clock.GetUtcNow(),
         });
 
@@ -134,11 +136,14 @@ public class BillingEventProcessor
         {
             await _db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        catch (DbUpdateException ex) when (IsDuplicateEventRace(ex))
         {
-            // A concurrent delivery of the same event id won the INSERT race. The tier
-            // write in THIS transaction is rolled back with it — the winner already
-            // applied the identical effect. Treat as an idempotent duplicate.
+            // A concurrent delivery of the SAME event id won the INSERT race on the
+            // rc_event_id unique index. The tier write in THIS transaction rolls back with
+            // it — the winner already applied the identical, RC-derived effect. Idempotent.
+            // NOTE: only this specific constraint is swallowed. Any other unique violation
+            // (e.g. a rc_customer_id collision) must propagate — never silently 200 a
+            // legitimate upgrade into a lost purchase.
             _logger.LogInformation(
                 "RevenueCat event {EventId} lost the insert race (concurrent duplicate); treating as processed",
                 rcEventId);
@@ -149,6 +154,29 @@ public class BillingEventProcessor
             "RevenueCat event {EventId} ({Type}) processed for user {UserId}: {Outcome}",
             rcEventId, evt.Type, user?.Id, outcome);
         return outcome;
+    }
+
+    /// <summary>
+    /// Persists the RevenueCat customer link so /account and future lookups resolve — but only
+    /// when it is free to take. If another user already holds this rc_customer_id we skip the
+    /// assignment (and log) rather than provoke a unique-violation that would poison retries;
+    /// the tier grant itself still applies.
+    /// </summary>
+    private void LinkRcCustomer(User user, string? appUserId)
+    {
+        if (string.IsNullOrEmpty(appUserId) || !string.IsNullOrEmpty(user.RcCustomerId))
+            return;
+
+        var takenByOther = _db.Users.Any(u => u.RcCustomerId == appUserId && u.Id != user.Id);
+        if (takenByOther)
+        {
+            _logger.LogWarning(
+                "rc_customer_id {AppUserId} already linked to another user; not linking to {UserId}",
+                appUserId, user.Id);
+            return;
+        }
+
+        user.RcCustomerId = appUserId;
     }
 
     /// <summary>
@@ -174,19 +202,14 @@ public class BillingEventProcessor
         return null;
     }
 
-    /// <summary>
-    /// True when no already-recorded event for this user has a timestamp &gt;= the incoming one.
-    /// Guards against an out-of-order EXPIRATION landing after a newer RENEWAL, etc.
-    /// </summary>
-    private async Task<bool> IsNewestForUserAsync(Guid userId, long eventTimestampMs, CancellationToken ct)
+    /// <summary>Clamps an absurdly-future timestamp to "now" for audit sanity (see field doc).</summary>
+    private long ClampTimestamp(long eventTimestampMs)
     {
-        var maxSeen = await _db.BillingEvents
-            .Where(be => be.UserId == userId)
-            .Select(be => (long?)be.EventTimestampMs)
-            .MaxAsync(ct);
-        return maxSeen is null || eventTimestampMs >= maxSeen.Value;
+        var ceiling = _clock.GetUtcNow().Add(FutureTolerance).ToUnixTimeMilliseconds();
+        return eventTimestampMs > ceiling ? _clock.GetUtcNow().ToUnixTimeMilliseconds() : eventTimestampMs;
     }
 
-    private static bool IsUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };
+    private static bool IsDuplicateEventRace(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg &&
+        pg.ConstraintName == RcEventIdIndexName;
 }

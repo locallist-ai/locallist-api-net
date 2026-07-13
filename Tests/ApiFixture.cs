@@ -21,6 +21,7 @@ using Testcontainers.PostgreSql;
 using System.Collections.Concurrent;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Auth.Services;
+using LocalList.API.NET.Features.Billing;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
@@ -63,6 +64,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// By default all methods return null (simulates missing API key).
     /// </summary>
     public FakeGooglePlacesService FakeGooglePlaces { get; } = new();
+
+    /// <summary>
+    /// In-process fake for <see cref="IRevenueCatClient"/> — the billing webhook's authoritative
+    /// entitlement check. Defaults to <see cref="RevenueCatEntitlementStatus.Active"/>; tests set
+    /// <see cref="FakeRevenueCatClient.ByAppUserId"/> per app_user_id to simulate inactive /
+    /// unavailable RevenueCat state without hitting the real REST API.
+    /// </summary>
+    public FakeRevenueCatClient FakeRevenueCat { get; } = new();
 
     /// <summary>
     /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
@@ -236,6 +245,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             foreach (var d in googlePlacesDesc) services.Remove(d);
             services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
 
+            // Replace IRevenueCatClient with the in-process fake so the billing webhook's
+            // authoritative check is controlled by the test (no real RevenueCat REST call).
+            var rcDesc = services.Where(d => d.ServiceType == typeof(IRevenueCatClient)).ToList();
+            foreach (var d in rcDesc) services.Remove(d);
+            services.AddSingleton<IRevenueCatClient>(FakeRevenueCat);
+
             // Disable rate limiting in tests
             var rateLimiterDescriptors = services
                 .Where(d => d.ServiceType == typeof(IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
@@ -387,6 +402,37 @@ public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
 
     public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
         Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
+}
+
+/// <summary>
+/// In-process fake for <see cref="IRevenueCatClient"/>. Returns <see cref="Default"/> unless a
+/// per-app_user_id override is set in <see cref="ByAppUserId"/>. Lets billing tests simulate the
+/// authoritative RevenueCat REST state (active / inactive / unavailable) deterministically.
+/// </summary>
+public class FakeRevenueCatClient : IRevenueCatClient
+{
+    /// <summary>Fallback status for any app_user_id without an explicit override.</summary>
+    public RevenueCatEntitlementStatus Default { get; set; } = RevenueCatEntitlementStatus.Active;
+
+    public Dictionary<string, RevenueCatEntitlementStatus> ByAppUserId { get; } =
+        new(StringComparer.Ordinal);
+
+    public List<string> Calls { get; } = new();
+
+    public Task<RevenueCatEntitlementStatus> GetEntitlementStatusAsync(
+        string appUserId, string entitlementId, CancellationToken ct)
+    {
+        Calls.Add(appUserId);
+        return Task.FromResult(
+            ByAppUserId.TryGetValue(appUserId, out var status) ? status : Default);
+    }
+
+    public void Reset()
+    {
+        ByAppUserId.Clear();
+        Calls.Clear();
+        Default = RevenueCatEntitlementStatus.Active;
+    }
 }
 
 /// <summary>

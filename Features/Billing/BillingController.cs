@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -7,9 +8,18 @@ namespace LocalList.API.NET.Features.Billing;
 
 /// <summary>
 /// Receives RevenueCat subscriber webhooks and drives <see cref="Shared.Data.Entities.User.Tier"/>.
-/// This is the server-side source of truth for entitlement state: the app polls GET /account
-/// after a purchase and expects the tier to flip here. Anonymous at the transport level
+/// This is the server-side trigger for entitlement state: the app polls GET /account after a
+/// purchase and expects the tier to flip once this fires. Anonymous at the transport level
 /// (server-to-server, no JWT) but gated by a shared-secret Authorization header.
+///
+/// The webhook payload is treated as an UNTRUSTED trigger only — the actual tier is derived from
+/// RevenueCat's REST API (<see cref="BillingEventProcessor"/> / <see cref="IRevenueCatClient"/>),
+/// so a leaked secret cannot be used to forge a grant or a permanent entitlement.
+///
+/// DoS note: the Authorization secret is verified BEFORE the JSON body is read, so an unauthorized
+/// caller cannot make us parse an arbitrary payload; Kestrel's 10 MB request-body cap
+/// (Program.cs) bounds an authorized body. Endpoint-level rate limiting is intentionally left to
+/// the shared rate-limit branch to avoid conflicting edits.
 /// </summary>
 [ApiController]
 [Route("webhooks/revenuecat")]
@@ -28,6 +38,8 @@ public class BillingController : ControllerBase
     private const string EntitlementConfigKey = "RevenueCat:PlusEntitlementId";
     private const string DefaultPlusEntitlementId = "plus";
 
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+
     private readonly BillingEventProcessor _processor;
     private readonly IConfiguration _configuration;
     private readonly ILogger<BillingController> _logger;
@@ -41,7 +53,7 @@ public class BillingController : ControllerBase
     }
 
     [HttpPost]
-    public async Task<IActionResult> Handle([FromBody] RevenueCatWebhookRequest request, CancellationToken ct)
+    public async Task<IActionResult> Handle(CancellationToken ct)
     {
         var expected = Environment.GetEnvironmentVariable(AuthEnvVar) ?? _configuration[AuthConfigKey];
 
@@ -55,6 +67,8 @@ public class BillingController : ControllerBase
             return StatusCode(503, new { error = "Webhook not configured" });
         }
 
+        // Verify the shared secret BEFORE reading the body — an unauthorized caller must not be
+        // able to make us deserialize an arbitrary (up to 10 MB) JSON payload.
         var provided = Request.Headers.Authorization.ToString();
         if (!FixedTimeEquals(provided, expected))
         {
@@ -62,7 +76,19 @@ public class BillingController : ControllerBase
             return Unauthorized(new { error = "Invalid webhook authorization" });
         }
 
-        var evt = request.Event;
+        RevenueCatWebhookRequest? request;
+        try
+        {
+            request = await JsonSerializer.DeserializeAsync<RevenueCatWebhookRequest>(
+                Request.Body, JsonOpts, ct);
+        }
+        catch (JsonException)
+        {
+            _logger.LogWarning("RevenueCat webhook rejected: unparseable body");
+            return BadRequest(new { error = "Malformed body" });
+        }
+
+        var evt = request?.Event;
         if (evt is null || string.IsNullOrEmpty(evt.Id) || string.IsNullOrEmpty(evt.Type))
         {
             _logger.LogWarning("RevenueCat webhook rejected: missing event id/type");
@@ -73,12 +99,24 @@ public class BillingController : ControllerBase
 
         var outcome = await _processor.ProcessAsync(evt, plusEntitlementId, ct);
 
-        // Always 200 for an authorized, well-formed event (including no-ops) so RevenueCat
-        // does not retry a delivery we have already durably recorded.
+        // Could not verify against RevenueCat → retryable. Return 5xx so RevenueCat re-delivers
+        // (we did NOT record the event), rather than durably swallowing an unverified upgrade.
+        if (outcome == BillingEventOutcome.RcUnavailable)
+        {
+            return StatusCode(503, new { received = false, outcome = outcome.ToString() });
+        }
+
+        // Otherwise 200 for an authorized, well-formed, verified event (including no-ops) so
+        // RevenueCat does not retry a delivery we have already durably recorded.
         return Ok(new { received = true, outcome = outcome.ToString() });
     }
 
-    /// <summary>Constant-time comparison over UTF-8 bytes; length-safe (no early exit on length).</summary>
+    /// <summary>
+    /// Constant-time comparison over UTF-8 bytes. <see cref="CryptographicOperations.FixedTimeEquals"/>
+    /// does return false immediately when the lengths differ (it only guarantees no per-byte
+    /// timing leak for equal-length inputs) — that length side-channel is not a forgery vector
+    /// for a fixed-length shared secret, so it is acceptable here.
+    /// </summary>
     private static bool FixedTimeEquals(string a, string b)
     {
         var ba = Encoding.UTF8.GetBytes(a);

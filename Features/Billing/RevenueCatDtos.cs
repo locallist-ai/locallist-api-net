@@ -31,14 +31,7 @@ public record RevenueCatEvent(
     // Source-of-truth ordering key (epoch millis). Used for the reorder guard.
     [property: JsonPropertyName("event_timestamp_ms")] long EventTimestampMs,
     [property: JsonPropertyName("expiration_at_ms")] long? ExpirationAtMs,
-    [property: JsonPropertyName("product_id")] string? ProductId)
-{
-    /// <summary>True when the "plus" entitlement (id configurable) is affected by this event.</summary>
-    public bool AffectsEntitlement(string entitlementId)
-    {
-        if (EntitlementIds is { Length: > 0 } ids &&
-            ids.Any(id => string.Equals(id, entitlementId, StringComparison.OrdinalIgnoreCase)))
-            return true;
-        return string.Equals(EntitlementId, entitlementId, StringComparison.OrdinalIgnoreCase);
-    }
-}
+    [property: JsonPropertyName("product_id")] string? ProductId);
+// NOTE: entitlement_ids / event_timestamp_ms are captured for audit/logging only. They are
+// NOT trusted to decide the tier — a leaked webhook secret would let an attacker forge them.
+// The tier is derived from RevenueCat's REST API (see IRevenueCatClient / BillingEventProcessor).
