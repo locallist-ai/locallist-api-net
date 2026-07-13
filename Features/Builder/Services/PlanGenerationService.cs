@@ -85,7 +85,20 @@ public class PlanGenerationService : IPlanGenerationService
             return null;
         }
 
-        var seed = Random.Shared.Next();
+        // Semilla determinista derivada del request: fija la selección y el orden
+        // de candidatos del scheduler (contrato "determinista por semilla" del
+        // scheduler, dado un conjunto de candidatos). NO garantiza plan idéntico
+        // end-to-end en la ruta RAG por dos motivos: (1) la query de embedding
+        // incorpora prefs.Vibes, extraídas por el LLM con temperatura > 0; (2) el
+        // texto de esa query es sensible al ORDEN de serialización de categorías/
+        // vibes (ver RetrieveCandidatesAsync ~L141-142) — no se canonicaliza aquí
+        // porque cambiar el orden alteraría el embedding y no se ha evaluado su
+        // efecto en la calidad del plan. La semilla SÍ canonicaliza el orden para
+        // la selección del scheduler, y la ruta keyword-fallback es determinista
+        // end-to-end. Antes la semilla era Random.Shared.Next(), que hacía cada
+        // regeneración una lotería aun con el mismo pool y ocultaba los parámetros
+        // del usuario tras el muestreo aleatorio.
+        var seed = ComputeRequestSeed(msg, city, lang, tripContext);
         _logger.LogInformation("PlanGen: schedule seed={Seed}", seed);
         var schedule = await _scheduler.BuildPlanScheduleAsync(places, prefs, seed, ct);
 
@@ -165,6 +178,40 @@ public class PlanGenerationService : IPlanGenerationService
             return await FallbackKeywordFilterAsync(city, prefs, ct);
         }
 
+        // Top-up por categoría explícita: el top-K por cosine se calcula sobre TODO
+        // el catálogo de la ciudad, así que en ciudades grandes los places de la
+        // categoría pedida pueden quedar fuera del top-K y disparar el fallback
+        // mixto del gate aunque el catálogo sí tenga suficientes. Segunda query
+        // restringida a las categorías pedidas (+ food, exenta del gate para los
+        // meal slots) para que el gate vea el catálogo real de la categoría.
+        // Mismas semánticas de match que FilterByCategory (substring, case-insensitive).
+        if (prefs.CategoriesExplicit && prefs.Categories.Count > 0)
+        {
+            var cats = prefs.Categories
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Select(c => c.ToLowerInvariant())
+                .ToList();
+            if (!cats.Contains("food")) cats.Add("food");
+
+            var seenIds = candidates.Select(c => c.Place.Id).ToHashSet();
+            var topUp = await _db.Places.AsNoTracking()
+                .Where(p => p.Status == "published" && p.City == city && p.Embedding != null)
+                .Where(p => cats.Any(c => p.Category.ToLower().Contains(c)))
+                .OrderBy(p => p.Embedding!.CosineDistance(qvec))
+                .Take(RetrievalTopK)
+                .Select(p => new { Place = p, Distance = (float)p.Embedding!.CosineDistance(qvec) })
+                .ToListAsync(ct);
+
+            var added = topUp.Where(t => !seenIds.Contains(t.Place.Id)).ToList();
+            if (added.Count > 0)
+            {
+                candidates.AddRange(added);
+                _logger.LogInformation(
+                    "RAG: category top-up [{Cats}] +{Added} candidates ({Total} total)",
+                    string.Join(",", cats), added.Count, candidates.Count);
+            }
+        }
+
         var ranked = _ranker.RankWithScores(
             candidates.Select(c => (c.Place, c.Distance)).ToList(),
             prefs);
@@ -176,7 +223,22 @@ public class PlanGenerationService : IPlanGenerationService
             ranked.Count,
             string.Join("|", ranked.Take(3).Select(s => $"{s.Place.Name}:{s.Score:F2}")));
 
-        return ranked.Select(s => s.Place).ToList();
+        var rankedPlaces = ranked.Select(s => s.Place).ToList();
+
+        // Gate duro cuando las categorías son elección explícita del usuario (wizard/
+        // chat slots) — alinea la ruta RAG con la keyword, donde categoría ya filtra.
+        // Con categorías solo-LLM (inferidas del mensaje) se mantiene el boost blando
+        // del ranking, sin recortar el recall semántico.
+        if (prefs.CategoriesExplicit && prefs.Categories.Count > 0)
+        {
+            var gated = ApplyCategoryGate(rankedPlaces, prefs);
+            _logger.LogInformation(
+                "RAG: category gate [{Cats}] {Before}→{After} candidates",
+                string.Join(",", prefs.Categories), rankedPlaces.Count, gated.Count);
+            return gated;
+        }
+
+        return rankedPlaces;
     }
 
     internal async Task<List<Place>> FallbackKeywordFilterAsync(
@@ -184,12 +246,12 @@ public class PlanGenerationService : IPlanGenerationService
     {
         // OrderBy(p => p.Id) is load-bearing for determinism: same seed + same city always
         // produces the same candidate pool because FilterByCategory preserves input order.
-        var matching = await _db.Places.AsNoTracking()
+        var pool = await _db.Places.AsNoTracking()
             .Where(p => p.Status == "published" && p.City == city)
             .OrderBy(p => p.Id)
             .Take(FallbackKeywordHardCap)
             .ToListAsync(ct);
-        return FilterByCategory(matching, prefs);
+        return ApplyCategoryGate(pool, prefs);
     }
 
     internal static List<Place> FilterByCategory(List<Place> allPlaces, ExtractedPreferences prefs)
@@ -202,6 +264,109 @@ public class PlanGenerationService : IPlanGenerationService
                 || p.Category.Contains(c, StringComparison.OrdinalIgnoreCase)))
             .ToList();
     }
+
+    /// <summary>
+    /// Filtro duro por categoría con fallback graceful: si el catálogo no tiene
+    /// suficientes places de las categorías pedidas para llenar el plan
+    /// (days × maxStops efectivos, con el clamp de pace del scheduler), completa
+    /// con el resto de candidatos manteniendo a los de la categoría pedida
+    /// primero. Mejor un plan mixto que uno vacío.
+    /// Food está exento del gate: EnsureFoodPerDay (scheduler) solo puede
+    /// garantizar ≥1 parada de comida por día si el pool conserva candidatos
+    /// food — un wizard con categories=["culture"] no debe producir días sin
+    /// comer. Los food no pedidos van al final del pool: no ocupan los slots
+    /// rank-first de la categoría elegida y quedan disponibles para los meal
+    /// slots del scheduler.
+    /// Preserva el orden de entrada (ranking o Id), que es load-bearing para el
+    /// determinismo y para la selección rank-first del scheduler.
+    ///
+    /// LIMITACIÓN CONOCIDA (gap de escala, no aborda este PR): la exención de food
+    /// solo protege a los food que YA están en <paramref name="orderedPlaces"/>.
+    /// En la ruta RAG ese pool es el top-K por cosine (RetrievalTopK=50) más el
+    /// top-up por categoría — que también está capado a RetrievalTopK. En una
+    /// ciudad con catálogo grande dominado por la categoría pedida, los food
+    /// pueden quedar fuera de ambos cortes y EnsureFoodPerDay no tendría nada que
+    /// colocar → días sin comida. No dispara a escala Miami; es la misma clase de
+    /// problema que "gate sobre top-50 vs catálogo" y se abordará cuando el
+    /// catálogo crezca (p. ej. query dedicada de food garantizada, sin cap por
+    /// cosine). La ruta keyword (FallbackKeywordHardCap=500 sin ranking) no sufre
+    /// este corte.
+    /// </summary>
+    internal static List<Place> ApplyCategoryGate(List<Place> orderedPlaces, ExtractedPreferences prefs)
+    {
+        if (prefs.Categories == null || prefs.Categories.Count == 0) return orderedPlaces;
+
+        var matching = FilterByCategory(orderedPlaces, prefs);
+        var matchingIds = matching.Select(p => p.Id).ToHashSet();
+
+        // Mismo cálculo de slots que el scheduler (pace clamp incluido) — si
+        // divergen, el gate cree que faltan candidatos y mete el fallback mixto
+        // en planes que el scheduler llenaría solo con la categoría pedida.
+        int needed = Math.Max(1, prefs.Days * SchedulingService.ResolveEffectiveMaxStops(prefs));
+        if (matching.Count >= needed)
+        {
+            var unmatchedFood = orderedPlaces
+                .Where(p => !matchingIds.Contains(p.Id)
+                            && p.Category.Equals("food", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            return matching.Concat(unmatchedFood).ToList();
+        }
+
+        // Fallback mixto: el resto de candidatos ya incluye los food no pedidos.
+        return matching
+            .Concat(orderedPlaces.Where(p => !matchingIds.Contains(p.Id)))
+            .ToList();
+    }
+
+    /// <summary>
+    /// FNV-1a 32-bit sobre los campos del request. Estable entre procesos
+    /// (string.GetHashCode está aleatorizado por proceso) — la misma petición
+    /// siempre produce la misma semilla, por lo que la selección de candidatos
+    /// del scheduler es reproducible (determinismo a nivel de scheduler dado un
+    /// conjunto de candidatos fijo, no de la petición end-to-end: la query de
+    /// embedding incorpora prefs.Vibes, que salen de la extracción LLM con
+    /// temperatura > 0 y no son deterministas).
+    /// Todas las listas se canonicalizan ordenadas (Ordinal), tanto las
+    /// top-level como las CLAVES y los VALORES de cada bucket de Subcategories:
+    /// el mismo set de selecciones del wizard produce la misma semilla aunque
+    /// el cliente lo serialice en otro orden.
+    /// </summary>
+    internal static int ComputeRequestSeed(string message, string city, string lang, TripContextDto context)
+    {
+        var canonical = string.Join("|",
+            message,
+            city,
+            lang,
+            context.Days?.ToString() ?? "",
+            context.GroupType ?? "",
+            context.Budget ?? "",
+            context.BudgetAmount?.ToString() ?? "",
+            CanonicalList(context.Categories),
+            context.Subcategories is null
+                ? ""
+                : string.Join(";", context.Subcategories
+                    .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                    .Select(kv => $"{kv.Key}:{CanonicalList(kv.Value)}")),
+            CanonicalList(context.CompanyTags),
+            context.Pace ?? "",
+            CanonicalList(context.Dietary),
+            CanonicalList(context.Exclusions),
+            context.VibesPrimary ?? "");
+
+        unchecked
+        {
+            uint hash = 2166136261;
+            foreach (char c in canonical)
+            {
+                hash ^= c;
+                hash *= 16777619;
+            }
+            return (int)(hash & int.MaxValue);
+        }
+    }
+
+    private static string CanonicalList(List<string>? values) =>
+        values is null ? "" : string.Join(",", values.OrderBy(v => v, StringComparer.Ordinal));
 
     private static string Sanitize(string value, int maxLen)
     {

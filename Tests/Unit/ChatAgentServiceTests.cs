@@ -363,17 +363,21 @@ public class ChatAgentServiceTests
         Assert.Equal(ChatStrings.ReadyToBuild("en"),  ChatStrings.ReadyToBuild("zh"));
     }
 
-    // ── Budget tier → BudgetAmount mapping (Fix 1) ───────────────────────────
+    // ── Budget tier flow (Fix 1; fix/plan-quality-params: tier nativo) ────────
+    // Antes SlotsToTripContext mapeaba tier→BudgetAmount como workaround porque
+    // MergeContextIntoPrefs descartaba context.Budget. Ahora el tier fluye nativo
+    // (prefs.BudgetTier) y ScoreBudgetMatch puntúa por banda.
 
     [Theory]
-    [InlineData("budget",   50)]
-    [InlineData("moderate", 150)]
-    [InlineData("premium",  300)]
-    public void SlotsToTripContext_BudgetTier_SetsBudgetAmount(string tier, int expectedAmount)
+    [InlineData("budget")]
+    [InlineData("moderate")]
+    [InlineData("premium")]
+    public void SlotsToTripContext_BudgetTier_PassesThroughWithoutAmount(string tier)
     {
         var slots = new ChatSlots { City = "Miami", Days = 3, GroupType = "couple", Budget = tier };
         var ctx = ChatAgentService.SlotsToTripContext(slots);
-        Assert.Equal(expectedAmount, ctx.BudgetAmount);
+        Assert.Equal(tier, ctx.Budget);
+        Assert.Null(ctx.BudgetAmount); // ya no se sintetiza un amount desde el tier
     }
 
     [Fact]
@@ -388,8 +392,8 @@ public class ChatAgentServiceTests
     public void BudgetTierSignal_FlowsFromSlotsToMergeToRank()
     {
         // Regression: chat path sets Budget tier but never BudgetAmount.
-        // Fix: SlotsToTripContext maps tier→amount so MergeContextIntoPrefs populates
-        // prefs.BudgetAmount, and ScoreBudgetMatch returns > 0 for a matching place.
+        // El tier viaja como context.Budget → prefs.BudgetTier y ScoreBudgetMatch
+        // devuelve > 0 para un place cuya banda de precio encaja.
         var slots = new ChatSlots
         {
             City = "Miami", Days = 3, GroupType = "couple", Budget = "moderate",
@@ -397,14 +401,14 @@ public class ChatAgentServiceTests
         };
 
         var ctx = ChatAgentService.SlotsToTripContext(slots);
-        Assert.Equal(150, ctx.BudgetAmount); // tier wired
+        Assert.Equal("moderate", ctx.Budget); // tier wired
 
         var aiSvc = new PreferenceExtractorService(
             LocalList.API.Tests.Unit.Llm.StubLlmClient.Succeeding("gemini"),
             NullLogger<PreferenceExtractorService>.Instance);
 
         var prefs = aiSvc.MergeContextIntoPrefs(new ExtractedPreferences(), ctx);
-        Assert.Equal(150, prefs.BudgetAmount); // merged into prefs
+        Assert.Equal("moderate", prefs.BudgetTier); // merged into prefs
 
         var midRange = new Place
         {
