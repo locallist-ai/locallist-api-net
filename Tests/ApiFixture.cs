@@ -103,7 +103,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("Mapbox__AccessToken", "test-mapbox-token");
         // PostHog key — no vacío para que PostHogService no cortocircuite con el guard de API key.
         Environment.SetEnvironmentVariable("PostHog__ApiKey", "test-posthog-key");
+        // RevenueCat webhook auth — valor conocido para firmar las peticiones de test.
+        Environment.SetEnvironmentVariable("REVENUECAT_WEBHOOK_AUTH", TestRevenueCatWebhookSecret);
     }
+
+    /// <summary>Shared secret the Billing webhook tests send in the Authorization header.</summary>
+    public const string TestRevenueCatWebhookSecret = "test-rc-webhook-secret";
 
     public async ValueTask InitializeAsync()
     {
