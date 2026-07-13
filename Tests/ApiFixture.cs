@@ -89,6 +89,15 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
     private bool _dbCreated;
 
+    /// <summary>
+    /// Por defecto los tests desactivan el rate limiter (GetNoLimiter) para no acoplar
+    /// la lógica de negocio a los límites. Las suites que verifican el propio rate-limiting
+    /// (p. ej. <c>BuilderRateLimitTests</c>) sobreescriben esto a <c>false</c> para dejar
+    /// activas las políticas reales de <see cref="RateLimitingExtensions"/>, y ajustan los
+    /// límites vía <c>UseSetting</c>.
+    /// </summary>
+    protected virtual bool DisableRateLimiting => true;
+
     static ApiFixture()
     {
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", "");
@@ -231,7 +240,11 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             foreach (var d in googlePlacesDesc) services.Remove(d);
             services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
 
-            // Disable rate limiting in tests
+            // Disable rate limiting in tests (default). Las suites que testean el propio
+            // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
+            // reales registradas por AddRateLimitingPolicies.
+            if (!DisableRateLimiting) return;
+
             var rateLimiterDescriptors = services
                 .Where(d => d.ServiceType == typeof(IConfigureOptions<Microsoft.AspNetCore.RateLimiting.RateLimiterOptions>))
                 .ToList();

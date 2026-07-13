@@ -24,21 +24,44 @@ public static class RateLimitingExtensions
                         Window = TimeSpan.FromMinutes(1)
                     }));
 
-            // A3: Builder specific rate limits per hour per IP to prevent Gemini abuse.
-            // Configurable via env `Builder__RateLimitPerHour` (default 5). Pablo
-            // 2026-04-26: durante testing intensivo override en Railway a 100+ para
-            // no bloquearse; revertir antes de scale-out con usuarios reales.
-            var builderLimit = configuration.GetValue<int?>("Builder:RateLimitPerHour") ?? 5;
+            // A3: /builder/chat y /chat/generate llaman a Gemini (coste real por request)
+            // y son [AllowAnonymous] a propósito — v1 se lanza GRATIS y la app permite
+            // generar plan sin cuenta (lib/api.ts solo adjunta Authorization si hay token).
+            // Por eso NO forzamos login aquí (sería una decisión de producto que rompería la
+            // UX gratuita); endurecemos el rate-limit y lo particionamos por identidad,
+            // igual que ChatTurnLimit:
+            //   - Autenticado (userId del JWT): bucket propio y límite más alto
+            //     (`Builder:RateLimitPerHourAuthenticated`, default 20). Una cuenta real es
+            //     más accountable y es el camino de retención; no debe competir con el ruido
+            //     anónimo que comparte su IP.
+            //   - Anónimo: bucket por IP y límite estricto anti-abuso de coste Gemini
+            //     (`Builder:RateLimitPerHour`, default 5).
+            // Residual conocido: usuarios anónimos tras un mismo NAT/CGNAT comparten el bucket
+            // por IP. La identidad-por-dispositivo real (device attestation / App Check) es
+            // trabajo aparte (project_app_hardening); NO metemos un header de dispositivo
+            // spoofeable en la clave porque multiplicaría buckets por IP y DEBILITARÍA el
+            // límite frente a un atacante que rota el header.
+            var builderAnonLimit = configuration.GetValue<int?>("Builder:RateLimitPerHour")
+                                   ?? DefaultBuilderAnonLimitPerHour;
+            var builderAuthLimit = configuration.GetValue<int?>("Builder:RateLimitPerHourAuthenticated")
+                                   ?? DefaultBuilderAuthLimitPerHour;
             options.AddPolicy("BuilderLimit", context =>
-                RateLimitPartition.GetFixedWindowLimiter(
-                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            {
+                var (partitionKey, permitLimit) = ResolveBuilderPartition(
+                    ExtractUserId(context),
+                    context.Connection.RemoteIpAddress?.ToString(),
+                    builderAnonLimit,
+                    builderAuthLimit);
+                return RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: partitionKey,
                     factory: _ => new FixedWindowRateLimiterOptions
                     {
                         AutoReplenishment = true,
-                        PermitLimit = builderLimit,
+                        PermitLimit = permitLimit,
                         QueueLimit = 0,
                         Window = TimeSpan.FromHours(1)
-                    }));
+                    });
+            });
 
             // Auth brute-force protection: 10 requests per 15 minutes per IP
             options.AddPolicy("AuthLimit", context =>
@@ -148,5 +171,39 @@ public static class RateLimitingExtensions
         });
 
         return services;
+    }
+
+    // ── Builder/Chat-generate partitioning (identity-aware) ─────────────────────────
+    // Expuesto internal (InternalsVisibleTo LocalList.API.Tests) para poder testear la
+    // decisión de partición sin levantar un limiter real.
+
+    /// <summary>Límite anónimo por hora y por IP para /builder/chat y /chat/generate.</summary>
+    internal const int DefaultBuilderAnonLimitPerHour = 5;
+
+    /// <summary>Límite autenticado por hora y por userId (bucket propio, más alto que el anónimo).</summary>
+    internal const int DefaultBuilderAuthLimitPerHour = 20;
+
+    /// <summary>
+    /// Extrae el identificador estable de la identidad del JWT (userId de la app o uid de
+    /// Firebase). Espejo de la lógica de ChatTurnLimit: JwtBearer mapea <c>sub</c> a
+    /// <see cref="System.Security.Claims.ClaimTypes.NameIdentifier"/>, pero comprobamos ambos
+    /// por si el mapeo de claims inbound está desactivado.
+    /// </summary>
+    internal static string? ExtractUserId(HttpContext context) =>
+        context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+        ?? context.User?.FindFirst("sub")?.Value;
+
+    /// <summary>
+    /// Decide la clave de partición y el límite de permisos para los endpoints caros de
+    /// generación. Autenticado → bucket propio por identidad y límite alto; anónimo →
+    /// bucket por IP y límite estricto. Nunca se mezclan las dos familias de claves.
+    /// </summary>
+    internal static (string partitionKey, int permitLimit) ResolveBuilderPartition(
+        string? userId, string? ip, int anonLimit, int authLimit)
+    {
+        if (!string.IsNullOrEmpty(userId))
+            return ($"builder_auth_{userId}", authLimit);
+
+        return ($"builder_anon_{ip ?? "unknown"}", anonLimit);
     }
 }

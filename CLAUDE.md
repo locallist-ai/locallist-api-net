@@ -11,7 +11,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Cadena de extracción (chat slot-filling + builder preferences) en `gemini-3.1-flash-lite` (primer provider de `Llm:Providers`). Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. Traducciones/descripciones/embeddings siguen su path Gemini propio (fuera de la cadena). |
-| **Rate Limit** | 100 req/min global. Builder 5/hr (configurable via `Builder__RateLimitPerHour`). Chat 20/hr anon · 40/hr auth. Auth 10/15min. Waitlist 5/60s. Admin 60/min. |
+| **Rate Limit** | 100 req/min global. Builder/chat-generate particionado por identidad: 5/hr anon por IP · 20/hr auth por userId (`Builder__RateLimitPerHour` / `Builder__RateLimitPerHourAuthenticated`). Chat 20/hr anon · 40/hr auth. Auth 10/15min. Waitlist 5/60s. Admin 60/min. |
 
 ## Running Locally
 
