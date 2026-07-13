@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace LocalList.API.NET.Features.Billing;
 
@@ -24,6 +25,7 @@ namespace LocalList.API.NET.Features.Billing;
 [ApiController]
 [Route("webhooks/revenuecat")]
 [AllowAnonymous]
+[EnableRateLimiting("RevenueCatWebhookLimit")]
 public class BillingController : ControllerBase
 {
     // Config keys. Env var wins (Railway secret), config fallback for local dev — same

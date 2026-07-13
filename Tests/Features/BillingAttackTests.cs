@@ -46,7 +46,8 @@ public class BillingAttackTests : IClassFixture<ApiFixture>
         return req;
     }
 
-    private static object Event(string id, string type, string appUserId, long ts) => new
+    private static object Event(
+        string id, string type, string appUserId, long ts, string? originalAppUserId = null) => new
     {
         api_version = "1.0",
         @event = new
@@ -54,6 +55,7 @@ public class BillingAttackTests : IClassFixture<ApiFixture>
             id,
             type,
             app_user_id = appUserId,
+            original_app_user_id = originalAppUserId,
             entitlement_ids = new[] { "plus" },
             event_timestamp_ms = ts,
             product_id = "com.locallist.plus.monthly",
@@ -115,5 +117,57 @@ public class BillingAttackTests : IClassFixture<ApiFixture>
 
         Assert.Equal(HttpStatusCode.OK, grant.StatusCode);
         Assert.Equal("free", await GetTierAsync(victimId));
+    }
+
+    /// <summary>
+    /// GOD-TOKEN via decoupled identity: the payload names an app_user_id that RevenueCat reports
+    /// Active but which maps to NO local user (e.g. an unlinked $RCAnonymousID, or a deleted
+    /// account whose RC subscription is still live), and puts the ATTACKER's Guid in
+    /// original_app_user_id. The old code verified the first id in RC (Active) but credited the
+    /// user resolved from the second (the attacker) → free pro. The fix verifies only the
+    /// resolved user's OWN ids, so the attacker (not entitled) is not granted pro.
+    /// </summary>
+    [Fact]
+    public async Task DecoupledIdentity_GodToken_DoesNotCreditUnverifiedUser()
+    {
+        var attackerId = await SeedUserAsync(tier: "free");
+        var client = _fixture.CreateClient();
+
+        // An id RevenueCat reports Active but that does not belong to the attacker.
+        const string ghostActiveId = "$RCAnonymousID:ghost-active";
+        _fixture.FakeRevenueCat.ByAppUserId[ghostActiveId] = RevenueCatEntitlementStatus.Active;
+        // The attacker's own id is NOT entitled (fake default = Inactive).
+
+        var res = await client.SendAsync(BuildWebhook(
+            Event("attack-godtoken", "INITIAL_PURCHASE", ghostActiveId, long.MaxValue,
+                originalAppUserId: attackerId.ToString()),
+            authHeader: ApiFixture.TestRevenueCatWebhookSecret));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("free", await GetTierAsync(attackerId));
+    }
+
+    /// <summary>
+    /// GRIEFING variant: attacker knows a victim's User.Id + the secret. They send an event whose
+    /// app_user_id is garbage (Inactive) and original_app_user_id is the victim's Guid, trying to
+    /// downgrade a paying victim. The old code verified the garbage id (Inactive) and credited the
+    /// victim → free (downgrade). The fix verifies the victim's OWN id (Active) → stays pro.
+    /// </summary>
+    [Fact]
+    public async Task DecoupledIdentity_Griefing_DoesNotDowngradePayingVictim()
+    {
+        var victimId = await SeedUserAsync(tier: "pro");
+        // Victim genuinely holds an active entitlement at RevenueCat.
+        _fixture.FakeRevenueCat.ByAppUserId[victimId.ToString()] = RevenueCatEntitlementStatus.Active;
+        var client = _fixture.CreateClient();
+
+        const string garbageInactiveId = "$RCAnonymousID:garbage"; // fake default = Inactive
+        var res = await client.SendAsync(BuildWebhook(
+            Event("attack-grief", "EXPIRATION", garbageInactiveId, 1000,
+                originalAppUserId: victimId.ToString()),
+            authHeader: ApiFixture.TestRevenueCatWebhookSecret));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("pro", await GetTierAsync(victimId));
     }
 }

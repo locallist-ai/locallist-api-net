@@ -275,6 +275,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("ChatTurnLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("RevenueCatWebhookLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
     }
@@ -411,8 +413,12 @@ public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
 /// </summary>
 public class FakeRevenueCatClient : IRevenueCatClient
 {
-    /// <summary>Fallback status for any app_user_id without an explicit override.</summary>
-    public RevenueCatEntitlementStatus Default { get; set; } = RevenueCatEntitlementStatus.Active;
+    /// <summary>
+    /// Fallback status for any app_user_id without an explicit override. Defaults to Inactive so
+    /// tests must opt IN to "active" for a specific id — an unmapped id is never silently entitled
+    /// (which previously masked the decoupled-identity vector).
+    /// </summary>
+    public RevenueCatEntitlementStatus Default { get; set; } = RevenueCatEntitlementStatus.Inactive;
 
     public Dictionary<string, RevenueCatEntitlementStatus> ByAppUserId { get; } =
         new(StringComparer.Ordinal);
@@ -431,7 +437,7 @@ public class FakeRevenueCatClient : IRevenueCatClient
     {
         ByAppUserId.Clear();
         Calls.Clear();
-        Default = RevenueCatEntitlementStatus.Active;
+        Default = RevenueCatEntitlementStatus.Inactive;
     }
 }
 

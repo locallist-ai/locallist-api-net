@@ -111,6 +111,23 @@ public static class RateLimitingExtensions
                     });
             });
 
+            // RevenueCatWebhookLimit (anonymous, F4): the billing webhook triggers an outbound
+            // RevenueCat REST lookup per fresh event. An actor with the shared secret could flood
+            // fresh rc_event_ids to make RevenueCat 429 us → legit lookups degrade to 503 and real
+            // upgrades stall (a DoS on revenue). Cap per IP, tighter than the global 100/min, on
+            // top of Kestrel's 10 MB body cap. RevenueCat delivers from a small set of IPs and
+            // retries with backoff, so 60/min/IP is ample for genuine traffic.
+            options.AddPolicy("RevenueCatWebhookLimit", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        AutoReplenishment = true,
+                        PermitLimit = 60,
+                        QueueLimit = 0,
+                        Window = TimeSpan.FromMinutes(1)
+                    }));
+
             // ChatTurnLimit: sliding window 20/hr anonymous, 40/hr authenticated.
             // Sliding window prevents boundary exploitation vs fixed window.
             var chatLimitAnon = configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAnonymous") ?? 20;

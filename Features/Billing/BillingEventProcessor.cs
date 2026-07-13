@@ -27,11 +27,17 @@ public enum BillingEventOutcome
 /// server-side writer of the tier column driven by billing.
 ///
 /// SECURITY MODEL: the webhook is a TRIGGER, not the source of truth. Past the shared-secret
-/// gate, the payload is still attacker-shaped (a leaked secret lets anyone POST an arbitrary
-/// app_user_id / entitlement / event_timestamp_ms). So the tier is derived from RevenueCat's
-/// authoritative REST state (<see cref="IRevenueCatClient"/>), never from the payload. A forged
-/// grant naming a victim, or a pinned <c>event_timestamp_ms=long.MaxValue</c>, therefore cannot
-/// grant or freeze "pro": we ask RevenueCat what the subscriber actually has, right now.
+/// gate the payload is still attacker-shaped, so the tier is derived from RevenueCat's
+/// authoritative REST state (<see cref="IRevenueCatClient"/>), never from the payload's
+/// entitlement/timestamp.
+///
+/// CRITICAL — the payload must NOT be able to decouple "whose entitlement we verify" from "whom
+/// we credit". So we (1) resolve the local <see cref="User"/> FIRST from the payload identifiers,
+/// then (2) verify against RevenueCat EXCLUSIVELY that user's OWN identifiers (its <c>Id</c> and
+/// its already-linked <c>RcCustomerId</c>) — never a raw <c>app_user_id</c> string from the
+/// payload. A forged event with <c>app_user_id</c>=(some active RC id) and
+/// <c>original_app_user_id</c>=(attacker's Guid) therefore cannot grant the attacker "pro":
+/// we only ask RevenueCat about the attacker's own ids, which are not entitled.
 ///
 /// Idempotent (deduped by <see cref="BillingEvent.RcEventId"/> + its UNIQUE index race guard,
 /// scoped to that constraint only) and transactional (ledger insert + tier write commit together).
@@ -68,12 +74,18 @@ public class BillingEventProcessor
     /// Processes one event. Assumes the caller already verified the webhook authorization.
     /// Returns the outcome; never throws for business cases (only for infra failures other than
     /// the deduped-insert race).
+    ///
+    /// Concurrency note: there is no per-user serialization, so two events for the SAME user
+    /// processed concurrently write the tier in commit order. This is self-correcting — the next
+    /// event (or a re-verification) re-derives the tier from RevenueCat's current state — and the
+    /// window is tiny (RevenueCat delivers a user's events sequentially in practice). Optimistic
+    /// row-versioning was judged not worth the migration for this volume.
     /// </summary>
     public async Task<BillingEventOutcome> ProcessAsync(
         RevenueCatEvent evt, string plusEntitlementId, CancellationToken ct)
     {
         var rcEventId = evt.Id!; // validated non-empty by the caller
-        var appUserId = evt.AppUserId ?? evt.OriginalAppUserId;
+        var payloadAppUserId = evt.AppUserId ?? evt.OriginalAppUserId; // audit only
 
         // Fast-path dedup: if we've already recorded this event id, do nothing.
         if (await _db.BillingEvents.AnyAsync(be => be.RcEventId == rcEventId, ct))
@@ -82,6 +94,7 @@ public class BillingEventProcessor
             return BillingEventOutcome.Duplicate;
         }
 
+        // (1) Resolve WHOM to credit first, from the payload identifiers.
         var user = await ResolveUserAsync(evt, ct);
 
         BillingEventOutcome outcome;
@@ -90,12 +103,13 @@ public class BillingEventProcessor
             outcome = BillingEventOutcome.UserNotFound;
             _logger.LogWarning(
                 "RevenueCat event {EventId} ({Type}): no user for app_user_id {AppUserId}; recorded unresolved",
-                rcEventId, evt.Type, appUserId);
+                rcEventId, evt.Type, payloadAppUserId);
         }
         else
         {
-            // Ask RevenueCat for the CURRENT, verified state — ignore the payload's claims.
-            var status = await _revenueCat.GetEntitlementStatusAsync(appUserId!, plusEntitlementId, ct);
+            // (2) Verify against RevenueCat using ONLY this user's OWN identifiers. The payload's
+            //     app_user_id is deliberately NOT used as the lookup key — that is the god-token.
+            var status = await VerifyAnyActiveAsync(user, plusEntitlementId, ct);
 
             if (status == RevenueCatEntitlementStatus.Unavailable)
             {
@@ -110,7 +124,6 @@ public class BillingEventProcessor
             if (status == RevenueCatEntitlementStatus.Active)
             {
                 if (user.Tier != TierPro) user.Tier = TierPro;
-                LinkRcCustomer(user, appUserId);
                 user.UpdatedAt = _clock.GetUtcNow();
                 outcome = BillingEventOutcome.GrantedPro;
             }
@@ -126,7 +139,7 @@ public class BillingEventProcessor
         {
             RcEventId = rcEventId,
             UserId = user?.Id,
-            AppUserId = appUserId,
+            AppUserId = payloadAppUserId,
             EventType = evt.Type ?? "UNKNOWN",
             EventTimestampMs = ClampTimestamp(evt.EventTimestampMs),
             ProcessedAt = _clock.GetUtcNow(),
@@ -141,9 +154,8 @@ public class BillingEventProcessor
             // A concurrent delivery of the SAME event id won the INSERT race on the
             // rc_event_id unique index. The tier write in THIS transaction rolls back with
             // it — the winner already applied the identical, RC-derived effect. Idempotent.
-            // NOTE: only this specific constraint is swallowed. Any other unique violation
-            // (e.g. a rc_customer_id collision) must propagate — never silently 200 a
-            // legitimate upgrade into a lost purchase.
+            // NOTE: only this specific constraint is swallowed; any other unique violation
+            // propagates rather than silently 200-ing.
             _logger.LogInformation(
                 "RevenueCat event {EventId} lost the insert race (concurrent duplicate); treating as processed",
                 rcEventId);
@@ -157,32 +169,41 @@ public class BillingEventProcessor
     }
 
     /// <summary>
-    /// Persists the RevenueCat customer link so /account and future lookups resolve — but only
-    /// when it is free to take. If another user already holds this rc_customer_id we skip the
-    /// assignment (and log) rather than provoke a unique-violation that would poison retries;
-    /// the tier grant itself still applies.
+    /// Asks RevenueCat whether the entitlement is active for any of the user's OWN identifiers
+    /// (its User.Id and, if already linked, its RcCustomerId). Active wins; if none is active but
+    /// any lookup was Unavailable, the whole check is Unavailable (retry) rather than a false free.
     /// </summary>
-    private void LinkRcCustomer(User user, string? appUserId)
+    private async Task<RevenueCatEntitlementStatus> VerifyAnyActiveAsync(
+        User user, string entitlementId, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(appUserId) || !string.IsNullOrEmpty(user.RcCustomerId))
-            return;
-
-        var takenByOther = _db.Users.Any(u => u.RcCustomerId == appUserId && u.Id != user.Id);
-        if (takenByOther)
+        var ownIds = new List<string>(2) { user.Id.ToString() };
+        if (!string.IsNullOrEmpty(user.RcCustomerId) &&
+            !string.Equals(user.RcCustomerId, user.Id.ToString(), StringComparison.Ordinal))
         {
-            _logger.LogWarning(
-                "rc_customer_id {AppUserId} already linked to another user; not linking to {UserId}",
-                appUserId, user.Id);
-            return;
+            ownIds.Add(user.RcCustomerId!);
         }
 
-        user.RcCustomerId = appUserId;
+        var anyUnavailable = false;
+        foreach (var id in ownIds)
+        {
+            var status = await _revenueCat.GetEntitlementStatusAsync(id, entitlementId, ct);
+            if (status == RevenueCatEntitlementStatus.Active)
+                return RevenueCatEntitlementStatus.Active;
+            if (status == RevenueCatEntitlementStatus.Unavailable)
+                anyUnavailable = true;
+        }
+
+        return anyUnavailable
+            ? RevenueCatEntitlementStatus.Unavailable
+            : RevenueCatEntitlementStatus.Inactive;
     }
 
     /// <summary>
     /// Maps a RevenueCat app_user_id to a LocalList user. The app sets app_user_id to the
-    /// User.Id (Guid); older/anonymous flows may land it in rc_customer_id. Tries both the
-    /// primary and original identifiers.
+    /// User.Id (Guid); a separately-linked flow may populate rc_customer_id. Tries both the
+    /// primary and original identifiers to FIND the user — but note the tier decision is then
+    /// verified against the user's OWN ids only (see <see cref="VerifyAnyActiveAsync"/>), so
+    /// resolving via original_app_user_id cannot be leveraged to credit an unverified identity.
     /// </summary>
     private async Task<User?> ResolveUserAsync(RevenueCatEvent evt, CancellationToken ct)
     {

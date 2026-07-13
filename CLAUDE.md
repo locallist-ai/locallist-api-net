@@ -61,6 +61,7 @@ Required User Secrets / Environment Variables:
 
 **Monetización (F4 — RevenueCat / tier)**
 - El webhook es un TRIGGER, NO la fuente de verdad. El tier se deriva del estado autoritativo consultado a la REST API de RevenueCat (`GET /subscribers/{app_user_id}`), no del payload — un secreto filtrado no permite forjar grants ni congelar pro con `event_timestamp_ms` falso.
+- Anti god-token: se resuelve el `User` primero y se verifica contra RC SOLO sus ids propios (`User.Id` / `RcCustomerId` enlazado), nunca un `app_user_id` arbitrario del payload — así el payload no puede desacoplar "a quién verifico" de "a quién acredito". El webhook NO escribe `rc_customer_id`. Rate-limit por IP `RevenueCatWebhookLimit` (60/min).
 - `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Verificado antes de deserializar el body (fail-closed 503 si falta). También legible como `RevenueCat__WebhookAuthToken`.
 - `REVENUECAT_REST_API_KEY` — **requerido** para conceder tier. Secret API key (sk_...) de RC para verificar el suscriptor. Distinta del secreto del webhook. Sin ella no se concede upgrade (webhook 503, RC reintenta). También `RevenueCat__RestApiKey`.
 - `RevenueCat__PlusEntitlementId` — id del entitlement que mapea a tier `pro` (default `plus`).

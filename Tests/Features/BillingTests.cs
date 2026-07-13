@@ -61,7 +61,7 @@ public class BillingTests : IClassFixture<ApiFixture>
 
     private static object Event(
         string id, string type, string appUserId, long ts,
-        string[]? entitlements = null) => new
+        string[]? entitlements = null, string? originalAppUserId = null) => new
         {
             api_version = "1.0",
             @event = new
@@ -69,11 +69,15 @@ public class BillingTests : IClassFixture<ApiFixture>
                 id,
                 type,
                 app_user_id = appUserId,
+                original_app_user_id = originalAppUserId,
                 entitlement_ids = entitlements ?? new[] { "plus" },
                 event_timestamp_ms = ts,
                 product_id = "com.locallist.plus.monthly",
             },
         };
+
+    private void RcActive(Guid userId) =>
+        _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Active;
 
     // ---- webhook auth ------------------------------------------------------
 
@@ -121,9 +125,11 @@ public class BillingTests : IClassFixture<ApiFixture>
     // ---- tier writes -------------------------------------------------------
 
     [Fact]
-    public async Task Webhook_InitialPurchase_WritesProTierAndRcCustomerId()
+    public async Task Webhook_InitialPurchase_WritesProTier_WhenRcConfirmsOwnId()
     {
         var userId = await SeedUserAsync();
+        // RevenueCat confirms THIS user's own id (== app_user_id) is entitled.
+        RcActive(userId);
         var client = _fixture.CreateClient();
 
         var req = BuildWebhook(Event("evt-purchase", "INITIAL_PURCHASE", userId.ToString(), 1000));
@@ -136,7 +142,6 @@ public class BillingTests : IClassFixture<ApiFixture>
         var db = _fixture.GetDbContext();
         var user = await db.Users.FirstAsync(u => u.Id == userId);
         Assert.Equal("pro", user.Tier);
-        Assert.Equal(userId.ToString(), user.RcCustomerId);
     }
 
     [Fact]
@@ -197,6 +202,8 @@ public class BillingTests : IClassFixture<ApiFixture>
     {
         var rcId = $"rcbilling_{Guid.NewGuid():N}";
         var userId = await SeedUserAsync(rcCustomerId: rcId);
+        // The user's OWN linked RcCustomerId is the entitled identifier at RevenueCat.
+        _fixture.FakeRevenueCat.ByAppUserId[rcId] = RevenueCatEntitlementStatus.Active;
         var client = _fixture.CreateClient();
 
         var req = BuildWebhook(Event("evt-by-rc", "INITIAL_PURCHASE", rcId, 1000));
@@ -212,6 +219,7 @@ public class BillingTests : IClassFixture<ApiFixture>
     public async Task Webhook_DuplicateEventId_IsIdempotent()
     {
         var userId = await SeedUserAsync();
+        RcActive(userId);
         var client = _fixture.CreateClient();
         const string eventId = "evt-dup";
 
@@ -297,31 +305,6 @@ public class BillingTests : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
         Assert.Equal("GrantedPro", (await retry.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
         Assert.Equal("pro", await GetTierAsync(userId));
-    }
-
-    [Fact]
-    public async Task Webhook_LegitimateGrant_NotSwallowed_WhenRcCustomerIdCollides()
-    {
-        // A genuine grant for user A whose app_user_id (its Guid) is ALSO already held as the
-        // rc_customer_id of an unrelated user B. The old broad 23505 catch would have rolled the
-        // whole tx back and returned a silent Duplicate — losing the upgrade. Now: the grant
-        // applies, the colliding link is skipped, and no unique violation is swallowed.
-        var userAId = await SeedUserAsync(tier: "free");
-        // User B squats userA's Guid as its rc_customer_id.
-        await SeedUserAsync(tier: "free", rcCustomerId: userAId.ToString());
-        _fixture.FakeRevenueCat.ByAppUserId[userAId.ToString()] = RevenueCatEntitlementStatus.Active;
-        var client = _fixture.CreateClient();
-
-        var res = await client.SendAsync(BuildWebhook(
-            Event("evt-collide", "INITIAL_PURCHASE", userAId.ToString(), 1000)));
-
-        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
-
-        var db = _fixture.GetDbContext();
-        var userA = await db.Users.FirstAsync(u => u.Id == userAId);
-        Assert.Equal("pro", userA.Tier);            // upgrade NOT lost
-        Assert.Null(userA.RcCustomerId);            // colliding link skipped, not throwing
     }
 
     // ---- RequirePro guard (re-queries DB, ignores JWT claim) ---------------
