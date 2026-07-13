@@ -349,6 +349,34 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         return CreateAuthenticatedClient(userId, firebaseUid, email);
     }
 
+    /// <summary>
+    /// Cliente autenticado con un token de la APP (HS256, AppScheme) — a diferencia de
+    /// <see cref="CreateAuthenticatedClientWithUser"/>, que emite un token Firebase (RS256).
+    /// El rate-limit de generación solo concede el bucket alto a tokens AppScheme, así que
+    /// los tests de ese bucket deben usar este helper.
+    /// </summary>
+    public async Task<HttpClient> CreateAppAuthenticatedClientWithUser(
+        Guid userId, string email)
+    {
+        var db = GetDbContext();
+        var existing = await db.Users.FindAsync(userId);
+        if (existing == null)
+        {
+            db.Users.Add(new LocalList.API.NET.Shared.Data.Entities.User
+            {
+                Id = userId,
+                Email = email,
+                FirebaseUid = "app-" + userId,
+                Role = "user"
+            });
+            await db.SaveChangesAsync();
+        }
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email));
+        return client;
+    }
+
     public LocalListDbContext GetDbContext()
     {
         EnsureDb();

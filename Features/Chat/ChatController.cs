@@ -61,11 +61,12 @@ public class ChatController : ControllerBase
     /// Anonymous users are supported (plan is ephemeral). Authenticated users get sessions
     /// persisted and tied to their account.
     ///
-    /// Rate limiting (4 layers):
-    ///   - ChatBurst: 5 req / 10s per IP (token-bucket)
-    ///   - ChatTurnLimit: 20/hr anon, 40/hr auth (sliding window)
-    ///   - ChatNewSession: 5 new sessions / hr / IP (applied conditionally below)
-    ///   - ChatDaily: 200 turns / 24h / IP
+    /// Rate limiting (2 capas reales, ver RateLimitingExtensions):
+    ///   - GlobalLimiter: burst 100/min por IP (todos los endpoints).
+    ///   - ChatTurnLimit (esta política): sliding window 20/hr anónimo por IP · 40/hr
+    ///     autenticado por userId.
+    /// (El techo horario por IP encadenado solo aplica a los endpoints BuilderLimit —
+    /// /builder/chat y /chat/generate —, no a /chat/turn.)
     /// </summary>
     [HttpPost("turn")]
     [AllowAnonymous]
