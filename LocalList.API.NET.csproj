@@ -16,6 +16,8 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" />
+    <!-- Override de la transitiva Microsoft.OpenApi (AspNetCore.OpenApi la trae en 2.0.0, HIGH GHSA-v5pm-xwqc-g5wc / CVE-2026-49451, DoS por circular schema refs). Parcheada en 2.7.5+. -->
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.6" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.3" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="10.0.3" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
