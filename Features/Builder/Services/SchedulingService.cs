@@ -124,10 +124,18 @@ public class SchedulingService
         int poolSize   = Math.Min(eligible.Count, Math.Max(totalSlots * 2, totalSlots + 5));
         var pool       = eligible.Take(poolSize).ToList();
 
-        // Weighted sampling without replacement: weight = poolSize - index
-        var selected      = new List<Place>(totalSlots);
-        var availableIdxs = Enumerable.Range(0, pool.Count).ToList();
-        int needed        = Math.Min(totalSlots, pool.Count);
+        int needed = Math.Min(totalSlots, pool.Count);
+
+        // Rank-first: la mitad superior de los slots va directa a los mejor rankeados
+        // (determinista); el resto se muestrea ponderado para mantener variedad entre
+        // semillas. Antes TODO era sampling y los top del ranking podían quedarse
+        // fuera del plan — el usuario pedía X y recibía suplentes.
+        int guaranteed = (needed + 1) / 2;
+        var selected   = new List<Place>(needed);
+        selected.AddRange(pool.Take(guaranteed));
+
+        // Weighted sampling without replacement sobre el resto: weight = poolSize - index
+        var availableIdxs = Enumerable.Range(guaranteed, Math.Max(0, pool.Count - guaranteed)).ToList();
 
         while (selected.Count < needed && availableIdxs.Count > 0)
         {

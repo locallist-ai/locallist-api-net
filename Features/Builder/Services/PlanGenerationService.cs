@@ -85,7 +85,11 @@ public class PlanGenerationService : IPlanGenerationService
             return null;
         }
 
-        var seed = Random.Shared.Next();
+        // Semilla determinista derivada del request: misma petición → mismo plan
+        // (contrato "determinista por semilla" del scheduler). Antes era
+        // Random.Shared.Next(), que hacía cada regeneración una lotería y ocultaba
+        // los parámetros del usuario tras el muestreo aleatorio.
+        var seed = ComputeRequestSeed(msg, city, lang, tripContext);
         _logger.LogInformation("PlanGen: schedule seed={Seed}", seed);
         var schedule = await _scheduler.BuildPlanScheduleAsync(places, prefs, seed, ct);
 
@@ -176,7 +180,22 @@ public class PlanGenerationService : IPlanGenerationService
             ranked.Count,
             string.Join("|", ranked.Take(3).Select(s => $"{s.Place.Name}:{s.Score:F2}")));
 
-        return ranked.Select(s => s.Place).ToList();
+        var rankedPlaces = ranked.Select(s => s.Place).ToList();
+
+        // Gate duro cuando las categorías son elección explícita del usuario (wizard/
+        // chat slots) — alinea la ruta RAG con la keyword, donde categoría ya filtra.
+        // Con categorías solo-LLM (inferidas del mensaje) se mantiene el boost blando
+        // del ranking, sin recortar el recall semántico.
+        if (prefs.CategoriesExplicit && prefs.Categories.Count > 0)
+        {
+            var gated = ApplyCategoryGate(rankedPlaces, prefs);
+            _logger.LogInformation(
+                "RAG: category gate [{Cats}] {Before}→{After} candidates",
+                string.Join(",", prefs.Categories), rankedPlaces.Count, gated.Count);
+            return gated;
+        }
+
+        return rankedPlaces;
     }
 
     internal async Task<List<Place>> FallbackKeywordFilterAsync(
@@ -184,12 +203,12 @@ public class PlanGenerationService : IPlanGenerationService
     {
         // OrderBy(p => p.Id) is load-bearing for determinism: same seed + same city always
         // produces the same candidate pool because FilterByCategory preserves input order.
-        var matching = await _db.Places.AsNoTracking()
+        var pool = await _db.Places.AsNoTracking()
             .Where(p => p.Status == "published" && p.City == city)
             .OrderBy(p => p.Id)
             .Take(FallbackKeywordHardCap)
             .ToListAsync(ct);
-        return FilterByCategory(matching, prefs);
+        return ApplyCategoryGate(pool, prefs);
     }
 
     internal static List<Place> FilterByCategory(List<Place> allPlaces, ExtractedPreferences prefs)
@@ -201,6 +220,67 @@ public class PlanGenerationService : IPlanGenerationService
                 string.Equals(p.Category, c, StringComparison.OrdinalIgnoreCase)
                 || p.Category.Contains(c, StringComparison.OrdinalIgnoreCase)))
             .ToList();
+    }
+
+    /// <summary>
+    /// Filtro duro por categoría con fallback graceful: si el catálogo no tiene
+    /// suficientes places de las categorías pedidas para llenar el plan
+    /// (days × maxStops), completa con el resto de candidatos manteniendo a los
+    /// de la categoría pedida primero. Mejor un plan mixto que uno vacío.
+    /// Preserva el orden de entrada (ranking o Id), que es load-bearing para el
+    /// determinismo y para la selección rank-first del scheduler.
+    /// </summary>
+    internal static List<Place> ApplyCategoryGate(List<Place> orderedPlaces, ExtractedPreferences prefs)
+    {
+        if (prefs.Categories == null || prefs.Categories.Count == 0) return orderedPlaces;
+
+        var matching = FilterByCategory(orderedPlaces, prefs);
+        int needed = Math.Max(1, prefs.Days * prefs.MaxStopsPerDay);
+        if (matching.Count >= needed) return matching;
+
+        var matchingIds = matching.Select(p => p.Id).ToHashSet();
+        return matching
+            .Concat(orderedPlaces.Where(p => !matchingIds.Contains(p.Id)))
+            .ToList();
+    }
+
+    /// <summary>
+    /// FNV-1a 32-bit sobre los campos del request. Estable entre procesos
+    /// (string.GetHashCode está aleatorizado por proceso) — misma petición
+    /// siempre produce la misma semilla y por tanto el mismo plan.
+    /// </summary>
+    internal static int ComputeRequestSeed(string message, string city, string lang, TripContextDto context)
+    {
+        var canonical = string.Join("|",
+            message,
+            city,
+            lang,
+            context.Days?.ToString() ?? "",
+            context.GroupType ?? "",
+            context.Budget ?? "",
+            context.BudgetAmount?.ToString() ?? "",
+            context.Categories is null ? "" : string.Join(",", context.Categories),
+            context.Subcategories is null
+                ? ""
+                : string.Join(";", context.Subcategories
+                    .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                    .Select(kv => $"{kv.Key}:{string.Join(",", kv.Value ?? new List<string>())}")),
+            context.CompanyTags is null ? "" : string.Join(",", context.CompanyTags),
+            context.Pace ?? "",
+            context.Dietary is null ? "" : string.Join(",", context.Dietary),
+            context.Exclusions is null ? "" : string.Join(",", context.Exclusions),
+            context.VibesPrimary ?? "");
+
+        unchecked
+        {
+            uint hash = 2166136261;
+            foreach (char c in canonical)
+            {
+                hash ^= c;
+                hash *= 16777619;
+            }
+            return (int)(hash & int.MaxValue);
+        }
     }
 
     private static string Sanitize(string value, int maxLen)

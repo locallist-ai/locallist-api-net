@@ -367,6 +367,33 @@ public class SchedulingServiceScheduleTests
             $"Top-3 hit rate {topThreeRate:P0} too low — ranking not influencing selection");
     }
 
+    // ── Rank-first selection (fix/plan-quality-params) ───────────────────────
+    // La mitad superior de los slots va garantizada a los mejor rankeados: con el
+    // sampling puro anterior, los top del ranking podían quedarse fuera del plan.
+
+    [Fact]
+    public void Selection_TopRankedPlaces_AlwaysIncluded_ForEverySeed()
+    {
+        var svc = Svc();
+        // 12 places pre-rankeados (index 0 = mejor). 1 día × 4 stops → needed 4,
+        // guaranteed = 2: places[0] y places[1] deben aparecer con CUALQUIER semilla.
+        var places = Enumerable.Range(0, 12)
+            .Select(i => MakePlace("food", lat: 25.70m + i * 0.01m, lon: -80.10m + i * 0.01m))
+            .ToList();
+        var prefs = Prefs(maxStops: 4);
+
+        for (int seed = 0; seed < 25; seed++)
+        {
+            var result = svc.BuildPlanSchedule(places, prefs, seed);
+            var ids = result.Stops.Select(s => s.PlaceId).ToHashSet();
+
+            Assert.True(ids.Contains(places[0].Id),
+                $"seed={seed}: el place mejor rankeado quedó fuera del plan");
+            Assert.True(ids.Contains(places[1].Id),
+                $"seed={seed}: el segundo place mejor rankeado quedó fuera del plan");
+        }
+    }
+
     // ── Routing wired into WalkDayClock via ISegmentResolver ─────────────────
 
     private sealed class FakeSegmentResolver : ISegmentResolver

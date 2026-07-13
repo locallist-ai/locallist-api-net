@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace LocalList.API.NET.Shared.Dtos;
 
 public class ExtractedPreferences
@@ -22,6 +24,22 @@ public class ExtractedPreferences
     public List<string>? StyleTags { get; set; }
     /// <summary>Presupuesto raw USD/día/persona (fuente para tier match más fino).</summary>
     public int? BudgetAmount { get; set; }
+
+    /// <summary>
+    /// Tier de presupuesto del wizard: "budget" | "moderate" | "premium".
+    /// JsonIgnore: solo lo asigna MergeContextIntoPrefs desde TripContextDto —
+    /// el JSON del LLM no puede inyectarlo.
+    /// </summary>
+    [JsonIgnore]
+    public string? BudgetTier { get; set; }
+
+    /// <summary>
+    /// True cuando Categories viene de una elección explícita del usuario (wizard/chat
+    /// slots) y no de la extracción del LLM. Activa el gate duro de categoría en el
+    /// retrieval RAG. JsonIgnore: solo lo asigna MergeContextIntoPrefs.
+    /// </summary>
+    [JsonIgnore]
+    public bool CategoriesExplicit { get; set; }
 
     // ── Refinements — carried from TripContext through to SchedulingService ───
     public string? Pace { get; set; }

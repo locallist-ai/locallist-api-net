@@ -20,6 +20,7 @@ public class PreferenceExtractorService
     private static readonly string[] AllowedCategories =
         PlaceTaxonomy.Categories.Select(c => c.ToLowerInvariant()).ToArray();
     private static readonly string[] AllowedGroupTypes = { "solo", "couple", "friends", "family-kids", "family", "group" };
+    private static readonly string[] AllowedBudgetTiers = { "budget", "moderate", "premium" };
 
     private static readonly Dictionary<string, string[]> PreferenceToCategories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -90,24 +91,28 @@ public class PreferenceExtractorService
         prefs.Categories ??= new List<string>();
         prefs.Vibes ??= new List<string>();
 
-        // Family excluye nightlife globalmente
+        // Categories explícitas del wizard — autoritativas: REEMPLAZAN las del LLM.
+        // Unirlas (comportamiento anterior) dejaba dentro categorías alucinadas por
+        // Gemini que diluían la elección real del usuario en ranking y selección.
+        if (context.Categories != null && context.Categories.Count > 0)
+        {
+            prefs.Categories = context.Categories
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            prefs.CategoriesExplicit = true;
+        }
+        else
+        {
+            prefs.CategoriesExplicit = false;
+        }
+
+        // Family excluye nightlife globalmente — después del reemplazo, para que
+        // aplique también sobre categorías explícitas del wizard.
         if (GroupTypePolicy.IsFamilyContext(prefs.GroupType))
         {
             prefs.Categories.RemoveAll(c => string.Equals(c, "nightlife", StringComparison.OrdinalIgnoreCase));
             prefs.MaxStopsPerDay = 3;
-        }
-
-        // Categories explícitas del wizard — autoritativas
-        if (context.Categories != null && context.Categories.Count > 0)
-        {
-            foreach (var cat in context.Categories)
-            {
-                if (!string.IsNullOrWhiteSpace(cat)
-                    && !prefs.Categories.Contains(cat, StringComparer.OrdinalIgnoreCase))
-                {
-                    prefs.Categories.Add(cat);
-                }
-            }
         }
 
         // Sub-categorías, company/style tags, budget amount — soft signals al ranking.
@@ -128,6 +133,14 @@ public class PreferenceExtractorService
             prefs.CompanyTags = context.CompanyTags.Take(MaxCompanyOrStyleTags).ToList();
         if (context.BudgetAmount.HasValue && context.BudgetAmount.Value > 0)
             prefs.BudgetAmount = context.BudgetAmount.Value;
+
+        // Budget tier del wizard ("budget"|"moderate"|"premium") — antes se descartaba
+        // y el ranking solo veía BudgetAmount, que el wizard no siempre envía.
+        if (!string.IsNullOrWhiteSpace(context.Budget)
+            && AllowedBudgetTiers.Contains(context.Budget.ToLowerInvariant()))
+        {
+            prefs.BudgetTier = context.Budget.ToLowerInvariant();
+        }
 
         // Pace clamp — authoritative over Gemini's MaxStopsPerDay suggestion
         if (!string.IsNullOrWhiteSpace(context.Pace))

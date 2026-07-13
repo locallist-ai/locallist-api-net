@@ -753,16 +753,11 @@ public class ChatAgentService
         City = slots.City,
         Days = slots.Days,
         GroupType = slots.GroupType,
+        // El tier fluye nativo: MergeContextIntoPrefs mapea context.Budget →
+        // prefs.BudgetTier y ScoreBudgetMatch puntúa por banda (premium → $$$/$$$$).
+        // El antiguo mapeo tier→amount aquí forzaba banda de un solo tier y
+        // penalizaba $$$$ con premium (0.6 en vez de 1.0).
         Budget = slots.Budget,
-        // Map tier to amount so MergeContextIntoPrefs can populate BudgetAmount on prefs
-        // and ScoreBudgetMatch returns non-zero when ranking from the chat path.
-        BudgetAmount = slots.Budget switch
-        {
-            "budget"   => 50,
-            "moderate" => 150,
-            "premium"  => 300,
-            _          => null,
-        },
         Categories = slots.Categories.Count > 0 ? slots.Categories : null,
         Pace = slots.Pace,
         Dietary = slots.Dietary.Count > 0 ? slots.Dietary : null,
