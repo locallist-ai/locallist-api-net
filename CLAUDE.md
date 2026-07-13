@@ -59,6 +59,11 @@ Required User Secrets / Environment Variables:
 - `Klaviyo__ApiKey` — opcional. Sin él, el servicio de email se deshabilita silenciosamente.
 - `Klaviyo__WaitlistListId` — ID de lista de Klaviyo para la waitlist.
 
+**Monetización (F4 — RevenueCat / tier)**
+- `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Sin él el webhook rechaza todo (503, fail-closed). También legible como `RevenueCat__WebhookAuthToken`.
+- `RevenueCat__PlusEntitlementId` — id del entitlement que mapea a tier `pro` (default `plus`).
+- Enforcement: `[RequirePro]` (`Shared/Auth/`) re-consulta el tier en la DB, NO el claim `tier` del JWT. Registrado y listo, **aún sin aplicar a ningún endpoint** — el catálogo "Plus vs free" es decisión de producto no tomada (ver `Features/Billing/README.md`).
+
 **Fase 3 — Video import (pendiente, sin plan activo)**
 - Sin Apify. Arquitectura prevista: video file → Gemini multimodal File API directo.
 
@@ -99,6 +104,11 @@ LocalList.API.NET/
 │   │       ├── GoogleIdTokenValidator.cs   # Valida ID token Google vs JWKS
 │   │       ├── AppleIdTokenValidator.cs    # Valida ID token Apple vs JWKS
 │   │       └── JwksRetriever.cs            # Caché JWKS para Apple
+│   ├── Billing/
+│   │   ├── BillingController.cs        # POST /webhooks/revenuecat (anonymous, secreto Authorization)
+│   │   ├── BillingEventProcessor.cs    # Único escritor de User.Tier guiado por billing (idempotente, reorder-safe)
+│   │   ├── RevenueCatDtos.cs           # RevenueCatWebhookRequest/Event
+│   │   └── README.md                   # Doc F4 + PENDIENTE producto: catálogo features Plus
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
 │   │   ├── BuilderDtos.cs              # BuilderChatRequest
@@ -175,6 +185,8 @@ LocalList.API.NET/
     │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain
     │   ├── AdminClaimsExtensions.cs     # Extensions para claims admin
     │   ├── AuthSchemes.cs              # Constantes de nombre de scheme
+    │   ├── RequireProAttribute.cs       # [RequirePro] — gate de tier premium (aún sin aplicar; catálogo Plus = decisión de producto)
+    │   ├── RequireProAuthorizationFilter.cs  # Valida tier RE-CONSULTANDO la DB (no el claim `tier` del JWT, vida 15 min)
     │   └── FirebaseUserExtensions.cs    # GetFirebaseUid(), GetEmail(), GetUserIdAsync()
     ├── Constants/
     │   ├── PlanLimits.cs               # Límites de stops por día, etc.
@@ -199,6 +211,7 @@ LocalList.API.NET/
     │       ├── Subcategory.cs
     │       ├── ChatSession.cs           # Sesión de chat slot-filling
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
+    │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
     │       └── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
     ├── I18n/
     │   └── LanguageAccessor.cs         # Resolución de idioma por Accept-Language / query param
@@ -253,6 +266,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Feature | Endpoints |
 |---|---|
 | Account | `GET /account`, `DELETE /account` |
+| Billing | `POST /webhooks/revenuecat` (anonymous, verifica header `Authorization` vs secreto; escribe `User.Tier` idempotente + reorder-safe) |
 | Auth (admin / Firebase) | `POST /auth/sync` (Firebase token required) |
 | Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
 | Builder | `POST /builder/chat` |
