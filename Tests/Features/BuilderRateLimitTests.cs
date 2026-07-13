@@ -47,6 +47,10 @@ public abstract class RateLimitedFixtureBase : ApiFixture
         builder.UseSetting("Builder:RateLimitPerHour", AnonLimit.ToString());
         builder.UseSetting("Builder:RateLimitPerHourAuthenticated", AuthLimit.ToString());
         builder.UseSetting("Builder:RateLimitPerHourPerIp", IpCeiling.ToString());
+        // Mismos números para /chat/turn (los tests comparten AnonLimit/AuthLimit/IpCeiling).
+        builder.UseSetting("Chat:RateLimitTurnsPerHourAnonymous", AnonLimit.ToString());
+        builder.UseSetting("Chat:RateLimitTurnsPerHourAuthenticated", AuthLimit.ToString());
+        builder.UseSetting("Chat:RateLimitTurnsPerHourPerIp", IpCeiling.ToString());
         builder.ConfigureTestServices(s =>
             s.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, TestClientIpStartupFilter>());
         base.ConfigureWebHost(builder);
@@ -88,6 +92,9 @@ public class BuilderIdentityRateLimitTests : IClassFixture<IdentityBucketFixture
 
     private static async Task<HttpResponseMessage> Gen(HttpClient c) =>
         await c.PostAsJsonAsync("/builder/chat", ValidBody());
+
+    private static async Task<HttpResponseMessage> Turn(HttpClient c) =>
+        await c.PostAsJsonAsync("/chat/turn", new { message = "hola" });
 
     private static object ValidBody() => new
     {
@@ -148,6 +155,20 @@ public class BuilderIdentityRateLimitTests : IClassFixture<IdentityBucketFixture
         var other = AnonClient("10.0.0.5");
         Assert.NotEqual(HttpStatusCode.TooManyRequests, (await Gen(other)).StatusCode);
     }
+
+    [Fact]
+    public async Task ChatTurn_FirebaseToken_DoesNotGetHighBucket_CappedAtAnonLimit()
+    {
+        // /chat/turn hereda el mismo tratamiento: token Firebase → ExtractAppUserId null →
+        // bucket anónimo por IP (2), NO el bucket alto de chat-turn (5).
+        var uid = Guid.NewGuid();
+        var client = await _fixture.CreateAuthenticatedClientWithUser(uid, $"fb-ct-{uid}", $"rl-fbct-{uid}@test.com");
+        client.DefaultRequestHeaders.Add("X-Test-Client-Ip", "10.0.0.6");
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, (await Turn(client)).StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, (await Turn(client)).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await Turn(client)).StatusCode);
+    }
 }
 
 /// <summary>
@@ -166,6 +187,38 @@ public class BuilderAccountFarmingTests : IClassFixture<IpCeilingFixture>
         message = "plan en Miami",
         tripContext = new { city = "Miami", days = 1, groupType = "couple" }
     };
+
+    private async Task<List<HttpClient>> ThreeAppClientsSharingIp(string sharedIp, string tag)
+    {
+        var clients = new List<HttpClient>();
+        for (var i = 0; i < 3; i++)
+        {
+            var uid = Guid.NewGuid();
+            var c = await _fixture.CreateAppAuthenticatedClientWithUser(uid, $"{tag}-{uid}@test.com");
+            c.DefaultRequestHeaders.Add("X-Test-Client-Ip", sharedIp);
+            clients.Add(c);
+        }
+        return clients;
+    }
+
+    [Fact]
+    public async Task ChatTurn_AccountFarming_MultipleAccountsSameIp_CannotExceedIpCeiling()
+    {
+        // Mismo ataque que en Builder, sobre /chat/turn: 3 cuentas App (bucket 5 c/u) desde
+        // la misma IP. Techo por IP de chat-turn = 3 → 3 requests agotan el techo, la 4ª
+        // (cuenta distinta, bucket propio intacto) → 429. Contra el código previo (sub crudo,
+        // sin techo en chat-turn) cada cuenta llegaría a su bucket y el farming no tendría cota.
+        var clients = await ThreeAppClientsSharingIp("10.9.9.10", "ctfarm");
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests,
+            (await clients[0].PostAsJsonAsync("/chat/turn", new { message = "hola" })).StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests,
+            (await clients[1].PostAsJsonAsync("/chat/turn", new { message = "hola" })).StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests,
+            (await clients[2].PostAsJsonAsync("/chat/turn", new { message = "hola" })).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests,
+            (await clients[0].PostAsJsonAsync("/chat/turn", new { message = "hola" })).StatusCode);
+    }
 
     [Fact]
     public async Task AccountFarming_MultipleAccountsSameIp_CannotExceedIpCeiling()

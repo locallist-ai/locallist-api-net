@@ -107,22 +107,91 @@ public class BuilderRateLimitPartitionTests
         Assert.Null(RateLimitingExtensions.ExtractAppUserId(ctx));
     }
 
-    // ── Sliding window (anti boundary-doubling) ─────────────────────────────────────
+    // ── ResolveChatTurnPartition: mismo contrato que Builder con prefijos chat_ ─────
 
     [Fact]
-    public void CreateBuilderLimiter_IsSlidingWindow_NotFixed()
+    public void ResolveChatTurnPartition_AppAuthenticated_UsesOwnBucketAndHigherLimit()
     {
-        using var limiter = RateLimitingExtensions.CreateBuilderLimiter(20);
-        Assert.IsType<SlidingWindowRateLimiter>(limiter);
+        var (key, limit) = RateLimitingExtensions.ResolveChatTurnPartition(
+            appUserId: "user-9", ip: "203.0.113.9", anonLimit: 20, authLimit: 40);
+
+        Assert.Equal("chat_auth_user-9", key);
+        Assert.Equal(40, limit);
     }
 
     [Fact]
-    public void CreateBuilderIpCeilingLimiter_IsSlidingWindow_NotFixed()
+    public void ResolveChatTurnPartition_Anonymous_UsesIpBucketAndAnonLimit()
     {
-        using var limiter = RateLimitingExtensions.CreateBuilderIpCeilingLimiter(60);
+        var (key, limit) = RateLimitingExtensions.ResolveChatTurnPartition(
+            appUserId: null, ip: "203.0.113.9", anonLimit: 20, authLimit: 40);
+
+        Assert.Equal("chat_anon_203.0.113.9", key);
+        Assert.Equal(20, limit);
+    }
+
+    [Fact]
+    public void ResolveChatTurnPartition_AuthAndAnon_NeverShareAKey()
+    {
+        var (authKey, _) = RateLimitingExtensions.ResolveChatTurnPartition("7", "192.0.2.1", 20, 40);
+        var (anonKey, _) = RateLimitingExtensions.ResolveChatTurnPartition(null, "7", 20, 40);
+
+        Assert.NotEqual(authKey, anonKey);
+    }
+
+    // ── ResolveMeteredIpCeiling: qué endpoints van bajo el techo por IP ─────────────
+
+    [Fact]
+    public void ResolveMeteredIpCeiling_BuilderPolicy_UsesBuilderNamespaceAndCeiling()
+    {
+        var ctx = ContextWithPolicy("BuilderLimit");
+
+        var (prefix, ceiling) = RateLimitingExtensions.ResolveMeteredIpCeiling(ctx, 60, 120);
+
+        Assert.Equal("builder_ip_ceiling", prefix);
+        Assert.Equal(60, ceiling);
+    }
+
+    [Fact]
+    public void ResolveMeteredIpCeiling_ChatTurnPolicy_UsesChatTurnNamespaceAndCeiling()
+    {
+        var ctx = ContextWithPolicy("ChatTurnLimit");
+
+        var (prefix, ceiling) = RateLimitingExtensions.ResolveMeteredIpCeiling(ctx, 60, 120);
+
+        Assert.Equal("chatturn_ip_ceiling", prefix);
+        Assert.Equal(120, ceiling);
+    }
+
+    [Fact]
+    public void ResolveMeteredIpCeiling_OtherOrNoPolicy_NotMetered()
+    {
+        Assert.Equal((null, 0), RateLimitingExtensions.ResolveMeteredIpCeiling(
+            ContextWithPolicy("AuthLimit"), 60, 120));
+        Assert.Equal((null, 0), RateLimitingExtensions.ResolveMeteredIpCeiling(
+            new DefaultHttpContext(), 60, 120));
+    }
+
+    // ── Sliding window (anti boundary-doubling) ─────────────────────────────────────
+
+    [Fact]
+    public void CreateSlidingHourlyLimiter_IsSlidingWindow_NotFixed()
+    {
+        using var limiter = RateLimitingExtensions.CreateSlidingHourlyLimiter(20);
         Assert.IsType<SlidingWindowRateLimiter>(limiter);
     }
 
     private static DefaultHttpContext ContextWithClaim(Claim claim) =>
         new() { User = new ClaimsPrincipal(new ClaimsIdentity(new[] { claim }, "test")) };
+
+    private static DefaultHttpContext ContextWithPolicy(string policyName)
+    {
+        var ctx = new DefaultHttpContext();
+        var endpoint = new Endpoint(
+            _ => Task.CompletedTask,
+            new EndpointMetadataCollection(
+                new Microsoft.AspNetCore.RateLimiting.EnableRateLimitingAttribute(policyName)),
+            "test-endpoint");
+        ctx.SetEndpoint(endpoint);
+        return ctx;
+    }
 }

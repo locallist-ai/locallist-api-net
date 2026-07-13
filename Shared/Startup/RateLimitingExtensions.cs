@@ -8,8 +8,9 @@ public static class RateLimitingExtensions
 {
     /// <summary>
     /// Registra el GlobalLimiter (encadenado: burst 100/min/IP + techo horario por IP para
-    /// los endpoints caros de generación) y las políticas por endpoint (Builder, Auth,
-    /// Waitlist, Admin, CitySearch, CityCreate, ChatTurn).
+    /// los endpoints "medidos" que queman Gemini —BuilderLimit y ChatTurnLimit—) y las
+    /// políticas por endpoint (Builder, Auth, Waitlist, Admin, CitySearch, CityCreate,
+    /// ChatTurn).
     ///
     /// IMPORTANTE (orden de pipeline): <c>app.UseRateLimiter()</c> DEBE ir después de
     /// <c>app.UseAuthentication()</c>, si no <c>context.User</c> está vacío y las políticas
@@ -18,25 +19,28 @@ public static class RateLimitingExtensions
     public static IServiceCollection AddRateLimitingPolicies(
         this IServiceCollection services, IConfiguration configuration)
     {
-        // Techo horario por IP para /builder/chat y /chat/generate. Es el ancla anti-abuso:
-        // acota el "account farming" (registrar N cuentas desde 1 IP para multiplicar la
-        // cuota autenticada) porque TODO el tráfico de esos endpoints desde una IP —anónimo
-        // y de cualquier número de cuentas— comparte este techo. Ver comentario extenso en
-        // la política BuilderLimit.
+        // Techos horarios por IP de los endpoints medidos. Anclan el anti-farming: ninguna
+        // IP puede superarlos por más cuentas que registre. Cada endpoint tiene su propio
+        // namespace y número (los turnos de chat son más frecuentes y baratos que una
+        // generación completa). Ver comentario extenso en la política BuilderLimit.
         var builderIpCeiling = configuration.GetValue<int?>("Builder:RateLimitPerHourPerIp")
                                ?? DefaultBuilderIpCeilingPerHour;
+        var chatTurnIpCeiling = configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourPerIp")
+                                ?? DefaultChatTurnIpCeilingPerHour;
 
         services.AddRateLimiter(options =>
         {
             // ── GlobalLimiter encadenado ────────────────────────────────────────────────
             // CreateChained aplica AMBOS limiters a cada request; gana el más restrictivo.
             //   (1) burst 100/min/IP en todos los endpoints (anti-ráfaga general).
-            //   (2) techo horario por IP SOLO en los endpoints de generación (BuilderLimit);
-            //       para el resto devuelve NoLimiter.
+            //   (2) techo horario por IP SOLO en los endpoints medidos (BuilderLimit /
+            //       ChatTurnLimit); para el resto devuelve NoLimiter.
             var burstLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
                 RateLimitPartition.GetFixedWindowLimiter(
-                    partitionKey: context.Connection.RemoteIpAddress?.ToString()
-                                  ?? context.Request.Headers.Host.ToString(),
+                    // Fallback a "unknown" (no a Host, que es spoofeable): si ForwardedHeaders
+                    // fallara, no queremos que un atacante obtenga buckets de burst frescos
+                    // rotando la cabecera Host.
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                     factory: _ => new FixedWindowRateLimiterOptions
                     {
                         AutoReplenishment = true,
@@ -45,19 +49,20 @@ public static class RateLimitingExtensions
                         Window = TimeSpan.FromMinutes(1)
                     }));
 
-            var builderIpCeilingLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+            var meteredIpCeilingLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
-                if (!IsExpensiveGenEndpoint(context))
-                    return RateLimitPartition.GetNoLimiter<string>("non_builder");
+                var (prefix, ceiling) = ResolveMeteredIpCeiling(context, builderIpCeiling, chatTurnIpCeiling);
+                if (prefix is null)
+                    return RateLimitPartition.GetNoLimiter<string>("non_metered");
 
-                var ip = ResolveIpOrWarn(context, "builder_ip_ceiling");
+                var ip = ResolveIpOrWarn(context, prefix);
                 return RateLimitPartition.Get(
-                    $"builder_ip_ceiling_{ip}",
-                    _ => CreateBuilderIpCeilingLimiter(builderIpCeiling));
+                    $"{prefix}_{ip}",
+                    _ => CreateSlidingHourlyLimiter(ceiling));
             });
 
             options.GlobalLimiter = PartitionedRateLimiter.CreateChained(
-                burstLimiter, builderIpCeilingLimiter);
+                burstLimiter, meteredIpCeilingLimiter);
 
             // ── BuilderLimit: refinamiento por identidad (bajo el techo por IP) ──────────
             // /builder/chat y /chat/generate llaman a Gemini (coste real por request) y son
@@ -96,7 +101,7 @@ public static class RateLimitingExtensions
                     builderAuthLimit);
                 return RateLimitPartition.Get(
                     partitionKey,
-                    _ => CreateBuilderLimiter(permitLimit));
+                    _ => CreateSlidingHourlyLimiter(permitLimit));
             });
 
             // Auth brute-force protection: 10 requests per 15 minutes per IP
@@ -170,37 +175,30 @@ public static class RateLimitingExtensions
                     });
             });
 
-            // ChatTurnLimit: sliding window 20/hr anonymous, 40/hr authenticated.
-            // Sliding window prevents boundary exploitation vs fixed window.
-            var chatLimitAnon = configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAnonymous") ?? 20;
+            // ── ChatTurnLimit: mismo tratamiento que BuilderLimit ────────────────────────
+            // /chat/turn también llama a Gemini por turno y es [AllowAnonymous]. Pasa por el
+            // techo por IP encadenado (`Chat:RateLimitTurnsPerHourPerIp`, default 120/h,
+            // namespace propio) Y el bucket por identidad (sliding window):
+            //   - App token (ExtractAppUserId, solo AppScheme): bucket propio por userId
+            //     (`Chat:RateLimitTurnsPerHourAuthenticated`, default 40).
+            //   - Anónimo / Firebase / otros: bucket por IP
+            //     (`Chat:RateLimitTurnsPerHourAnonymous`, default 20).
+            // El check de issuer cierra el mismo bypass que en BuilderLimit: un UID de
+            // Firebase Anonymous Auth ya no obtiene el bucket alto (40) — cae al bucket por IP.
+            var chatLimitAnon = configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAnonymous")
+                                ?? DefaultChatTurnAnonLimitPerHour;
+            var chatLimitAuth = configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAuthenticated")
+                                ?? DefaultChatTurnAuthLimitPerHour;
             options.AddPolicy("ChatTurnLimit", context =>
             {
-                var userId = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
-                             ?? context.User?.FindFirst("sub")?.Value;
-                if (!string.IsNullOrEmpty(userId))
-                {
-                    var authLimit = configuration.GetValue<int?>("Chat:RateLimitTurnsPerHourAuthenticated") ?? 40;
-                    return RateLimitPartition.GetSlidingWindowLimiter(
-                        partitionKey: $"chat_auth_{userId}",
-                        factory: _ => new SlidingWindowRateLimiterOptions
-                        {
-                            AutoReplenishment = true,
-                            PermitLimit = authLimit,
-                            QueueLimit = 0,
-                            Window = TimeSpan.FromHours(1),
-                            SegmentsPerWindow = 6,
-                        });
-                }
-                return RateLimitPartition.GetSlidingWindowLimiter(
-                    partitionKey: $"chat_anon_{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}",
-                    factory: _ => new SlidingWindowRateLimiterOptions
-                    {
-                        AutoReplenishment = true,
-                        PermitLimit = chatLimitAnon,
-                        QueueLimit = 0,
-                        Window = TimeSpan.FromHours(1),
-                        SegmentsPerWindow = 6,
-                    });
+                var (partitionKey, permitLimit) = ResolveChatTurnPartition(
+                    ExtractAppUserId(context),
+                    ResolveIpOrWarn(context, "chatturn_identity"),
+                    chatLimitAnon,
+                    chatLimitAuth);
+                return RateLimitPartition.Get(
+                    partitionKey,
+                    _ => CreateSlidingHourlyLimiter(permitLimit));
             });
 
             options.RejectionStatusCode = 429;
@@ -209,24 +207,36 @@ public static class RateLimitingExtensions
         return services;
     }
 
-    // ── Builder/Chat-generate partitioning (identity-aware) ─────────────────────────
+    // ── Partición identity-aware de los endpoints medidos (Builder/Chat) ────────────
     // Expuesto internal (InternalsVisibleTo LocalList.API.Tests) para poder testear la
     // decisión de partición y el tipo de limiter sin levantar el pipeline completo.
 
     /// <summary>Límite anónimo por hora y por IP para /builder/chat y /chat/generate.</summary>
     internal const int DefaultBuilderAnonLimitPerHour = 5;
 
-    /// <summary>Límite por hora del bucket App-autenticado (por userId, refinamiento bajo el techo por IP).</summary>
+    /// <summary>Límite por hora del bucket App-autenticado de Builder (por userId, bajo el techo por IP).</summary>
     internal const int DefaultBuilderAuthLimitPerHour = 20;
 
     /// <summary>
-    /// Techo horario por IP para los endpoints de generación. Es el ancla anti-farming:
-    /// ninguna IP puede superarlo por más cuentas que registre. Elegido generoso para no
-    /// romper NAT pequeños legítimos (casa/oficina: 60/h = 3× el bucket auth) pero acotando
-    /// duro el abuso (antes: N cuentas × 20/h = ilimitado). Tunable vía
-    /// <c>Builder:RateLimitPerHourPerIp</c>; bajar si aparece abuso desde CGNAT.
+    /// Techo horario por IP de Builder. Anti-farming: ninguna IP lo supera por más cuentas
+    /// que registre. Generoso para no romper NAT pequeños (60/h = 3× el bucket auth) pero
+    /// acota duro el abuso (antes: N cuentas × 20/h = ilimitado). Tunable vía
+    /// <c>Builder:RateLimitPerHourPerIp</c>.
     /// </summary>
     internal const int DefaultBuilderIpCeilingPerHour = 60;
+
+    /// <summary>Límite anónimo por hora y por IP de /chat/turn.</summary>
+    internal const int DefaultChatTurnAnonLimitPerHour = 20;
+
+    /// <summary>Límite por hora del bucket App-autenticado de /chat/turn (por userId, bajo el techo por IP).</summary>
+    internal const int DefaultChatTurnAuthLimitPerHour = 40;
+
+    /// <summary>
+    /// Techo horario por IP de /chat/turn. Mismo ratio que Builder (3× el bucket auth = 120/h)
+    /// pero mayor en absoluto porque los turnos son más frecuentes que una generación
+    /// completa. Tunable vía <c>Chat:RateLimitTurnsPerHourPerIp</c>.
+    /// </summary>
+    internal const int DefaultChatTurnIpCeilingPerHour = 120;
 
     /// <summary>
     /// Devuelve el userId SOLO si el token es de la app (AppScheme HS256, issuer
@@ -247,37 +257,35 @@ public static class RateLimitingExtensions
         return idClaim.Issuer == JwtTokenService.Issuer ? idClaim.Value : null;
     }
 
-    /// <summary>
-    /// Decide la clave de partición y el límite para el refinamiento por identidad de los
-    /// endpoints caros. App-autenticado → bucket propio por userId y límite alto; resto →
-    /// bucket por IP y límite estricto. Las dos familias de claves nunca colisionan.
-    /// </summary>
+    /// <summary>Partición identity-aware de BuilderLimit (prefijos builder_auth_/builder_anon_).</summary>
     internal static (string partitionKey, int permitLimit) ResolveBuilderPartition(
         string? appUserId, string? ip, int anonLimit, int authLimit)
+        => ResolveIdentityPartition("builder_auth_", "builder_anon_", appUserId, ip, anonLimit, authLimit);
+
+    /// <summary>Partición identity-aware de ChatTurnLimit (prefijos chat_auth_/chat_anon_).</summary>
+    internal static (string partitionKey, int permitLimit) ResolveChatTurnPartition(
+        string? appUserId, string? ip, int anonLimit, int authLimit)
+        => ResolveIdentityPartition("chat_auth_", "chat_anon_", appUserId, ip, anonLimit, authLimit);
+
+    /// <summary>
+    /// Núcleo compartido: App-autenticado → bucket propio por userId y límite alto; resto →
+    /// bucket por IP y límite estricto. Las dos familias de claves nunca colisionan.
+    /// </summary>
+    private static (string partitionKey, int permitLimit) ResolveIdentityPartition(
+        string authPrefix, string anonPrefix, string? appUserId, string? ip, int anonLimit, int authLimit)
     {
         if (!string.IsNullOrEmpty(appUserId))
-            return ($"builder_auth_{appUserId}", authLimit);
+            return ($"{authPrefix}{appUserId}", authLimit);
 
-        return ($"builder_anon_{ip ?? "unknown"}", anonLimit);
+        return ($"{anonPrefix}{ip ?? "unknown"}", anonLimit);
     }
 
     /// <summary>
-    /// Limiter del refinamiento por identidad: sliding window (evita el boundary-doubling de
-    /// la ventana fija — hasta 2× el límite a caballo del cambio de hora — en el endpoint más
-    /// caro), consistente con ChatTurnLimit.
+    /// Limiter sliding window horario (6 segmentos). Sliding evita el boundary-doubling de la
+    /// ventana fija — hasta 2× el límite a caballo del cambio de hora — en los endpoints más
+    /// caros. Usado por el refinamiento por identidad y por el techo por IP.
     /// </summary>
-    internal static RateLimiter CreateBuilderLimiter(int permitLimit) =>
-        new SlidingWindowRateLimiter(new SlidingWindowRateLimiterOptions
-        {
-            AutoReplenishment = true,
-            PermitLimit = permitLimit,
-            QueueLimit = 0,
-            Window = TimeSpan.FromHours(1),
-            SegmentsPerWindow = 6,
-        });
-
-    /// <summary>Limiter del techo por IP: sliding window por consistencia anti-boundary.</summary>
-    internal static RateLimiter CreateBuilderIpCeilingLimiter(int permitLimit) =>
+    internal static RateLimiter CreateSlidingHourlyLimiter(int permitLimit) =>
         new SlidingWindowRateLimiter(new SlidingWindowRateLimiterOptions
         {
             AutoReplenishment = true,
@@ -288,14 +296,21 @@ public static class RateLimitingExtensions
         });
 
     /// <summary>
-    /// True si el endpoint actual usa la política BuilderLimit (/builder/chat y
-    /// /chat/generate). Se ata a la metadata de la política, no a rutas hardcodeadas, así
-    /// que el techo por IP cubre automáticamente cualquier endpoint que la adopte.
+    /// Si el endpoint actual es "medido" (usa la política BuilderLimit o ChatTurnLimit),
+    /// devuelve su prefijo de partición del techo y su valor; si no, (null, 0). Se ata a la
+    /// metadata de la política, no a rutas hardcodeadas.
     /// </summary>
-    private static bool IsExpensiveGenEndpoint(HttpContext context)
+    internal static (string? prefix, int ceiling) ResolveMeteredIpCeiling(
+        HttpContext context, int builderCeiling, int chatTurnCeiling)
     {
-        var meta = context.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>();
-        return meta?.PolicyName == "BuilderLimit";
+        var policy = context.GetEndpoint()?.Metadata
+            .GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
+        return policy switch
+        {
+            "BuilderLimit" => ("builder_ip_ceiling", builderCeiling),
+            "ChatTurnLimit" => ("chatturn_ip_ceiling", chatTurnCeiling),
+            _ => (null, 0),
+        };
     }
 
     private static int _ipUnresolvedLogged;
@@ -304,9 +319,9 @@ public static class RateLimitingExtensions
     /// Devuelve la IP remota o "unknown". Riesgo operacional (auto-DoS): todo el bucket
     /// anónimo/techo por IP depende de que ForwardedHeaders repueble RemoteIpAddress detrás
     /// del proxy (Railway). Si falla, TODO el tráfico anónimo colapsa en una sola partición
-    /// "unknown" y comparte 5/h. Logueamos una vez a modo de alarma temprana. NOTA PABLO:
-    /// smoke-test en prod antes del pico de TikTok — hacer una request anónima y confirmar
-    /// en logs que la partición NO es "unknown".
+    /// "unknown". Logueamos una vez a modo de alarma temprana. NOTA PABLO: smoke-test en prod
+    /// antes del pico de TikTok — hacer una request anónima y confirmar en logs que la
+    /// partición NO es "unknown".
     /// </summary>
     private static string ResolveIpOrWarn(HttpContext context, string usage)
     {
