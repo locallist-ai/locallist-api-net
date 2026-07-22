@@ -19,18 +19,28 @@ Orden obligatorio, sin excepciones:
 1. **Configurar credenciales R2 en Railway**: `R2__AccountId`, `R2__AccessKeyId`,
    `R2__SecretAccessKey` (opcionales: `R2__Bucket`, `R2__PublicUrl`). Verificar con
    `POST /admin/places/backfill-photos?dryRun=true` → `r2Configured: true`.
-2. **Ejecutar el backfill en bucle** hasta `remainingPlaces: 0`:
+2. **Ejecutar el backfill en bucle** hasta **`converged: true`** (NO basta `remainingPlaces: 0`):
    `POST /admin/places/backfill-photos` (default `limit=20`, cabe bajo el proxy de 40s).
+   - **Señal de convergencia HONESTA (G1)**: `converged=true` sólo cuando `!aborted &&
+     remainingPlaces==0 && failedPlaces==0 && deferredPlaces==0`. **Relanzar mientras
+     `converged==false`** — equivalentemente, mientras `failedPlaces>0` O `deferredPlaces>0`,
+     esperando a que expire el backoff (o forzando con `retryDeferred=true`). ⚠️ NO uses
+     `remainingPlaces==0` como criterio de parada por sí solo: un place que falla
+     **transitoriamente dentro del run** (p. ej. un 503 de Google) se difiere y NO cuenta como
+     "no procesado", así que `remainingPlaces` puede ser 0 con un place migrable aún sin migrar
+     — desplegar ahí dejaría ese place en blanco (su URL de Google se sanea). `converged` y
+     `deferredPlaces` (recalculado al FINAL del run, no un snapshot del inicio) sí lo reflejan.
    - El bucle **converge garantizado**: los places cuyo rehost falla por la fuente entran en
      backoff (deferral) y no bloquean a los de detrás. Al terminar, revisar `deferredPlaces`:
-     si > 0, inspeccionar logs, corregir la causa (p. ej. añadir host a
-     `R2__AllowedPhotoSourceHosts`) y relanzar con `retryDeferred=true`.
+     si > 0, inspeccionar logs, corregir la causa (un 503 transitorio basta con reintentarlo;
+     un fallo permanente puede requerir añadir host a `R2__AllowedPhotoSourceHosts`) y relanzar
+     con `retryDeferred=true`.
    - `aborted: true` (`abortReason: r2_upload_unavailable`) = R2 no acepta uploads; el barrido
      se corta para no facturar Google sin progreso. Arreglar R2 y relanzar.
    - Places sin fotos con `GooglePlaceId` (`missingPhotoPlaces`): recuperarlos con
      `recoverMissing=true` (re-obtiene photo refs vía Places Details — factura Details).
-3. **Solo entonces** desplegar la rama a Railway. El censo por dominio de la respuesta
-   (`census`) debe mostrar todas las fotos en `r2.dev` antes del deploy.
+3. **Solo entonces** desplegar la rama a Railway. La respuesta debe reportar `converged: true`
+   y el censo por dominio (`census`) debe mostrar todas las fotos en `r2.dev` antes del deploy.
 
 **¿Por qué no hay "modo de gracia" en código?** Se valoró degradar por-place mientras queden
 fotos sin migrar. El filtro ya degrada por-URL (un place con foto de Google renderiza sin esa
@@ -58,6 +68,35 @@ se excluye de los siguientes barridos (`deferredPlaces`) → la página avanza y
 ignora el backoff. El estado es in-process: un restart lo limpia y el primer barrido
 re-intenta los fallidos una vez (vuelven al backoff — converge igual).
 
+### Señal de convergencia HONESTA (G1)
+`remainingPlaces` cuenta candidatos **elegibles no procesados** (por límite/abort); un place
+que falla **transitoriamente dentro del run** se procesa (`processedPlaces++`) y luego se
+difiere, así que NO cuenta como remaining → `remainingPlaces` podía ser 0 con un place
+migrable sin migrar. Doble arreglo para que sea imposible leer "convergido" en falso:
+- **`deferredPlaces` se recalcula al FINAL** del run (`candidates.Count(IsDeferred(now))`),
+  no un snapshot del inicio — incluye los que fallaron por fuente en ESTE run (acaban de
+  entrar en backoff con `DeferredUntil = now + backoff > now`).
+- **`converged`** = `!aborted && remainingPlaces==0 && failedPlaces==0 && deferredPlaces==0`.
+  Es la única señal de parada del bucle del runbook. Un place permanentemente roto mantiene
+  `converged=false` hasta que el operador lo inspecciona y acepta (esa foto renderiza en
+  blanco, que es lo mismo que haría el filtro `key=`), pero el operador lo hace **con
+  conocimiento**, no por una señal falsa.
+
+### Circuit breaker de INGESTA (G2)
+El breaker de uploads (M3) vivía solo en el backfill; la **ingesta** (create / bulk /
+import-from-urls / PATCH) rehosteaba inline N places × ≤3 fotos sin presupuesto agregado. Con
+R2 colgado (acepta TCP, no responde), el timeout de 10s del cliente S3 (M4) acota UN upload
+pero un import de muchos places gasta ~10s/foto hasta agotar el proxy de Railway (40s); en ese
+instante el ct de la request se cancela y el `OperationCanceledException` SÍ propaga → la
+request revienta y, con el commit por chunks (M5), lo ya rehosteado se pierde mientras Google
+ya se facturó. `IngestPhotoBreaker` (instancia por-request, compartida por todos los places de
+un bulk/import) corta el sangrado: tras **3 fallos consecutivos de upload** deja de intentar
+rehost en el resto de la request — no re-descarga de Google (no re-facturar) y persiste los
+places **sin foto** (URLs con `key=` descartadas) o **con su URL original** (sin key, para que
+el backfill las migre luego). Un fallo de upload en ingesta SIEMPRE degrada a "sin foto";
+jamás tumba el place ni aborta la request. (En backfill el mismo evento **aborta** el barrido;
+en ingesta **degrada y continúa** — políticas distintas para el mismo síntoma.)
+
 ### Lost updates (M2)
 `Place` usa la columna de sistema **`xmin` de Postgres como concurrency token** (sin columna
 extra; la migración `UseXminConcurrencyOnPlaces` es no-op en SQL — Npgsql no emite DDL para
@@ -66,6 +105,11 @@ columnas de sistema). Escritor stale → `DbUpdateConcurrencyException`:
   ante conflicto hace *reload + merge*: re-aplica el mapa `urlOriginal→urlR2` solo sobre las
   URLs que sigan presentes. Lo que escribió el PATCH nunca se pisa (`conflictPlaces` lo cuenta).
 - **PATCH/review/postpone admin**: responden **409 `concurrent_update`** — el admin recarga.
+- **Resto de escritores de `Place` (g3)**: `DELETE /admin/places/:id`, `reindex-embeddings`,
+  `backfill-descriptions`, `translate-batch`, `backfill-opening-hours` también enrutan su
+  `SaveChanges` por `TrySaveChangesAsync` → **409 `concurrent_update`** en vez de 500 seco si
+  el `backfill-photos` en bucle (u otro writer) tocó la fila entre su read y su save. Los
+  endpoints con commit por chunks conservan lo ya persistido antes del 409.
 
 ### Circuit breaker de R2 (M3)
 `PhotoRehostResult.FailureStage` distingue `Download`/`Decode`/`Blocked` (culpa de la fuente)
@@ -111,6 +155,17 @@ imágenes 404 como cualquier hotlink roto.
   `Content-Length` y bytes reales capados a 20 MB; dimensiones validadas con `Image.Identify`
   (solo header, máx 8192px por lado) ANTES de `Image.Load`; `MaxFrames=1`.
 
+### Presupuesto de decodificación (g4 — residual, aceptado y documentado)
+El cap de 8192px/lado acota el bitmap decodificado a 8192²×4 ≈ **256 MB por imagen aceptada**.
+NO se baja a 4096px (64 MB) a propósito: Google Places sirve fotos de hasta ~4800px y
+`googleusercontent` (fotos de usuario) aún mayores — un cap de 4096 rechazaría fuentes
+**legítimas**, no solo bombs. ImageSharp 3.x no expone un límite de píxeles en `DecoderOptions`,
+así que el check de header (`Image.Identify`) ES la defensa. La presión real está además
+acotada por `MaxDownloadBytes=20 MB` (una bomb de 8192px comprimida rara vez cabe) y por el
+downscale a 1200px inmediato. Si bajo alta concurrencia de rehosts inline la memoria fuera
+problema, la palanca es un `MemoryAllocator` con presupuesto en `Configuration` (no bajar el
+cap y romper fuentes válidas).
+
 ### Object keys (m5 — colisión por query)
 `places/{slug}-{hash8}.webp`, hash sobre scheme+host+**path** (query excluida a propósito:
 la rotación de la key de Google no debe cambiar el key — idempotencia del backfill). Riesgo
@@ -133,4 +188,5 @@ nunca desde places persistidos.
 - `Tests/Features/AdminPlacesPhotosTests.cs` — ingesta, backfill, censo, garantía DTO.
 - `Tests/Features/AdminPlacesPhotosHardeningTests.cs` — repros permanentes de los pases
   adversariales (lock C1, livelock M1, lost-update M2, breaker M3, R2 colgado M4, chunks M5,
-  recovery M6, m1/m2/m4).
+  recovery M6, m1/m2/m4; ronda 2: convergencia honesta **G1**, circuit breaker de ingesta
+  **G2** con el knob de latencia de `FakeR2ObjectStore`, writers stale → 409 **g3**).

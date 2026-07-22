@@ -254,10 +254,18 @@ public record PhotoDomainCensus(int Photos, int Migrated, int Failed);
 /// a cero; <c>OtherDomains</c> desglosa por host real las fotos del bucket "other".
 /// Places soft-deleted/rejected quedan fuera de censo y candidatos.
 ///
-/// Semántica del bucle del runbook (Shared/Photos/README.md): repetir hasta
-/// <c>RemainingPlaces=0</c>. <c>DeferredPlaces</c> = candidatos en backoff por fallos de
-/// fuente (excluidos del barrido — así el bucle converge aunque haya fuentes rotas);
-/// se reintentan al expirar el backoff o con <c>retryDeferred=true</c>.
+/// Señal de convergencia HONESTA (G1): el runbook (Shared/Photos/README.md) debe repetir
+/// el barrido hasta <c>Converged=true</c>, NO solo hasta <c>RemainingPlaces=0</c>.
+/// <c>Converged</c> = <c>!Aborted</c> && nada quedó por procesar (RemainingPlaces=0) &&
+/// <c>FailedPlaces=0</c> (ningún place falló por fuente en ESTE run) && <c>DeferredPlaces=0</c>
+/// (nada en backoff al FINAL del run). Un place que falla transitoriamente DENTRO del run
+/// se difiere y hace <c>Converged=false</c> aunque <c>RemainingPlaces=0</c> — sin esto el
+/// operador desplegaría con un place migrable sin migrar (su URL de Google se sanea → foto
+/// en blanco en B2C).
+/// <c>RemainingPlaces</c> = candidatos elegibles que no se llegaron a procesar (límite/abort).
+/// <c>DeferredPlaces</c> = candidatos en backoff al FINAL del run (incluye los que fallaron
+/// por fuente en ESTE run, no solo los excluidos al inicio); se reintentan al expirar el
+/// backoff o con <c>retryDeferred=true</c>.
 /// <c>Aborted=true</c> = barrido cortado por el circuit breaker de uploads a R2
 /// (<c>AbortReason=r2_upload_unavailable</c>): revisar R2 y relanzar.
 /// <c>MissingPhotoPlaces</c>/<c>RecoveredPlaces</c>/<c>RemainingMissingPlaces</c> = modo
@@ -274,6 +282,7 @@ public record BackfillPhotosResponse(
     int FailedPlaces,
     int ConflictPlaces,
     int RemainingPlaces,
+    bool Converged,
     bool Aborted,
     string? AbortReason,
     int MissingPhotoPlaces,

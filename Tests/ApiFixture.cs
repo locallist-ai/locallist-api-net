@@ -578,18 +578,32 @@ public class FakeR2ObjectStore : IR2ObjectStore
     /// </summary>
     public Func<string, Exception>? UploadFailure { get; set; }
 
-    public Task UploadAsync(string key, byte[] content, string contentType, CancellationToken ct)
+    /// <summary>
+    /// Si es &gt; 0, cada upload espera este tiempo (respetando el ct) ANTES de resolverse o
+    /// fallar — simula un R2 lento/colgado (acepta la conexión pero no responde). Combínalo
+    /// con <see cref="UploadFailure"/> (p. ej. <c>TaskCanceledException</c>) para modelar
+    /// fielmente "R2 cuelga y luego el timeout de 10s del cliente S3 dispara": la ingesta
+    /// gasta tiempo real por foto, de modo que el circuit breaker de ingesta (G2) puede
+    /// abrirse y cortar el sangrado antes de agotar el presupuesto de la request. Una
+    /// cancelación real del caller durante el delay aflora como OperationCanceledException con
+    /// el ct cancelado (propaga, como en prod).
+    /// </summary>
+    public TimeSpan? UploadLatency { get; set; }
+
+    public async Task UploadAsync(string key, byte[] content, string contentType, CancellationToken ct)
     {
         if (!Configured) throw new InvalidOperationException("FakeR2ObjectStore not configured.");
+        if (UploadLatency is { } latency && latency > TimeSpan.Zero)
+            await Task.Delay(latency, ct);
         if (UploadFailure is { } failure) throw failure(key);
         Objects[key] = content;
-        return Task.CompletedTask;
     }
 
     public void Reset()
     {
         Configured = false;
         UploadFailure = null;
+        UploadLatency = null;
         Objects.Clear();
     }
 }

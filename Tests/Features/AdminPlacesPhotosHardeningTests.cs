@@ -1,14 +1,16 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using LocalList.API.NET.Features.Admin.Places;
+using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Photos;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LocalList.API.Tests.Features;
 
 /// <summary>
-/// Repros permanentes de los dos pases adversariales sobre fotos→R2 (2026-07-22), en verde
+/// Repros permanentes de los pases adversariales sobre fotos→R2 (2026-07-22), en verde
 /// tras los fixes — si alguno vuelve a rojo, la regresión es exactamente la del review:
 ///
 /// C1  backfill concurrente (lock + 409, descarga única) ·
@@ -20,7 +22,10 @@ namespace LocalList.API.Tests.Features;
 /// M6  recuperación de fotos vía GooglePlaceId ·
 /// m1  la key de Google no sale por la API admin ·
 /// m2  SSRF: host fuera de allowlist ni siquiera se descarga ·
-/// m4  places deleted/rejected fuera de candidatos y censo.
+/// m4  places deleted/rejected fuera de candidatos y censo ·
+/// G1  convergencia HONESTA: un fallo transitorio EN EL RUN → converged=false (ronda 2) ·
+/// G2  circuit breaker de INGESTA: R2 colgado → places sin foto, 2xx, sin excepción (ronda 2) ·
+/// g3  writers de Place stale → 409 concurrent_update, no 500 (ronda 2).
 ///
 /// ApiFixture = Postgres real (Testcontainers); solo R2 y HTTP salientes fakeados.
 /// </summary>
@@ -478,6 +483,193 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         var rejected = await freshDb.Places.AsNoTracking().SingleAsync(p => p.Name == "m4 Rejected");
         Assert.Equal(new List<string> { GoogleUrl("m4-deleted") }, deleted.Photos);
         Assert.Equal(new List<string> { GoogleUrl("m4-rejected") }, rejected.Photos);
+    }
+
+    // ── G1: convergencia HONESTA (ronda 2) ────────────────────────────────
+
+    [Fact]
+    public async Task Backfill_TransientSourceFailureInRun_DoesNotReportConvergence()
+    {
+        fixture.FakeR2.Configured = true;
+        var client = CreateAdminClient();
+        var db = fixture.GetDbContext();
+        await ClearPlacesAsync(db);
+        SeedPlace(db, "G1 Transient", [GoogleUrl("g1-transient")]);
+        await db.SaveChangesAsync();
+
+        // La fuente devuelve un 503 TRANSITORIO durante este run (p. ej. Google throttling).
+        // El place se difiere DESPUÉS de calcular remainingPlaces/deferredPlaces al estilo viejo,
+        // así que el bug reportaba remaining=0 + deferred=0 + failed=1 → el operador leía las
+        // dos señales de "terminado" del runbook y desplegaba con el place en blanco.
+        fixture.FakePhotos.Responder = req =>
+            req.RequestUri!.ToString().Contains("g1-transient")
+                ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                : FakePhotoHandler.DefaultOk();
+
+        var response = await client.PostAsync("/admin/places/backfill-photos?limit=200", content: null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // Nada quedó SIN PROCESAR, pero el place migrable NO migró → la señal debe ser honesta:
+        // converged=false, y el fallo se refleja en failedPlaces Y deferredPlaces (recalculado
+        // al final del run, no un snapshot del inicio).
+        Assert.Equal(0, body.GetProperty("remainingPlaces").GetInt32());
+        Assert.Equal(1, body.GetProperty("failedPlaces").GetInt32());
+        Assert.Equal(1, body.GetProperty("deferredPlaces").GetInt32());
+        Assert.False(body.GetProperty("converged").GetBoolean());
+
+        // La original (con key) se conserva para el reintento; el DTO público la filtra.
+        var freshDb = fixture.GetDbContext();
+        var place = await freshDb.Places.AsNoTracking().SingleAsync(p => p.Name == "G1 Transient");
+        Assert.Equal(new List<string> { GoogleUrl("g1-transient") }, place.Photos);
+
+        // El fallo era transitorio: la fuente se recupera y un re-run (retryDeferred, sin esperar
+        // el backoff) migra el place y AHORA sí converge — imposible declarar convergencia con
+        // un place migrable en blanco.
+        fixture.FakePhotos.Responder = null;
+        var retry = await client.PostAsync("/admin/places/backfill-photos?limit=200&retryDeferred=true", content: null);
+        var retryBody = await retry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, retryBody.GetProperty("updatedPlaces").GetInt32());
+        Assert.Equal(0, retryBody.GetProperty("failedPlaces").GetInt32());
+        Assert.Equal(0, retryBody.GetProperty("deferredPlaces").GetInt32());
+        Assert.True(retryBody.GetProperty("converged").GetBoolean());
+
+        var final = await fixture.GetDbContext().Places.AsNoTracking().SingleAsync(p => p.Name == "G1 Transient");
+        Assert.StartsWith(R2PublicUrl, Assert.Single(final.Photos!));
+    }
+
+    [Fact]
+    public async Task Backfill_CleanRun_ReportsConverged()
+    {
+        fixture.FakeR2.Configured = true;
+        var client = CreateAdminClient();
+        var db = fixture.GetDbContext();
+        await ClearPlacesAsync(db);
+        SeedPlace(db, "G1 Clean A", [GoogleUrl("g1-clean-a")]);
+        SeedPlace(db, "G1 Clean B", [WanderlogUrl("g1-clean-b")]);
+        await db.SaveChangesAsync();
+
+        var response = await client.PostAsync("/admin/places/backfill-photos?limit=200", content: null);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // Todo migró sin fallos: converged=true es la única señal para desplegar.
+        Assert.Equal(2, body.GetProperty("updatedPlaces").GetInt32());
+        Assert.Equal(0, body.GetProperty("remainingPlaces").GetInt32());
+        Assert.Equal(0, body.GetProperty("failedPlaces").GetInt32());
+        Assert.Equal(0, body.GetProperty("deferredPlaces").GetInt32());
+        Assert.True(body.GetProperty("converged").GetBoolean());
+    }
+
+    // ── G2: circuit breaker de INGESTA (ronda 2) ───────────────────────────
+
+    [Fact]
+    public async Task BulkImport_R2Hung_CreatesAllPlacesWithoutPhoto_2xx_NoException()
+    {
+        fixture.FakeR2.Configured = true;
+        // R2 colgado: acepta la conexión, tarda por foto, y el timeout de 10s del cliente S3
+        // (M4) aflora como TaskCanceledException SIN cancelar el ct del caller. Sin el breaker,
+        // los ~10s/foto agotarían el proxy de Railway (40s) y el OperationCanceledException
+        // propagaría → request reventada + gasto de Google huérfano (commit por chunks perdido).
+        fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(30);
+        fixture.FakeR2.UploadFailure = _ => new TaskCanceledException("simulated S3 client timeout on hung R2");
+
+        var client = CreateAdminClient();
+        var prefix = $"G2-{Guid.NewGuid():N}";
+        var requests = Enumerable.Range(0, 12).Select(i => new
+        {
+            name = $"{prefix} Place {i:D2}",
+            category = "Food",
+            whyThisPlace = "bulk test",
+            city = "Miami",
+            photos = new[] { GoogleUrl($"{prefix}-{i}") },
+        }).ToList();
+
+        var response = await client.PostAsJsonAsync("/admin/places/bulk", requests);
+
+        // La request NO revienta pese al R2 colgado: 2xx, sin excepción propagada.
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(12, body.GetProperty("created").GetInt32());
+
+        // TODOS los places se crean SIN foto (URLs de Google con key descartadas — jamás se
+        // persiste una key ni se aborta la creación por culpa de R2).
+        var db = fixture.GetDbContext();
+        var persisted = await db.Places.AsNoTracking().Where(p => p.Name.StartsWith(prefix)).ToListAsync();
+        Assert.Equal(12, persisted.Count);
+        Assert.All(persisted, p => Assert.Null(p.Photos));
+
+        // El breaker corta el sangrado: tras 3 fallos de upload consecutivos deja de descargar
+        // de Google en el resto del import (no re-facturar) → solo 3 descargas, no 12.
+        Assert.Equal(IngestPhotoBreaker.DefaultThreshold, fixture.FakePhotos.Calls.Count);
+    }
+
+    [Fact]
+    public async Task BulkImport_R2Hung_KeepsNonKeyOriginals_ForLaterBackfill()
+    {
+        fixture.FakeR2.Configured = true;
+        fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(20);
+        fixture.FakeR2.UploadFailure = _ => new TaskCanceledException("simulated S3 client timeout on hung R2");
+
+        var client = CreateAdminClient();
+        var prefix = $"G2b-{Guid.NewGuid():N}";
+        // Fotos SIN key (wanderlog): con R2 colgado se degradan conservando la original para
+        // que el backfill las migre cuando R2 vuelva — nunca se pierden ni tumban el import.
+        var requests = Enumerable.Range(0, 8).Select(i => new
+        {
+            name = $"{prefix} Place {i:D2}",
+            category = "Food",
+            whyThisPlace = "bulk test",
+            city = "Miami",
+            photos = new[] { WanderlogUrl($"{prefix}-{i}") },
+        }).ToList();
+
+        var response = await client.PostAsJsonAsync("/admin/places/bulk", requests);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var db = fixture.GetDbContext();
+        var persisted = await db.Places.AsNoTracking().Where(p => p.Name.StartsWith(prefix)).ToListAsync();
+        Assert.Equal(8, persisted.Count);
+        Assert.All(persisted, p => Assert.StartsWith("https://wanderlog.com/", Assert.Single(p.Photos!)));
+        // Solo 3 descargas (breaker) — el resto conserva la original sin volver a intentar.
+        Assert.Equal(IngestPhotoBreaker.DefaultThreshold, fixture.FakePhotos.Calls.Count);
+    }
+
+    // ── g3: writers de Place stale → 409, no 500 (ronda 2) ─────────────────
+
+    [Fact]
+    public async Task DeletePlace_StaleAfterConcurrentWrite_Returns409_InsteadOf500()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var db = fixture.GetDbContext();
+        await ClearPlacesAsync(db);
+        var place = SeedPlace(db, "g3 Delete Race", [GoogleUrl("g3-del")]);
+        await db.SaveChangesAsync(ct);
+
+        // El contexto del controller carga el place (snapshot de xmin v1)…
+        using var scope = fixture.Services.CreateScope();
+        var sp = scope.ServiceProvider;
+        var scopedDb = sp.GetRequiredService<LocalListDbContext>();
+        _ = await scopedDb.Places.Include(p => p.PlanStops).FirstAsync(p => p.Id == place.Id, ct);
+
+        // …y OTRO writer (p. ej. el backfill-photos en bucle) toca la fila → xmin avanza a v2.
+        var other = fixture.GetDbContext();
+        var otherPlace = await other.Places.FirstAsync(p => p.Id == place.Id, ct);
+        otherPlace.WhyThisPlace = "bumped by concurrent writer";
+        await other.SaveChangesAsync(ct);
+
+        // DeletePlace guarda con xmin v1 stale → antes: DbUpdateConcurrencyException = 500 seco.
+        // Ahora: 409 concurrent_update graceful (el admin recarga y reintenta).
+        var controller = ActivatorUtilities.CreateInstance<AdminPlacesController>(sp);
+        var result = await controller.DeletePlace(place.Id, hard: false, ct);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal(HttpStatusCode.Conflict, (HttpStatusCode)conflict.StatusCode!);
+        Assert.Contains("concurrent_update", JsonSerializer.Serialize(conflict.Value));
+
+        // La fila sigue viva (no se borró en silencio con estado stale).
+        var freshDb = fixture.GetDbContext();
+        var stillThere = await freshDb.Places.AsNoTracking().SingleAsync(p => p.Id == place.Id, ct);
+        Assert.NotEqual("deleted", stillThere.Status);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────

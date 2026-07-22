@@ -336,6 +336,12 @@ public class PlaceImportService
         // de la cancelación queda persistido y el re-run dedupa por GooglePlaceId/Name+City.
         const int CommitChunkSize = 10;
 
+        // G2: circuit breaker de ingesta compartido por TODO el import (presupuesto agregado).
+        // Con R2 colgado, tras N uploads fallidos consecutivos deja de intentar rehost en el
+        // resto de places — no re-factura Google y persiste sin foto, sin propagar el fallo de
+        // R2 ni agotar el proxy de Railway a base de timeouts de 10s por foto.
+        var photoBreaker = new IngestPhotoBreaker();
+
         foreach (var req in requests)
         {
             if (!string.IsNullOrEmpty(req.GooglePlaceId) && existingGoogleIds.Contains(req.GooglePlaceId))
@@ -346,7 +352,7 @@ public class PlaceImportService
 
             // Rehost a R2 ANTES de persistir: Place.Photos solo debe contener URLs de R2.
             // Solo se rehostean los requests que pasan dedup (no se sube nada para skips).
-            var photos = await _photoRehost.RehostForIngestAsync(req.Photos, req.Name, ct);
+            var photos = await _photoRehost.RehostForIngestAsync(req.Photos, req.Name, ct, photoBreaker);
 
             var place = new Place
             {

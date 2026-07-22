@@ -64,6 +64,11 @@ public interface IPhotoRehostService
     /// con R2 configurado NUNCA devuelve una URL de Google con key (si el rehost falla, la
     /// foto se descarta); sin config conserva las originales (graceful). Devuelve null si el
     /// resultado queda vacío.
+    /// <para><paramref name="breaker"/> (G2): circuit breaker por-request opcional. Tras N
+    /// fallos consecutivos de upload a R2 deja de intentar rehost — degrada a "sin foto" sin
+    /// re-descargar de Google (no re-facturar) y sin propagar jamás el fallo de R2. En un
+    /// bulk/import se pasa UNA instancia compartida para todos los places.</para>
     /// </summary>
-    Task<List<string>?> RehostForIngestAsync(IReadOnlyList<string>? urls, string keyHint, CancellationToken ct);
+    Task<List<string>?> RehostForIngestAsync(
+        IReadOnlyList<string>? urls, string keyHint, CancellationToken ct, IngestPhotoBreaker? breaker = null);
 }

@@ -149,7 +149,7 @@ public class PhotoRehostService : IPhotoRehostService
     }
 
     public async Task<List<string>?> RehostForIngestAsync(
-        IReadOnlyList<string>? urls, string keyHint, CancellationToken ct)
+        IReadOnlyList<string>? urls, string keyHint, CancellationToken ct, IngestPhotoBreaker? breaker = null)
     {
         if (urls is not { Count: > 0 }) return null;
 
@@ -158,7 +158,24 @@ public class PhotoRehostService : IPhotoRehostService
         {
             if (string.IsNullOrWhiteSpace(url)) continue;
 
+            // G2: circuit breaker de ingesta. Si R2 lleva N uploads consecutivos fallando en
+            // esta request, dejamos de intentar rehost: NO re-descargamos de Google (no
+            // re-facturar el SKU Place Photos contra un R2 caído) y degradamos igual que un
+            // fallo — la URL con key se descarta, la sin key se conserva para el backfill.
+            // Nunca se aborta la creación por un R2 colgado.
+            if (breaker is { IsOpen: true })
+            {
+                if (PhotoUrls.ContainsApiKey(url)) continue;
+                result.Add(url);
+                continue;
+            }
+
             var rehosted = await RehostAsync(url, keyHint, ct);
+            if (rehosted.Outcome == PhotoRehostOutcome.Rehosted)
+                breaker?.RecordUploadSuccess();
+            else if (rehosted.FailureStage == PhotoRehostFailureStage.Upload)
+                breaker?.RecordUploadFailure();
+
             if (rehosted.Outcome == PhotoRehostOutcome.Failed && PhotoUrls.ContainsApiKey(url))
             {
                 // Con R2 configurado, una URL de Google con key JAMÁS se persiste:
@@ -175,6 +192,18 @@ public class PhotoRehostService : IPhotoRehostService
     {
         // Decompression bomb: Identify solo lee el header — rechaza dimensiones absurdas
         // ANTES de materializar el bitmap completo en memoria con Image.Load.
+        //
+        // g4 (presupuesto de decodificación, aceptado y documentado): el cap de 8192px acota
+        // el peor caso a 8192²×4 ≈ 256 MB de bitmap por imagen aceptada. NO se baja a 4096px
+        // (64 MB) a propósito: Google Places sirve fotos de hasta ~4800px y googleusercontent
+        // (fotos de usuario) aún mayores — un cap de 4096 rechazaría fuentes LEGÍTIMAS, no
+        // solo bombs. ImageSharp 3.x no expone un límite de píxeles en DecoderOptions, así que
+        // este check de header ES la defensa. La presión de memoria real está acotada además
+        // por (a) MaxDownloadBytes=20 MB (una bomb de 8192px comprimida no cabe salvo formatos
+        // extremos, que MaxFrames=1 + el reencode inmediato mitigan) y (b) el downscale a
+        // 1200px justo después. Si esto se volviera problema bajo alta concurrencia de rehosts
+        // inline, la palanca es un MemoryAllocator con presupuesto en Configuration, no bajar
+        // el cap. Detalle en Shared/Photos/README.md.
         var info = Image.Identify(raw);
         if (info.Width > MaxSourceDimensionPx || info.Height > MaxSourceDimensionPx)
             throw new InvalidOperationException(

@@ -173,8 +173,10 @@ public class AdminPlacesController : ControllerBase
         var now = _clock.GetUtcNow();
 
         // Rehost a R2 antes de persistir — Place.Photos solo debe contener URLs de R2
-        // (sin config R2 degrada graceful y conserva las originales).
-        var photos = await _photoRehost.RehostForIngestAsync(request.Photos, request.Name, ct);
+        // (sin config R2 degrada graceful y conserva las originales). G2: breaker por-request
+        // — un R2 colgado degrada a "sin foto", nunca tumba la creación.
+        var photos = await _photoRehost.RehostForIngestAsync(
+            request.Photos, request.Name, ct, new IngestPhotoBreaker());
 
         var place = new Place
         {
@@ -274,7 +276,8 @@ public class AdminPlacesController : ControllerBase
         if (request.PriceRange != null) place.PriceRange = request.PriceRange.Trim();
         // place.Name ya refleja el rename si venía en el request (se aplica arriba).
         if (request.Photos != null)
-            place.Photos = await _photoRehost.RehostForIngestAsync(request.Photos, place.Name, ct);
+            place.Photos = await _photoRehost.RehostForIngestAsync(
+                request.Photos, place.Name, ct, new IngestPhotoBreaker());
         if (request.GooglePlaceId != null) place.GooglePlaceId = request.GooglePlaceId.Trim();
         if (request.GoogleRating.HasValue) place.GoogleRating = request.GoogleRating;
         if (request.GoogleReviewCount.HasValue) place.GoogleReviewCount = request.GoogleReviewCount;
@@ -397,7 +400,11 @@ public class AdminPlacesController : ControllerBase
             place.UpdatedAt = _clock.GetUtcNow();
         }
 
-        await _db.SaveChangesAsync(ct);
+        // g3: xmin es concurrency token en Place. Si el backfill-photos (u otro writer) tocó
+        // la fila entre nuestro read y este save, devolvemos 409 graceful (no un 500 seco por
+        // DbUpdateConcurrencyException). Sin lost update — xmin lo impide.
+        if (!await TrySaveChangesAsync(ct))
+            return Conflict(new { error = "concurrent_update", message = "The place was modified by another operation (e.g. photo backfill). Reload and retry." });
 
         _logger.LogInformation("Admin {Action} place {PlaceId}", hard ? "hard-deleted" : "soft-deleted", place.Id);
 
@@ -455,7 +462,9 @@ public class AdminPlacesController : ControllerBase
             tracked[i].UpdatedAt = now;
         }
 
-        await _db.SaveChangesAsync(ct);
+        // g3: 409 graceful si otro writer tocó alguna fila (token xmin), no 500 seco.
+        if (!await TrySaveChangesAsync(ct))
+            return Conflict(new { error = "concurrent_update", message = "One or more places were modified by another operation. Retry." });
 
         _logger.LogInformation(
             "Reindexed embeddings: {Reindexed}/{Total} (onlyMissing={OnlyMissing}, limit={Limit})",
@@ -500,8 +509,10 @@ public class AdminPlacesController : ControllerBase
                 backfilled++;
             }
 
-            if (!ct.IsCancellationRequested)
-                await _db.SaveChangesAsync(ct);
+            // g3: 409 graceful ante escritura concurrente (token xmin) — los chunks previos
+            // ya quedaron persistidos, así que el progreso no se pierde entero.
+            if (!ct.IsCancellationRequested && !await TrySaveChangesAsync(ct))
+                return Conflict(new { error = "concurrent_update", message = "A place was modified by another operation. Retry." });
         }
 
         _logger.LogInformation(
@@ -611,7 +622,6 @@ public class AdminPlacesController : ControllerBase
         var eligible = retryDeferred
             ? candidates
             : candidates.Where(x => !_backfill.IsDeferred(x.Id, now)).ToList();
-        var deferredPlaces = candidates.Count - eligible.Count;
 
         // M6: places sin fotos (ingesta fallida en su día) pero con GooglePlaceId — se pueden
         // recuperar re-obteniendo los photo refs de Places Details. Photos==null es el único
@@ -782,17 +792,28 @@ public class AdminPlacesController : ControllerBase
             kv => kv.Key,
             kv => new PhotoDomainCensus(kv.Value, migrated[kv.Key], failed[kv.Key]));
 
+        // G1: señal de convergencia HONESTA. `deferredPlaces` se recalcula al FINAL sobre los
+        // candidatos: un place que falló por fuente EN ESTE run acaba de entrar en backoff
+        // (RecordFailure con `now` → DeferredUntil > now), así que se cuenta aquí — el snapshot
+        // del inicio (`deferredPlaces` original) se lo perdía. `converged` sólo es true cuando
+        // no queda NADA migrable sin migrar: ni sin procesar, ni fallido, ni diferido. Es
+        // IMPOSIBLE leer converged=true con un place migrable en blanco.
+        var deferredPlacesAtEnd = candidates.Count(c => _backfill.IsDeferred(c.Id, now));
+        var remainingPlaces = Math.Max(0, eligible.Count - processedPlaces);
+        var converged = !aborted && remainingPlaces == 0 && failedPlaces == 0 && deferredPlacesAtEnd == 0;
+
         var response = new BackfillPhotosResponse(
             R2Configured: _photoRehost.IsConfigured,
             DryRun: dryRun,
             TotalPlacesWithPhotos: allWithPhotos.Count,
             CandidatePlaces: candidates.Count,
-            DeferredPlaces: deferredPlaces,
+            DeferredPlaces: deferredPlacesAtEnd,
             ProcessedPlaces: processedPlaces,
             UpdatedPlaces: updatedPlaces,
             FailedPlaces: failedPlaces,
             ConflictPlaces: conflictPlaces,
-            RemainingPlaces: Math.Max(0, eligible.Count - processedPlaces),
+            RemainingPlaces: remainingPlaces,
+            Converged: converged,
             Aborted: aborted,
             AbortReason: abortReason,
             MissingPhotoPlaces: missingCandidates.Count,
@@ -802,9 +823,9 @@ public class AdminPlacesController : ControllerBase
             OtherDomains: otherDomains);
 
         _logger.LogInformation(
-            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} deferred={Def} processed={Proc} updated={Upd} failedPlaces={FailP} conflicts={Conf} aborted={Abort} migrated={Mig} failed={Fail} recovered={Rec}",
+            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} deferred={Def} processed={Proc} updated={Upd} failedPlaces={FailP} conflicts={Conf} converged={Conv} aborted={Abort} migrated={Mig} failed={Fail} recovered={Rec}",
             response.R2Configured, dryRun, response.TotalPlacesWithPhotos, response.CandidatePlaces,
-            deferredPlaces, processedPlaces, updatedPlaces, failedPlaces, conflictPlaces, aborted,
+            deferredPlacesAtEnd, processedPlaces, updatedPlaces, failedPlaces, conflictPlaces, converged, aborted,
             migrated.Values.Sum(), failed.Values.Sum(), recoveredPlaces);
 
         return Ok(response);
@@ -978,8 +999,10 @@ public class AdminPlacesController : ControllerBase
                     bucketGemini.Add(place);
                 }
             }
-            if (!ct.IsCancellationRequested)
-                await _db.SaveChangesAsync(ct);
+            // g3: 409 graceful ante escritura concurrente (token xmin); los chunks previos
+            // ya están commiteados.
+            if (!ct.IsCancellationRequested && !await TrySaveChangesAsync(ct))
+                return Conflict(new { error = "concurrent_update", message = "A place was modified by another operation. Retry." });
         }
 
         // Bucket B: Gemini fallback — sequential with delay to stay under free-tier limit (~15 RPM)
@@ -1003,8 +1026,9 @@ public class AdminPlacesController : ControllerBase
             }
             await Task.Delay(4000, ct);
         }
-        if (!ct.IsCancellationRequested)
-            await _db.SaveChangesAsync(ct);
+        // g3: 409 graceful ante escritura concurrente (token xmin), no 500 seco.
+        if (!ct.IsCancellationRequested && !await TrySaveChangesAsync(ct))
+            return Conflict(new { error = "concurrent_update", message = "A place was modified by another operation. Retry." });
 
         _logger.LogInformation(
             "backfill-descriptions: googleFilled={G} geminiFilled={Gem} failed={F} total={T}",
@@ -1073,9 +1097,11 @@ public class AdminPlacesController : ControllerBase
                 translated++;
             }
 
-            // Save progress after each chunk — allows partial resumption on timeout
-            if (!ct.IsCancellationRequested)
-                await _db.SaveChangesAsync(ct);
+            // Save progress after each chunk — allows partial resumption on timeout.
+            // g3: 409 graceful ante escritura concurrente (token xmin); los chunks previos
+            // ya están commiteados.
+            if (!ct.IsCancellationRequested && !await TrySaveChangesAsync(ct))
+                return Conflict(new { error = "concurrent_update", message = "A place was modified by another operation. Retry." });
         }
 
         _logger.LogInformation("translate-batch places: translated={T} failed={F} skipped={S} remaining={R}",
