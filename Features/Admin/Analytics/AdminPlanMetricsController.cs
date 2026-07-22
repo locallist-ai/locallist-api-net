@@ -49,6 +49,7 @@ public class AdminPlanMetricsController : ControllerBase
         var total = await query.CountAsync(ct);
         var metrics = await query
             .OrderByDescending(m => m.CreatedAt)
+            .ThenByDescending(m => m.Id) // tiebreaker: orden total y estable con CreatedAt empatado (paginación sin dups/omisiones)
             .Skip(offset)
             .Take(limit)
             .Select(m => new AdminPlanMetricDto(
