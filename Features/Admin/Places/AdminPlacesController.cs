@@ -31,6 +31,7 @@ public class AdminPlacesController : ControllerBase
     private readonly PlaceImportService _importSvc;
     private readonly IPhotoRehostService _photoRehost;
     private readonly BackfillPhotosCoordinator _backfill;
+    private readonly TimeSpan _ingestRehostBudget;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -48,7 +49,8 @@ public class AdminPlacesController : ControllerBase
         ITaxonomySvc taxonomy,
         PlaceImportService importSvc,
         IPhotoRehostService photoRehost,
-        BackfillPhotosCoordinator backfill)
+        BackfillPhotosCoordinator backfill,
+        Microsoft.Extensions.Options.IOptions<Shared.Photos.R2Options> r2Options)
     {
         _db = db;
         _logger = logger;
@@ -61,6 +63,7 @@ public class AdminPlacesController : ControllerBase
         _importSvc = importSvc;
         _photoRehost = photoRehost;
         _backfill = backfill;
+        _ingestRehostBudget = r2Options.Value.IngestRehostBudget;
     }
 
     [HttpGet("cities")]
@@ -176,7 +179,7 @@ public class AdminPlacesController : ControllerBase
         // (sin config R2 degrada graceful y conserva las originales). G2: breaker por-request
         // — un R2 colgado degrada a "sin foto", nunca tumba la creación.
         var photos = await _photoRehost.RehostForIngestAsync(
-            request.Photos, request.Name, ct, new IngestPhotoBreaker());
+            request.Photos, request.Name, ct, new IngestPhotoBreaker(budget: _ingestRehostBudget));
 
         var place = new Place
         {
@@ -277,7 +280,7 @@ public class AdminPlacesController : ControllerBase
         // place.Name ya refleja el rename si venía en el request (se aplica arriba).
         if (request.Photos != null)
             place.Photos = await _photoRehost.RehostForIngestAsync(
-                request.Photos, place.Name, ct, new IngestPhotoBreaker());
+                request.Photos, place.Name, ct, new IngestPhotoBreaker(budget: _ingestRehostBudget));
         if (request.GooglePlaceId != null) place.GooglePlaceId = request.GooglePlaceId.Trim();
         if (request.GoogleRating.HasValue) place.GoogleRating = request.GoogleRating;
         if (request.GoogleReviewCount.HasValue) place.GoogleReviewCount = request.GoogleReviewCount;
@@ -639,7 +642,7 @@ public class AdminPlacesController : ControllerBase
         var migrated = NewBucketCounter();
         var failed = NewBucketCounter();
         int processedPlaces = 0, updatedPlaces = 0, failedPlaces = 0, conflictPlaces = 0;
-        int recoveredPlaces = 0, processedMissing = 0;
+        int recoveredPlaces = 0, processedMissing = 0, unmigratedPlaces = 0;
         var uploadFailureStreak = 0;
         var aborted = false;
         string? abortReason = null;
@@ -713,8 +716,18 @@ public class AdminPlacesController : ControllerBase
                     _backfill.RecordFailure(place.Id, now);
                     failedPlaces++;
                 }
-                // Ni migrado ni fallo de fuente (abort por R2 / conflicto): queda elegible
-                // para el próximo run sin backoff.
+                else
+                {
+                    // G1 (ronda 3): NO migró por completo y NO es culpa de la fuente — un fallo
+                    // de UPLOAD sub-umbral (<3 consecutivos, o intercalado con OKs que resetean el
+                    // streak), un abort de R2 a mitad del place, o un conflicto que dejó URLs de
+                    // Google. NO se difiere (no es culpa de su fuente; el siguiente run lo retoma
+                    // sin esperar backoff), PERO la señal de convergencia DEBE contarlo: sin esto,
+                    // `failedPlaces`/`deferred`/`remaining` seguían a 0 y `converged` mentía con el
+                    // place aún en Google (foto en blanco al desplegar). Es imposible leer
+                    // converged=true con una sola foto migrable sin migrar.
+                    unmigratedPlaces++;
+                }
             }
 
             if (recoverMissing && !aborted && !ct.IsCancellationRequested)
@@ -796,11 +809,14 @@ public class AdminPlacesController : ControllerBase
         // candidatos: un place que falló por fuente EN ESTE run acaba de entrar en backoff
         // (RecordFailure con `now` → DeferredUntil > now), así que se cuenta aquí — el snapshot
         // del inicio (`deferredPlaces` original) se lo perdía. `converged` sólo es true cuando
-        // no queda NADA migrable sin migrar: ni sin procesar, ni fallido, ni diferido. Es
-        // IMPOSIBLE leer converged=true con un place migrable en blanco.
+        // no queda NADA migrable sin migrar: ni sin procesar (`remaining`), ni fallido por fuente
+        // (`failed`), ni diferido (`deferred`), ni procesado-pero-sin-migrar por un fallo de
+        // upload sub-umbral / abort / conflicto (`unmigrated`, ronda 3). Es IMPOSIBLE leer
+        // converged=true con un place migrable en blanco.
         var deferredPlacesAtEnd = candidates.Count(c => _backfill.IsDeferred(c.Id, now));
         var remainingPlaces = Math.Max(0, eligible.Count - processedPlaces);
-        var converged = !aborted && remainingPlaces == 0 && failedPlaces == 0 && deferredPlacesAtEnd == 0;
+        var converged = !aborted && remainingPlaces == 0 && failedPlaces == 0
+                        && deferredPlacesAtEnd == 0 && unmigratedPlaces == 0;
 
         var response = new BackfillPhotosResponse(
             R2Configured: _photoRehost.IsConfigured,
@@ -812,6 +828,7 @@ public class AdminPlacesController : ControllerBase
             UpdatedPlaces: updatedPlaces,
             FailedPlaces: failedPlaces,
             ConflictPlaces: conflictPlaces,
+            UnmigratedPlaces: unmigratedPlaces,
             RemainingPlaces: remainingPlaces,
             Converged: converged,
             Aborted: aborted,
@@ -823,10 +840,10 @@ public class AdminPlacesController : ControllerBase
             OtherDomains: otherDomains);
 
         _logger.LogInformation(
-            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} deferred={Def} processed={Proc} updated={Upd} failedPlaces={FailP} conflicts={Conf} converged={Conv} aborted={Abort} migrated={Mig} failed={Fail} recovered={Rec}",
+            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} deferred={Def} processed={Proc} updated={Upd} failedPlaces={FailP} conflicts={Conf} unmigrated={Unmig} converged={Conv} aborted={Abort} migrated={Mig} failed={Fail} recovered={Rec}",
             response.R2Configured, dryRun, response.TotalPlacesWithPhotos, response.CandidatePlaces,
-            deferredPlacesAtEnd, processedPlaces, updatedPlaces, failedPlaces, conflictPlaces, converged, aborted,
-            migrated.Values.Sum(), failed.Values.Sum(), recoveredPlaces);
+            deferredPlacesAtEnd, processedPlaces, updatedPlaces, failedPlaces, conflictPlaces, unmigratedPlaces,
+            converged, aborted, migrated.Values.Sum(), failed.Values.Sum(), recoveredPlaces);
 
         return Ok(response);
 

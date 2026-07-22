@@ -6,6 +6,7 @@ using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Photos;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace LocalList.API.Tests.Features;
 
@@ -23,8 +24,10 @@ namespace LocalList.API.Tests.Features;
 /// m1  la key de Google no sale por la API admin ·
 /// m2  SSRF: host fuera de allowlist ni siquiera se descarga ·
 /// m4  places deleted/rejected fuera de candidatos y censo ·
-/// G1  convergencia HONESTA: un fallo transitorio EN EL RUN → converged=false (ronda 2) ·
-/// G2  circuit breaker de INGESTA: R2 colgado → places sin foto, 2xx, sin excepción (ronda 2) ·
+/// G1  convergencia HONESTA: un fallo transitorio EN EL RUN → converged=false (ronda 2), y un
+///     fallo de UPLOAD sub-umbral → unmigratedPlaces → converged=false (ronda 3) ·
+/// G2  circuit breaker de INGESTA: R2 colgado → places sin foto, 2xx, sin excepción (ronda 2);
+///     presupuesto de wall-clock que corta por TIEMPO, no solo por intentos (ronda 3) ·
 /// g3  writers de Place stale → 409 concurrent_update, no 500 (ronda 2).
 ///
 /// ApiFixture = Postgres real (Testcontainers); solo R2 y HTTP salientes fakeados.
@@ -45,7 +48,18 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         fixture.FakePhotos.Reset();
         fixture.FakeGooglePlaces.Reset();
         fixture.Services.GetRequiredService<BackfillPhotosCoordinator>().Reset();
+        // El presupuesto de wall-clock de la ingesta es un singleton IOptions compartido por el
+        // host de test: restaurar el default para no filtrar entre tests.
+        SetIngestRehostBudget(IngestPhotoBreaker.DefaultBudget);
     }
+
+    /// <summary>
+    /// Ajusta el presupuesto de wall-clock del rehost inline en ingesta (G2/ronda 3). El
+    /// controller/import service leen <c>R2Options.IngestRehostBudget</c> por request al
+    /// construir el <see cref="IngestPhotoBreaker"/>; mutar el singleton IOptions surte efecto.
+    /// </summary>
+    private void SetIngestRehostBudget(TimeSpan budget) =>
+        fixture.Services.GetRequiredService<IOptions<R2Options>>().Value.IngestRehostBudget = budget;
 
     // ── C1: lock del backfill ──────────────────────────────────────────────
 
@@ -560,18 +574,71 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         Assert.True(body.GetProperty("converged").GetBoolean());
     }
 
-    // ── G2: circuit breaker de INGESTA (ronda 2) ───────────────────────────
+    [Fact]
+    public async Task REPRO_Backfill_SubThresholdUploadFailure_DoesNotReportConvergence()
+    {
+        // MAJOR 1 (ronda 3): la ronda 2 arregló el fallo de FUENTE (503 → difiere → failedPlaces).
+        // Pero un fallo de UPLOAD a R2 por debajo del umbral de aborto (streak < 3) NO aborta el
+        // barrido, NO difiere el place (no es culpa de su fuente) y NO era failedPlaces → el place
+        // quedaba processedPlaces++ con su URL de Google, con remaining=0 && failed=0 && deferred=0
+        // → converged=true MENTÍA. El operador leía "convergido", desplegaba, y esa foto se saneaba
+        // a blanco en B2C. Ahora cuenta como unmigratedPlaces → converged=false.
+        fixture.FakeR2.Configured = true;
+        fixture.FakeR2.UploadFailure = _ => new InvalidOperationException("simulated R2 5xx");
+        var client = CreateAdminClient();
+        var db = fixture.GetDbContext();
+        await ClearPlacesAsync(db);
+        SeedPlace(db, "G1sub Upload", [GoogleUrl("g1sub-upload")]);
+        await db.SaveChangesAsync();
+
+        var response = await client.PostAsync("/admin/places/backfill-photos?limit=200", content: null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // Un solo fallo de upload (streak=1<3): NO aborta, NO difiere, NO es failedPlaces por
+        // fuente, NADA queda sin procesar…
+        Assert.False(body.GetProperty("aborted").GetBoolean());
+        Assert.Equal(0, body.GetProperty("failedPlaces").GetInt32());
+        Assert.Equal(0, body.GetProperty("deferredPlaces").GetInt32());
+        Assert.Equal(0, body.GetProperty("remainingPlaces").GetInt32());
+        // …pero el place migrable NO migró → converged DEBE ser false y unmigratedPlaces contarlo.
+        Assert.Equal(1, body.GetProperty("unmigratedPlaces").GetInt32());
+        Assert.False(body.GetProperty("converged").GetBoolean());
+
+        // La URL de Google original se conserva para el reintento; el DTO público la filtra.
+        var freshDb = fixture.GetDbContext();
+        var place = await freshDb.Places.AsNoTracking().SingleAsync(p => p.Name == "G1sub Upload");
+        Assert.Equal(new List<string> { GoogleUrl("g1sub-upload") }, place.Photos);
+
+        // El place NO se difirió: un re-run INMEDIATO (sin retryDeferred, sin esperar backoff) con
+        // R2 sano migra y AHORA sí converge — imposible declarar convergencia con un place en blanco.
+        fixture.FakeR2.UploadFailure = null;
+        var retry = await client.PostAsync("/admin/places/backfill-photos?limit=200", content: null);
+        var retryBody = await retry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, retryBody.GetProperty("updatedPlaces").GetInt32());
+        Assert.Equal(0, retryBody.GetProperty("unmigratedPlaces").GetInt32());
+        Assert.True(retryBody.GetProperty("converged").GetBoolean());
+
+        var final = await fixture.GetDbContext().Places.AsNoTracking().SingleAsync(p => p.Name == "G1sub Upload");
+        Assert.StartsWith(R2PublicUrl, Assert.Single(final.Photos!));
+    }
+
+    // ── G2: circuit breaker de INGESTA (ronda 2) + presupuesto wall-clock (ronda 3) ──
 
     [Fact]
     public async Task BulkImport_R2Hung_CreatesAllPlacesWithoutPhoto_2xx_NoException()
     {
         fixture.FakeR2.Configured = true;
-        // R2 colgado: acepta la conexión, tarda por foto, y el timeout de 10s del cliente S3
-        // (M4) aflora como TaskCanceledException SIN cancelar el ct del caller. Sin el breaker,
-        // los ~10s/foto agotarían el proxy de Railway (40s) y el OperationCanceledException
-        // propagaría → request reventada + gasto de Google huérfano (commit por chunks perdido).
-        fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(30);
+        // R2 COLGADO modelado con COSTE REAL por intento: cada upload tarda 1.5s (acepta TCP y no
+        // responde) antes de aflorar como TaskCanceledException. En prod ese coste (~10-20s/foto)
+        // agota el proxy de Railway (40s) con solo ~2 uploads — ANTES de que el 3er fallo abra el
+        // breaker por-intentos. Por eso el breaker también acota TIEMPO: presupuesto de wall-clock
+        // (aquí 250ms, fracción del "deadline"; en prod 25s < 40s). Al agotarse, se degrada a "sin
+        // foto" con margen para commitear. (Antes: UploadLatency=30ms hacía caber los 3 intentos
+        // trivialmente y ocultaba que el coste real revienta el presupuesto de tiempo.)
+        fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(1500);
         fixture.FakeR2.UploadFailure = _ => new TaskCanceledException("simulated S3 client timeout on hung R2");
+        SetIngestRehostBudget(TimeSpan.FromMilliseconds(250));
 
         var client = CreateAdminClient();
         var prefix = $"G2-{Guid.NewGuid():N}";
@@ -598,17 +665,21 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         Assert.Equal(12, persisted.Count);
         Assert.All(persisted, p => Assert.Null(p.Photos));
 
-        // El breaker corta el sangrado: tras 3 fallos de upload consecutivos deja de descargar
-        // de Google en el resto del import (no re-facturar) → solo 3 descargas, no 12.
-        Assert.Equal(IngestPhotoBreaker.DefaultThreshold, fixture.FakePhotos.Calls.Count);
+        // El presupuesto de wall-clock corta el sangrado ANTES del breaker por-intentos: un solo
+        // upload colgado agota el budget → el resto degrada sin descargar de Google. Menos de 3
+        // descargas (con UploadLatency=30ms el conteo por-intentos daba exactamente 3 y escondía
+        // que el tiempo real ya habría reventado el deadline).
+        Assert.True(fixture.FakePhotos.Calls.Count < IngestPhotoBreaker.DefaultThreshold,
+            $"expected fewer than {IngestPhotoBreaker.DefaultThreshold} Google downloads (budget cut), got {fixture.FakePhotos.Calls.Count}");
     }
 
     [Fact]
     public async Task BulkImport_R2Hung_KeepsNonKeyOriginals_ForLaterBackfill()
     {
         fixture.FakeR2.Configured = true;
-        fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(20);
+        fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(1500);
         fixture.FakeR2.UploadFailure = _ => new TaskCanceledException("simulated S3 client timeout on hung R2");
+        SetIngestRehostBudget(TimeSpan.FromMilliseconds(250));
 
         var client = CreateAdminClient();
         var prefix = $"G2b-{Guid.NewGuid():N}";
@@ -630,8 +701,10 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         var persisted = await db.Places.AsNoTracking().Where(p => p.Name.StartsWith(prefix)).ToListAsync();
         Assert.Equal(8, persisted.Count);
         Assert.All(persisted, p => Assert.StartsWith("https://wanderlog.com/", Assert.Single(p.Photos!)));
-        // Solo 3 descargas (breaker) — el resto conserva la original sin volver a intentar.
-        Assert.Equal(IngestPhotoBreaker.DefaultThreshold, fixture.FakePhotos.Calls.Count);
+        // El presupuesto de wall-clock corta antes del 3er intento — el resto conserva la
+        // original sin volver a intentar.
+        Assert.True(fixture.FakePhotos.Calls.Count < IngestPhotoBreaker.DefaultThreshold,
+            $"expected fewer than {IngestPhotoBreaker.DefaultThreshold} downloads (budget cut), got {fixture.FakePhotos.Calls.Count}");
     }
 
     // ── g3: writers de Place stale → 409, no 500 (ronda 2) ─────────────────

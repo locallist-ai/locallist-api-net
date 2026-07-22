@@ -37,4 +37,12 @@ public class R2Options
         "wanderlog.com",
         "*.wanderlog.com",
     ];
+
+    /// <summary>
+    /// Presupuesto de wall-clock del rehost inline en la INGESTA (create / bulk / import /
+    /// PATCH), agregado por request (<see cref="IngestPhotoBreaker"/>). Fracción del deadline
+    /// del proxy de Railway (~40s): contra un R2 colgado, al agotarse se degrada a "sin foto"
+    /// con margen para commitear el place antes de que el proxy cancele el ct. Default 25s.
+    /// </summary>
+    public TimeSpan IngestRehostBudget { get; set; } = IngestPhotoBreaker.DefaultBudget;
 }

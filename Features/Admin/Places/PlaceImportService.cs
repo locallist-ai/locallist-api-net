@@ -25,6 +25,7 @@ public class PlaceImportService
     private readonly IPhotoRehostService _photoRehost;
     private readonly ILogger<PlaceImportService> _logger;
     private readonly TimeProvider _clock;
+    private readonly TimeSpan _ingestRehostBudget;
 
     public PlaceImportService(
         LocalListDbContext db,
@@ -34,7 +35,8 @@ public class PlaceImportService
         ITaxonomySvc taxonomy,
         IPhotoRehostService photoRehost,
         ILogger<PlaceImportService> logger,
-        TimeProvider clock)
+        TimeProvider clock,
+        Microsoft.Extensions.Options.IOptions<Shared.Photos.R2Options> r2Options)
     {
         _db = db;
         _ai = ai;
@@ -44,6 +46,7 @@ public class PlaceImportService
         _photoRehost = photoRehost;
         _logger = logger;
         _clock = clock;
+        _ingestRehostBudget = r2Options.Value.IngestRehostBudget;
     }
 
     // ── BulkImport ────────────────────────────────────────────────────────
@@ -340,7 +343,7 @@ public class PlaceImportService
         // Con R2 colgado, tras N uploads fallidos consecutivos deja de intentar rehost en el
         // resto de places — no re-factura Google y persiste sin foto, sin propagar el fallo de
         // R2 ni agotar el proxy de Railway a base de timeouts de 10s por foto.
-        var photoBreaker = new IngestPhotoBreaker();
+        var photoBreaker = new IngestPhotoBreaker(budget: _ingestRehostBudget);
 
         foreach (var req in requests)
         {

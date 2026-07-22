@@ -22,14 +22,17 @@ Orden obligatorio, sin excepciones:
 2. **Ejecutar el backfill en bucle** hasta **`converged: true`** (NO basta `remainingPlaces: 0`):
    `POST /admin/places/backfill-photos` (default `limit=20`, cabe bajo el proxy de 40s).
    - **Señal de convergencia HONESTA (G1)**: `converged=true` sólo cuando `!aborted &&
-     remainingPlaces==0 && failedPlaces==0 && deferredPlaces==0`. **Relanzar mientras
-     `converged==false`** — equivalentemente, mientras `failedPlaces>0` O `deferredPlaces>0`,
-     esperando a que expire el backoff (o forzando con `retryDeferred=true`). ⚠️ NO uses
-     `remainingPlaces==0` como criterio de parada por sí solo: un place que falla
-     **transitoriamente dentro del run** (p. ej. un 503 de Google) se difiere y NO cuenta como
-     "no procesado", así que `remainingPlaces` puede ser 0 con un place migrable aún sin migrar
-     — desplegar ahí dejaría ese place en blanco (su URL de Google se sanea). `converged` y
-     `deferredPlaces` (recalculado al FINAL del run, no un snapshot del inicio) sí lo reflejan.
+     remainingPlaces==0 && failedPlaces==0 && deferredPlaces==0 && unmigratedPlaces==0`.
+     **Relanzar mientras `converged==false`** — equivalentemente, mientras `failedPlaces>0` O
+     `deferredPlaces>0` O `unmigratedPlaces>0`, esperando a que expire el backoff (o forzando con
+     `retryDeferred=true`). ⚠️ NO uses `remainingPlaces==0` como criterio de parada por sí solo:
+     (a) un place que falla **transitoriamente dentro del run** (p. ej. un 503 de Google) se
+     difiere y NO cuenta como "no procesado", así que `remainingPlaces` puede ser 0 con un place
+     migrable aún sin migrar; (b) un place cuyo **UPLOAD a R2 falla por debajo del umbral de
+     aborto** (streak < 3) NO se difiere pero tampoco migra — cuenta como `unmigratedPlaces`.
+     Desplegar en cualquiera de esos casos dejaría el place en blanco (su URL de Google se sanea).
+     `converged`, `deferredPlaces` (recalculado al FINAL del run, no un snapshot del inicio) y
+     `unmigratedPlaces` sí lo reflejan.
    - El bucle **converge garantizado**: los places cuyo rehost falla por la fuente entran en
      backoff (deferral) y no bloquean a los de detrás. Al terminar, revisar `deferredPlaces`:
      si > 0, inspeccionar logs, corregir la causa (un 503 transitorio basta con reintentarlo;
@@ -76,26 +79,47 @@ migrable sin migrar. Doble arreglo para que sea imposible leer "convergido" en f
 - **`deferredPlaces` se recalcula al FINAL** del run (`candidates.Count(IsDeferred(now))`),
   no un snapshot del inicio — incluye los que fallaron por fuente en ESTE run (acaban de
   entrar en backoff con `DeferredUntil = now + backoff > now`).
-- **`converged`** = `!aborted && remainingPlaces==0 && failedPlaces==0 && deferredPlaces==0`.
-  Es la única señal de parada del bucle del runbook. Un place permanentemente roto mantiene
-  `converged=false` hasta que el operador lo inspecciona y acepta (esa foto renderiza en
-  blanco, que es lo mismo que haría el filtro `key=`), pero el operador lo hace **con
-  conocimiento**, no por una señal falsa.
+- **`unmigratedPlaces`** cuenta los places PROCESADOS que siguen con foto de Google por una
+  causa que NO los difiere ni es fallo de fuente: un **fallo de UPLOAD a R2 sub-umbral**
+  (streak < 3, o intercalado con OKs que resetean el streak), un abort de R2 a mitad del place,
+  o un conflicto de escritura. NO entran en backoff (el siguiente run los retoma de inmediato)
+  pero **mantienen `converged=false`** — sin esto, un fallo de upload por debajo del umbral de
+  aborto reportaba `remaining=0 && failed=0 && deferred=0` con el place aún en Google (ronda 3).
+- **`converged`** = `!aborted && remainingPlaces==0 && failedPlaces==0 && deferredPlaces==0 &&
+  unmigratedPlaces==0`. Es la única señal de parada del bucle del runbook. Un place
+  permanentemente roto mantiene `converged=false` hasta que el operador lo inspecciona y acepta
+  (esa foto renderiza en blanco, que es lo mismo que haría el filtro `key=`), pero el operador
+  lo hace **con conocimiento**, no por una señal falsa.
 
-### Circuit breaker de INGESTA (G2)
+### Circuit breaker de INGESTA (G2) — por INTENTOS y por TIEMPO
 El breaker de uploads (M3) vivía solo en el backfill; la **ingesta** (create / bulk /
 import-from-urls / PATCH) rehosteaba inline N places × ≤3 fotos sin presupuesto agregado. Con
 R2 colgado (acepta TCP, no responde), el timeout de 10s del cliente S3 (M4) acota UN upload
-pero un import de muchos places gasta ~10s/foto hasta agotar el proxy de Railway (40s); en ese
-instante el ct de la request se cancela y el `OperationCanceledException` SÍ propaga → la
+pero un import de muchos places gasta ~10-20s/foto hasta agotar el proxy de Railway (40s); en
+ese instante el ct de la request se cancela y el `OperationCanceledException` SÍ propaga → la
 request revienta y, con el commit por chunks (M5), lo ya rehosteado se pierde mientras Google
 ya se facturó. `IngestPhotoBreaker` (instancia por-request, compartida por todos los places de
-un bulk/import) corta el sangrado: tras **3 fallos consecutivos de upload** deja de intentar
-rehost en el resto de la request — no re-descarga de Google (no re-facturar) y persiste los
-places **sin foto** (URLs con `key=` descartadas) o **con su URL original** (sin key, para que
-el backfill las migre luego). Un fallo de upload en ingesta SIEMPRE degrada a "sin foto";
-jamás tumba el place ni aborta la request. (En backfill el mismo evento **aborta** el barrido;
-en ingesta **degrada y continúa** — políticas distintas para el mismo síntoma.)
+un bulk/import) corta el sangrado con **doble presupuesto**:
+
+- **Por intentos**: tras **3 fallos consecutivos de upload** deja de intentar rehost en el
+  resto de la request.
+- **Por wall-clock (ronda 3)**: `IngestRehostBudget` (default **25s**, configurable vía
+  `R2__IngestRehostBudget`) es el presupuesto AGREGADO de la request y una **fracción del
+  deadline del proxy** (40s). Acotar solo INTENTOS no basta: contra un R2 colgado ~2 uploads
+  (~40s) agotan el proxy **antes** del 3er fallo; el `OperationCanceledException` propagaba y
+  tumbaba la creación. `IngestPhotoBreaker.IsOpen` pasa a true también cuando el presupuesto se
+  agota, y `IngestPhotoBreaker.Remaining` acota **cada upload individual** (linked CTS +
+  `CancelAfter`) para que un solo cuelgue no lo rebase. Al cortar por tiempo queda margen para
+  commitear el place antes de que el proxy cancele el ct. `RehostForIngestAsync` además captura
+  el `OperationCanceledException` del presupuesto (cuando el ct del caller NO está cancelado) y
+  degrada a "sin foto" — **nunca propaga**; una cancelación REAL del caller (ct cancelado) sí
+  propaga (el import por chunks decide qué conserva).
+
+En ambos casos el resto de places persiste **sin foto** (URLs con `key=` descartadas) o **con
+su URL original** (sin key, para que el backfill las migre luego). Un fallo/cuelgue de upload en
+ingesta SIEMPRE degrada a "sin foto"; jamás tumba el place ni aborta la request. (En backfill el
+mismo evento **aborta** el barrido; en ingesta **degrada y continúa** — políticas distintas para
+el mismo síntoma.)
 
 ### Lost updates (M2)
 `Place` usa la columna de sistema **`xmin` de Postgres como concurrency token** (sin columna

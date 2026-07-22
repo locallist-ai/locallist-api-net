@@ -154,23 +154,60 @@ public class PhotoRehostService : IPhotoRehostService
         if (urls is not { Count: > 0 }) return null;
 
         var result = new List<string>(urls.Count);
+        var degradeRest = false;
         foreach (var url in urls)
         {
             if (string.IsNullOrWhiteSpace(url)) continue;
 
-            // G2: circuit breaker de ingesta. Si R2 lleva N uploads consecutivos fallando en
-            // esta request, dejamos de intentar rehost: NO re-descargamos de Google (no
-            // re-facturar el SKU Place Photos contra un R2 caído) y degradamos igual que un
-            // fallo — la URL con key se descarta, la sin key se conserva para el backfill.
-            // Nunca se aborta la creación por un R2 colgado.
-            if (breaker is { IsOpen: true })
+            // G2: circuit breaker de ingesta. Dejamos de intentar rehost (degradamos a "sin
+            // foto") cuando el breaker está abierto — 3 uploads consecutivos fallidos O el
+            // presupuesto de wall-clock de la request agotado (ronda 3: acotar INTENTOS no basta,
+            // un R2 colgado agota el proxy de Railway antes del 3er fallo) — o cuando un cuelgue
+            // ya consumió el presupuesto de ESTA llamada. NO re-descargamos de Google (no
+            // re-facturar el SKU Place Photos contra un R2 caído): la URL con key se descarta, la
+            // sin key se conserva para el backfill. Nunca se aborta la creación por un R2 colgado.
+            if (degradeRest || breaker is { IsOpen: true })
             {
                 if (PhotoUrls.ContainsApiKey(url)) continue;
                 result.Add(url);
                 continue;
             }
 
-            var rehosted = await RehostAsync(url, keyHint, ct);
+            // Acotamos ESTE upload al presupuesto restante de la request (linked CTS): un R2
+            // colgado no puede consumir más allá del presupuesto agregado, y al cortarlo queda
+            // margen para el commit del place ANTES de que el proxy cancele el ct del caller.
+            using var attemptCts = breaker is not null
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+                : null;
+            attemptCts?.CancelAfter(breaker!.Remaining);
+            var attemptCt = attemptCts?.Token ?? ct;
+
+            PhotoRehostResult rehosted;
+            try
+            {
+                rehosted = await RehostAsync(url, keyHint, attemptCt);
+            }
+            // El presupuesto de wall-clock (linked CTS) canceló el upload SIN que el ct del
+            // caller esté cancelado: invariante (d) — un R2 colgado que agota el presupuesto
+            // JAMÁS tumba la creación. Contamos el fallo de upload, degradamos a "sin foto" y
+            // dejamos de intentar el resto. Una cancelación REAL del caller (proxy/cliente
+            // abortó; ct cancelado) sí propaga — el import por chunks decide qué conserva.
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    "Photo rehost budget exhausted (hung R2) — degrading to no-photo for keyHint '{KeyHint}'",
+                    keyHint);
+                breaker?.RecordUploadFailure();
+                // Latch el presupuesto: el resto de places de la request (llamadas separadas a
+                // este método) degradan de inmediato y de forma determinista vía breaker.IsOpen,
+                // sin depender del borde exacto del reloj.
+                breaker?.TripBudget();
+                degradeRest = true;
+                if (PhotoUrls.ContainsApiKey(url)) continue;
+                result.Add(url);
+                continue;
+            }
+
             if (rehosted.Outcome == PhotoRehostOutcome.Rehosted)
                 breaker?.RecordUploadSuccess();
             else if (rehosted.FailureStage == PhotoRehostFailureStage.Upload)

@@ -373,6 +373,68 @@ public class PhotoRehostServiceTests
     }
 
     [Fact]
+    public async Task REPRO_RehostForIngest_HungR2_BudgetElapses_DegradesToNoPhoto_NeverPropagates()
+    {
+        // MAJOR 2 (ronda 3): un R2 COLGADO (acepta TCP, no responde) gasta ~Timeout×retry por
+        // upload. El breaker acota INTENTOS (3), NO TIEMPO: ~2 uploads colgados ≈ 40s = deadline
+        // del proxy de Railway ANTES de que el 3er fallo abra el breaker; en ese instante el ct
+        // del caller se cancela y el OperationCanceledException PROPAGABA tumbando la creación.
+        //
+        // Fix: presupuesto de wall-clock (fracción del deadline) en el breaker. Aquí el
+        // presupuesto (100ms) va MUY por debajo del deadline del caller (5s) — el mismo orden que
+        // en prod (25s < 40s): el budget se agota primero (linked CTS), con el ct del caller aún
+        // vivo, y el upload colgado se degrada a "sin foto" SIN propagar. Antes del fix este test
+        // era ThrowsAnyAsync<OperationCanceledException> con breaker.IsOpen==false.
+        var store = new FakeR2ObjectStore
+        {
+            Configured = true,
+            UploadLatency = TimeSpan.FromSeconds(30),               // R2 colgado: no responde
+            UploadFailure = _ => new TaskCanceledException("hung R2"),
+        };
+        var service = CreateService(store);
+
+        var breaker = new IngestPhotoBreaker(budget: TimeSpan.FromMilliseconds(100));
+        using var callerDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var photos = await service.RehostForIngestAsync(
+            new[] { GoogleUrl }, "Hung R2", callerDeadline.Token, breaker);
+
+        // La URL de Google con key se descarta (jamás persistir una key) → place SIN foto.
+        Assert.Null(photos);
+        // El breaker quedó abierto por TIEMPO (presupuesto agotado), no por 3 intentos.
+        Assert.True(breaker.IsOpen);
+        Assert.True(breaker.BudgetExhausted);
+        // El ct del caller NUNCA llegó a cancelarse: el budget cortó antes (invariante de prod).
+        Assert.False(callerDeadline.IsCancellationRequested);
+        Assert.Empty(store.Objects);
+    }
+
+    [Fact]
+    public async Task RehostForIngest_BudgetElapsesMidBulk_KeepsNonKeyOriginals_ForBackfill()
+    {
+        // Variante sin key (wanderlog): al agotarse el presupuesto se degrada conservando la URL
+        // original para que el backfill la migre cuando R2 vuelva — nunca se pierde ni propaga.
+        var store = new FakeR2ObjectStore
+        {
+            Configured = true,
+            UploadLatency = TimeSpan.FromSeconds(30),
+            UploadFailure = _ => new TaskCanceledException("hung R2"),
+        };
+        var service = CreateService(store);
+
+        var breaker = new IngestPhotoBreaker(budget: TimeSpan.FromMilliseconds(100));
+        using var callerDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var photos = await service.RehostForIngestAsync(
+            new[] { WanderlogUrl, WanderlogUrl + "?x=2" }, "Hung R2", callerDeadline.Token, breaker);
+
+        Assert.NotNull(photos);
+        Assert.All(photos, p => Assert.StartsWith("https://wanderlog.com/", p));
+        Assert.False(callerDeadline.IsCancellationRequested);
+        Assert.Empty(store.Objects);
+    }
+
+    [Fact]
     public void BuildObjectKey_IgnoresQueryString_SoKeyRotationDoesNotChangeTheKey()
     {
         var a = PhotoRehostService.BuildObjectKey("Broken Shaker",

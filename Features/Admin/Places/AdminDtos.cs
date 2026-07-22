@@ -258,14 +258,19 @@ public record PhotoDomainCensus(int Photos, int Migrated, int Failed);
 /// el barrido hasta <c>Converged=true</c>, NO solo hasta <c>RemainingPlaces=0</c>.
 /// <c>Converged</c> = <c>!Aborted</c> && nada quedó por procesar (RemainingPlaces=0) &&
 /// <c>FailedPlaces=0</c> (ningún place falló por fuente en ESTE run) && <c>DeferredPlaces=0</c>
-/// (nada en backoff al FINAL del run). Un place que falla transitoriamente DENTRO del run
-/// se difiere y hace <c>Converged=false</c> aunque <c>RemainingPlaces=0</c> — sin esto el
-/// operador desplegaría con un place migrable sin migrar (su URL de Google se sanea → foto
-/// en blanco en B2C).
+/// (nada en backoff al FINAL del run) && <c>UnmigratedPlaces=0</c> (ningún place procesado
+/// quedó con foto de Google por un fallo de upload sub-umbral / abort / conflicto). Un place
+/// que falla transitoriamente DENTRO del run se difiere y hace <c>Converged=false</c> aunque
+/// <c>RemainingPlaces=0</c>; y un place cuyo UPLOAD a R2 falla por debajo del umbral de aborto
+/// (ronda 3) NO se difiere pero cuenta como <c>UnmigratedPlaces</c> — sin esto el operador
+/// desplegaría con un place migrable sin migrar (su URL de Google se sanea → foto en blanco en B2C).
 /// <c>RemainingPlaces</c> = candidatos elegibles que no se llegaron a procesar (límite/abort).
 /// <c>DeferredPlaces</c> = candidatos en backoff al FINAL del run (incluye los que fallaron
 /// por fuente en ESTE run, no solo los excluidos al inicio); se reintentan al expirar el
 /// backoff o con <c>retryDeferred=true</c>.
+/// <c>UnmigratedPlaces</c> = places procesados que siguen con foto de Google por un fallo de
+/// upload sub-umbral, un abort de R2 a mitad, o un conflicto; NO entran en backoff (el
+/// siguiente run los retoma de inmediato) pero mantienen <c>Converged=false</c>.
 /// <c>Aborted=true</c> = barrido cortado por el circuit breaker de uploads a R2
 /// (<c>AbortReason=r2_upload_unavailable</c>): revisar R2 y relanzar.
 /// <c>MissingPhotoPlaces</c>/<c>RecoveredPlaces</c>/<c>RemainingMissingPlaces</c> = modo
@@ -281,6 +286,7 @@ public record BackfillPhotosResponse(
     int UpdatedPlaces,
     int FailedPlaces,
     int ConflictPlaces,
+    int UnmigratedPlaces,
     int RemainingPlaces,
     bool Converged,
     bool Aborted,
