@@ -72,8 +72,8 @@ LocalList.API.NET/
 │   │   └── AccountController.cs        # GET /account, DELETE /account
 │   ├── Admin/
 │   │   ├── Analytics/
-│   │   │   ├── AdminChatTurnsController.cs    # GET /admin/chat-turns, /stats
-│   │   │   ├── AdminPlanMetricsController.cs  # GET /admin/plan-metrics, /stats
+│   │   │   ├── AdminChatTurnsController.cs    # GET /admin/analytics/chat-turns, /stats
+│   │   │   ├── AdminPlanMetricsController.cs  # GET /admin/analytics/plan-metrics, /stats
 │   │   │   └── AdminAnalyticsDtos.cs
 │   │   ├── Cities/
 │   │   │   └── AdminCitiesController.cs       # DELETE /admin/cities/:id
@@ -266,7 +266,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
 | Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
 | Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
-| Admin — Analytics | `GET /admin/chat-turns`, `GET /admin/chat-turns/stats`, `GET /admin/plan-metrics`, `GET /admin/plan-metrics/stats` |
+| Admin — Analytics | `GET /admin/analytics/chat-turns`, `GET /admin/analytics/chat-turns/stats`, `GET /admin/analytics/plan-metrics`, `GET /admin/analytics/plan-metrics/stats` |
 | Admin — Cities | `DELETE /admin/cities/:id` |
 | Admin — Subcategories | `GET /admin/subcategories`, `POST /admin/subcategories`, `PATCH /admin/subcategories/:id`, `DELETE /admin/subcategories/:id` |
 

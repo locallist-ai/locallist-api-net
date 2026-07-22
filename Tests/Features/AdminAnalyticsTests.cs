@@ -287,6 +287,96 @@ public class AdminAnalyticsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
     }
 
+    // ── Contrato de orden total (tiebreaker con CreatedAt empatado) ──────────
+
+    [Fact]
+    public async Task ChatTurns_List_TiedCreatedAt_ConsecutivePagesDoNotDuplicateOrOmitIds()
+    {
+        // Con CreatedAt idéntico en frontera de página, un ORDER BY no-total deja a
+        // Postgres libre de reordenar entre queries → filas duplicadas u omitidas al
+        // paginar. El tiebreaker por Id fija un orden total y estable.
+        var tied = new DateTimeOffset(2001, 1, 1, 0, 0, 0, TimeSpan.Zero)
+            .AddSeconds(Random.Shared.Next(0, 86_400));
+
+        var db = fixture.GetDbContext();
+        var seededIds = new HashSet<Guid>();
+        for (var i = 0; i < 5; i++)
+        {
+            var turn = new ChatTurn
+            {
+                Id = Guid.NewGuid(), CreatedAt = tied, TurnIndex = i,
+                AiProvider = "gemini", Model = "gemini-2.5-flash",
+                PromptVersion = "slot-v1", PromptChars = 50, LatencyMs = 200
+            };
+            seededIds.Add(turn.Id);
+            db.ChatTurns.Add(turn);
+        }
+        await db.SaveChangesAsync();
+
+        // Aislar los 5 seeds con from/to exactos al timestamp empatado.
+        var range = $"from={Uri.EscapeDataString(tied.ToString("o"))}&to={Uri.EscapeDataString(tied.ToString("o"))}";
+        var client = CreateAdminClient();
+
+        var pagedIds = new List<Guid>();
+        foreach (var offset in new[] { 0, 2, 4 })
+        {
+            var res = await client.GetAsync($"/admin/analytics/chat-turns?limit=2&offset={offset}&{range}");
+            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+            var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(5, body.GetProperty("total").GetInt32());
+            pagedIds.AddRange(body.GetProperty("turns").EnumerateArray()
+                .Select(t => t.GetProperty("id").GetGuid()));
+        }
+
+        Assert.Equal(5, pagedIds.Count);                       // sin omisiones
+        Assert.Equal(5, pagedIds.Distinct().Count());          // sin duplicados
+        Assert.Equal(seededIds, pagedIds.ToHashSet());         // exactamente los seeds
+    }
+
+    [Fact]
+    public async Task PlanMetrics_List_TiedCreatedAt_ConsecutivePagesDoNotDuplicateOrOmitIds()
+    {
+        var tied = new DateTimeOffset(2001, 1, 1, 0, 0, 0, TimeSpan.Zero)
+            .AddSeconds(Random.Shared.Next(0, 86_400));
+        var city = $"TieCity-{Guid.NewGuid():N}"[..28];
+
+        var db = fixture.GetDbContext();
+        var seededIds = new HashSet<Guid>();
+        for (var i = 0; i < 5; i++)
+        {
+            // plan_metrics.plan_id es único → un Plan por métrica.
+            var plan = new Plan { Id = Guid.NewGuid(), Name = $"Tie Plan {i}", City = city, Type = "ai" };
+            db.Plans.Add(plan);
+            var metric = new PlanMetric
+            {
+                Id = Guid.NewGuid(), CreatedAt = tied, PlanId = plan.Id,
+                GenerationSource = "chat", SignalsFilled = 4, NumDays = 2,
+                NumStops = 6, NumCategories = 2, LatencyMs = 500
+            };
+            seededIds.Add(metric.Id);
+            db.PlanMetrics.Add(metric);
+        }
+        await db.SaveChangesAsync();
+
+        // Aislar los 5 seeds por la city única del test.
+        var client = CreateAdminClient();
+
+        var pagedIds = new List<Guid>();
+        foreach (var offset in new[] { 0, 2, 4 })
+        {
+            var res = await client.GetAsync($"/admin/analytics/plan-metrics?limit=2&offset={offset}&city={Uri.EscapeDataString(city)}");
+            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+            var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(5, body.GetProperty("total").GetInt32());
+            pagedIds.AddRange(body.GetProperty("metrics").EnumerateArray()
+                .Select(m => m.GetProperty("id").GetGuid()));
+        }
+
+        Assert.Equal(5, pagedIds.Count);                       // sin omisiones
+        Assert.Equal(5, pagedIds.Distinct().Count());          // sin duplicados
+        Assert.Equal(seededIds, pagedIds.ToHashSet());         // exactamente los seeds
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private HttpClient CreateAdminClient()
