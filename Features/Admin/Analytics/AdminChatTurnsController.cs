@@ -47,6 +47,7 @@ public class AdminChatTurnsController : ControllerBase
         var total = await query.CountAsync(ct);
         var turns = await query
             .OrderByDescending(t => t.CreatedAt)
+            .ThenByDescending(t => t.Id) // tiebreaker: orden total y estable con CreatedAt empatado (paginación sin dups/omisiones)
             .Skip(offset)
             .Take(limit)
             .Select(t => new AdminChatTurnDto(
