@@ -110,12 +110,29 @@ un bulk/import) corta el sangrado con **doble presupuesto**:
   tumbaba la creación. `IngestPhotoBreaker.IsOpen` pasa a true también cuando el presupuesto se
   agota, y `IngestPhotoBreaker.Remaining` acota **cada upload individual** (linked CTS +
   `CancelAfter`) para que un solo cuelgue no lo rebase. Al cortar por tiempo queda margen para
-  commitear el place antes de que el proxy cancele el ct. `RehostForIngestAsync` además captura
-  el `OperationCanceledException` del presupuesto (cuando el ct del caller NO está cancelado) y
-  degrada a "sin foto" — **nunca propaga**; una cancelación REAL del caller (ct cancelado) sí
-  propaga (el import por chunks decide qué conserva).
+  commitear el place antes de que el proxy cancele el ct.
 
-En ambos casos el resto de places persiste **sin foto** (URLs con `key=` descartadas) o **con
+**Degradación INCONDICIONAL del rehost en ingesta (invariante (d), ronda 4).** `RehostForIngestAsync`
+captura el `OperationCanceledException` del rehost **con independencia de la fuente del ct** y
+degrada a "sin foto" — **nunca propaga**. Da igual si lo canceló el presupuesto de wall-clock
+(R2 colgado que agota el budget) O el **caller** (`RequestAborted` del proxy porque el pre-work
+—descripciones Gemini + resolución Google— ya consumió el deadline de 40s antes de que el budget
+de 25s pudiera dispararse). Las rondas 2-3 sólo degradaban el caso *budget* (guard
+`when (!ct.IsCancellationRequested)`), así que un abort del proxy durante un R2 colgado propagaba
+y **reventaba el bulk/import**; en ronda 4 el guard se quita: en ingesta un R2 lento/colgado JAMÁS
+es fatal. (El path de BACKFILL —`RehostAsync` directo— conserva su propio guard y sí propaga un
+cancel real: son políticas distintas.)
+
+**El commit del chunk sobrevive al abort (ronda 4).** Quitar el guard no basta por sí solo: tras
+degradar por caller-cancelled, el bucle sigue creando los places restantes (sin foto) y hay que
+**persistirlos aunque el proxy ya haya abortado**. `PlaceImportService.InsertWithDedupAsync`
+commitea los chunks con `CancellationToken.None` (un CT que NO se cancela por `RequestAborted`),
+de modo que lo ya rehosteado + los degradados quedan en DB. La combinación degradación-incondicional
++ commit-que-sobrevive es lo que hace la garantía verdaderamente incondicional: **todos los places
+se crean, la request no revienta, nada del gasto ya incurrido se pierde**. (Npgsql aplica su propio
+command timeout, así que el commit no cuelga indefinidamente si la DB cae.)
+
+En todos los casos el resto de places persiste **sin foto** (URLs con `key=` descartadas) o **con
 su URL original** (sin key, para que el backfill las migre luego). Un fallo/cuelgue de upload en
 ingesta SIEMPRE degrada a "sin foto"; jamás tumba el place ni aborta la request. (En backfill el
 mismo evento **aborta** el barrido; en ingesta **degrada y continúa** — políticas distintas para
@@ -149,16 +166,33 @@ el ct del caller esté cancelado: `PhotoRehostService` lo degrada a `Failed` —
 nunca aborta la creación de un place** (la foto con key se descarta; la sin key conserva la
 original para el backfill). La cancelación real del caller sí propaga.
 
-### Import masivo (M5)
-`PlaceImportService.InsertWithDedupAsync` commitea **por chunks de 10**: si el proxy corta un
-import de 500 places a los 40s, lo ya rehosteado queda persistido (nada de Google facturado +
-objetos R2 huérfanos sin fila). El re-run dedupa por `GooglePlaceId` / Name+City.
+### Import masivo (M5 + ronda 4)
+`PlaceImportService.InsertWithDedupAsync` commitea **por chunks de 10** con
+`CancellationToken.None` (ronda 4 — ver "Degradación INCONDICIONAL" arriba): si el proxy aborta
+un import de 500 places, el rehost degrada a "sin foto" (no propaga) y los chunks —lo ya
+rehosteado + los degradados— se persisten pese al abort (nada de Google facturado + objetos R2
+huérfanos sin fila). La request NO revienta y el re-run dedupa por `GooglePlaceId` / Name+City.
+Las embeddings inline de `import-from-urls` son best-effort: si el caller ya abortó se saltan (los
+places ya están persistidos; recuperables con `reindex-embeddings?onlyMissing=true`), nunca
+"revierten" el éxito de la ingesta con una excepción.
 
 ### Recuperación vía GooglePlaceId (M6)
 Ingesta fallida → `Photos = null`; el backfill normal no ve esos places. Con
 `recoverMissing=true` re-obtiene los photo refs vía `GetDetailsAsync(GooglePlaceId)` y los
 rehostea (solo persiste URLs de R2 — jamás las de Details, que llevan key). Los que Google
-no puede recuperar entran en el mismo backoff (no se re-factura Details cada barrido).
+no puede recuperar entran en el mismo backoff (no se re-factura Details cada barrido). **m3
+(ronda 4)**: un **conflicto xmin al persistir la recuperación** (otro escritor tocó la fila entre
+el load y el save) también entra en backoff (`RecordFailure`) además de contarse en
+`conflictPlaces` — antes se descartaba en silencio (detach sin `RecordFailure`) y el place
+re-facturaba Google Details en el siguiente barrido. `retryDeferred=true` lo reintenta.
+
+**`converged` NO cubre la recuperación (m2).** `converged` es la señal de parada del bucle de
+**migración** de fotos existentes; la recuperación de places SIN fotos tiene señales propias
+(`recoveredPlaces`, `remainingMissingPlaces`) y NO entra en `converged`. Los places `missing`
+tienen `Photos==null` (no sirven URLs de Google a B2C, así que no violan la invariante dura de la
+key), pero el runbook **no debe leer `converged:true` como "recovery terminado"**: para cerrar la
+recuperación, relanzar con `recoverMissing=true` hasta que `recoveredPlaces==0` y
+`remainingMissingPlaces==0` en runs consecutivos (los irrecuperables quedan diferidos).
 
 **Objeto R2 borrado** (decisión documentada): las URLs `r2.dev` persistidas se tratan como
 inmutables/permanentes — el backfill no verifica su existencia (un HEAD por foto por barrido
@@ -213,4 +247,8 @@ nunca desde places persistidos.
 - `Tests/Features/AdminPlacesPhotosHardeningTests.cs` — repros permanentes de los pases
   adversariales (lock C1, livelock M1, lost-update M2, breaker M3, R2 colgado M4, chunks M5,
   recovery M6, m1/m2/m4; ronda 2: convergencia honesta **G1**, circuit breaker de ingesta
-  **G2** con el knob de latencia de `FakeR2ObjectStore`, writers stale → 409 **g3**).
+  **G2** con el knob de latencia de `FakeR2ObjectStore`, writers stale → 409 **g3**; ronda 4:
+  **invariante (d) INCONDICIONAL** — abort del CALLER durante R2 colgado con presupuesto default
+  degrada + persiste (`REPRO_BulkImport_PreWorkAteDeadline_R2Hung_CallerAbort_…`), M5 reescrito
+  para el nuevo contrato (abort a mitad NO revienta, se persisten TODOS los places), conflicto
+  xmin en recovery → backoff **m3**).

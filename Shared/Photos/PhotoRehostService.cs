@@ -187,20 +187,29 @@ public class PhotoRehostService : IPhotoRehostService
             {
                 rehosted = await RehostAsync(url, keyHint, attemptCt);
             }
-            // El presupuesto de wall-clock (linked CTS) canceló el upload SIN que el ct del
-            // caller esté cancelado: invariante (d) — un R2 colgado que agota el presupuesto
-            // JAMÁS tumba la creación. Contamos el fallo de upload, degradamos a "sin foto" y
-            // dejamos de intentar el resto. Una cancelación REAL del caller (proxy/cliente
-            // abortó; ct cancelado) sí propaga — el import por chunks decide qué conserva.
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            // Invariante (d) — degradación INCONDICIONAL del path de ingesta. Un
+            // OperationCanceledException durante el rehost degrada a "sin foto" con INDEPENDENCIA
+            // de la fuente del ct: da igual si lo canceló el presupuesto de wall-clock (linked
+            // CTS, R2 colgado que agota el budget) O el caller (RequestAborted del proxy de
+            // Railway porque el pre-work — descripciones Gemini + resolución Google — ya consumió
+            // el deadline). En INGESTA un R2 lento/colgado JAMÁS es fatal: nunca puede propagar y
+            // tumbar la creación del place. (Rondas 2-3 sólo degradaban el caso budget con el
+            // guard `when (!ct.IsCancellationRequested)`; el abort del proxy propagaba y reventaba
+            // el bulk/import — la persistencia del chunk se protege además con un CT que sobrevive
+            // al abort en PlaceImportService.InsertWithDedupAsync.) El único caso "legítimo" de no
+            // degradar sería un cancel intencional de toda la operación por el cliente, pero
+            // incluso ahí tumbar la creación por culpa de R2 viola la invariante — degradar es
+            // correcto. RehostAsync (usado por el BACKFILL) conserva su propio guard y sí propaga
+            // un cancel real; sólo el path de ingesta es incondicional.
+            catch (OperationCanceledException)
             {
                 _logger.LogWarning(
-                    "Photo rehost budget exhausted (hung R2) — degrading to no-photo for keyHint '{KeyHint}'",
+                    "Photo rehost canceled (hung R2 / budget / proxy abort) — degrading to no-photo for keyHint '{KeyHint}'",
                     keyHint);
                 breaker?.RecordUploadFailure();
                 // Latch el presupuesto: el resto de places de la request (llamadas separadas a
                 // este método) degradan de inmediato y de forma determinista vía breaker.IsOpen,
-                // sin depender del borde exacto del reloj.
+                // sin depender del borde exacto del reloj ni de re-inspeccionar el ct del caller.
                 breaker?.TripBudget();
                 degradeRest = true;
                 if (PhotoUrls.ContainsApiKey(url)) continue;

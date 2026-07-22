@@ -19,15 +19,19 @@ namespace LocalList.API.Tests.Features;
 /// M2  lost update backfill↔PATCH (token xmin: merge en backfill, 409 en PATCH stale) ·
 /// M3  circuit breaker de uploads a R2 (no quemar dinero de Google sin progreso) ·
 /// M4  R2 colgado no tumba la creación de places ·
-/// M5  import masivo con commit por chunks (cancelación no pierde lo completado) ·
+/// M5  import masivo: abort del caller a mitad NO revienta ni pierde nada (ronda 4: degradación
+///     incondicional + commit que sobrevive el abort → se persisten TODOS los places) ·
 /// M6  recuperación de fotos vía GooglePlaceId ·
 /// m1  la key de Google no sale por la API admin ·
 /// m2  SSRF: host fuera de allowlist ni siquiera se descarga ·
+/// m3  conflicto xmin en RECOVERY → backoff (RecordFailure), no re-factura Google Details (ronda 4) ·
 /// m4  places deleted/rejected fuera de candidatos y censo ·
 /// G1  convergencia HONESTA: un fallo transitorio EN EL RUN → converged=false (ronda 2), y un
 ///     fallo de UPLOAD sub-umbral → unmigratedPlaces → converged=false (ronda 3) ·
 /// G2  circuit breaker de INGESTA: R2 colgado → places sin foto, 2xx, sin excepción (ronda 2);
 ///     presupuesto de wall-clock que corta por TIEMPO, no solo por intentos (ronda 3) ·
+/// R4  invariante (d) INCONDICIONAL: el abort del CALLER (proxy) durante R2 colgado degrada a "sin
+///     foto" y el chunk se persiste — el corte no depende del budget (ronda 4) ·
 /// g3  writers de Place stale → 409 concurrent_update, no 500 (ronda 2).
 ///
 /// ApiFixture = Postgres real (Testcontainers); solo R2 y HTTP salientes fakeados.
@@ -48,18 +52,34 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         fixture.FakePhotos.Reset();
         fixture.FakeGooglePlaces.Reset();
         fixture.Services.GetRequiredService<BackfillPhotosCoordinator>().Reset();
-        // El presupuesto de wall-clock de la ingesta es un singleton IOptions compartido por el
-        // host de test: restaurar el default para no filtrar entre tests.
-        SetIngestRehostBudget(IngestPhotoBreaker.DefaultBudget);
+        // m4 (higiene): el presupuesto de wall-clock de la ingesta es un singleton IOptions
+        // compartido por el host de test. Los tests que lo mutan lo aíslan con
+        // `using WithIngestRehostBudget(...)` (restaura el valor previo al salir del scope). Este
+        // restore al default es sólo una red de seguridad final por si algo lo dejara tocado.
+        fixture.Services.GetRequiredService<IOptions<R2Options>>().Value.IngestRehostBudget =
+            IngestPhotoBreaker.DefaultBudget;
     }
 
     /// <summary>
-    /// Ajusta el presupuesto de wall-clock del rehost inline en ingesta (G2/ronda 3). El
-    /// controller/import service leen <c>R2Options.IngestRehostBudget</c> por request al
-    /// construir el <see cref="IngestPhotoBreaker"/>; mutar el singleton IOptions surte efecto.
+    /// Ajusta el presupuesto de wall-clock del rehost inline en ingesta (G2/ronda 3), acotado a
+    /// un scope. El controller/import service leen <c>R2Options.IngestRehostBudget</c> por request
+    /// al construir el <see cref="IngestPhotoBreaker"/>; mutar el singleton IOptions surte efecto.
+    /// m4: captura el valor previo y lo restaura al hacer Dispose del <c>using</c>, así la mutación
+    /// del singleton no filtra más allá del scope (robusto aunque se paralelizara, no sólo por el
+    /// restore de Dispose del test).
     /// </summary>
-    private void SetIngestRehostBudget(TimeSpan budget) =>
-        fixture.Services.GetRequiredService<IOptions<R2Options>>().Value.IngestRehostBudget = budget;
+    private IDisposable WithIngestRehostBudget(TimeSpan budget)
+    {
+        var options = fixture.Services.GetRequiredService<IOptions<R2Options>>().Value;
+        var previous = options.IngestRehostBudget;
+        options.IngestRehostBudget = budget;
+        return new BudgetRestorer(options, previous);
+    }
+
+    private sealed class BudgetRestorer(R2Options options, TimeSpan previous) : IDisposable
+    {
+        public void Dispose() => options.IngestRehostBudget = previous;
+    }
 
     // ── C1: lock del backfill ──────────────────────────────────────────────
 
@@ -312,16 +332,23 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         Assert.Equal(new List<string> { WanderlogUrl("m4-hotlink") }, place.Photos);
     }
 
-    // ── M5: import masivo con commit por chunks ────────────────────────────
+    // ── M5: import masivo — abort del caller a mitad no pierde nada ni revienta ──
 
     [Fact]
-    public async Task BulkImport_CanceledMidway_PersistsCompletedChunks()
+    public async Task BulkImport_CallerAbortedMidway_PersistsEverything_NoException()
     {
+        // M5 + MAJOR ronda 4: el proxy de Railway corta la request (RequestAborted) a mitad del
+        // import. Antes: el OperationCanceledException del caller propagaba y reventaba el bulk;
+        // el commit por chunks salvaba SÓLO el primer chunk (10 de 15). Ahora, con la degradación
+        // INCONDICIONAL del rehost + el commit del chunk con un CT que sobrevive el abort, la
+        // request NO revienta y se persisten los 15 places: los primeros con su foto ya rehosteada
+        // a R2, los del punto de corte en adelante con su URL original (sin key → conservable para
+        // el backfill). Nada del gasto ya incurrido se pierde.
         fixture.FakeR2.Configured = true;
         var prefix = $"M5-{Guid.NewGuid():N}";
 
         // 15 places con 1 foto cada uno; la foto del 11º (índice 10, ya en el segundo chunk)
-        // dispara la cancelación — simula el corte del proxy de Railway a mitad de import.
+        // dispara el abort del caller — simula el corte del proxy a mitad de import.
         using var cts = new CancellationTokenSource();
         fixture.FakePhotos.AsyncResponder = (req, ct) =>
         {
@@ -345,17 +372,84 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         using var scope = fixture.Services.CreateScope();
         var importSvc = scope.ServiceProvider.GetRequiredService<PlaceImportService>();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            importSvc.BulkImportAsync(requests, null, fixture.FakeTime.GetUtcNow(), cts.Token));
+        // NO lanza: el abort del caller degrada el rehost en vez de propagar.
+        var result = await importSvc.BulkImportAsync(
+            requests, null, fixture.FakeTime.GetUtcNow(), cts.Token);
+        Assert.Equal(15, result.Created);
 
-        // El primer chunk de 10 quedó commiteado — Google/R2 ya pagados NO se pierden y el
-        // re-run dedupa por Name+City. Antes del fix: 0 filas y todo el gasto huérfano.
+        // Los 15 quedan persistidos (chunks commiteados con CancellationToken.None): 0-9 migrados a
+        // R2, 10-14 con su original de wanderlog. Antes del fix: excepción + sólo 10 filas.
         var db = fixture.GetDbContext();
         var persisted = await db.Places.AsNoTracking()
             .Where(p => p.Name.StartsWith(prefix))
+            .OrderBy(p => p.Name)
             .ToListAsync();
-        Assert.Equal(10, persisted.Count);
-        Assert.All(persisted, p => Assert.StartsWith($"{R2PublicUrl}/places/", Assert.Single(p.Photos!)));
+        Assert.Equal(15, persisted.Count);
+        Assert.All(persisted, p => Assert.NotNull(p.Photos));
+        var migrated = persisted.Count(p => p.Photos!.Single().StartsWith($"{R2PublicUrl}/places/"));
+        var keptOriginal = persisted.Count(p => p.Photos!.Single().StartsWith("https://wanderlog.com/"));
+        Assert.Equal(10, migrated);
+        Assert.Equal(5, keptOriginal);
+    }
+
+    // ── MAJOR (ronda 4): abort del CALLER (no del budget) durante R2 colgado ────
+
+    [Fact]
+    public async Task REPRO_BulkImport_PreWorkAteDeadline_R2Hung_CallerAbort_CreatesAllWithoutPhoto_NoException()
+    {
+        // Invariante (d), el fallo que el enfoque budget-only NO cubría (rondas 2-3). El pre-work
+        // de la request (descripciones Gemini + 2 llamadas Google × N URLs) consume la MAYORÍA del
+        // deadline de 40s del proxy de Railway → cuando arranca el rehost quedan pocos ms de
+        // RequestAborted, así que con R2 colgado el ct del CALLER se dispara ANTES que el
+        // presupuesto de wall-clock (que aquí se deja en su DEFAULT de 25s — largo, NO es el
+        // mecanismo del corte). Antes: ese OperationCanceledException del caller propagaba por
+        // RehostForIngestAsync → InsertWithDedupAsync y reventaba el bulk (chunk perdido, Google ya
+        // facturado). Ahora la garantía es INCONDICIONAL: (1) el rehost degrada da igual la fuente
+        // del ct y (2) el commit del chunk usa un CT que sobrevive el abort → todos los places se
+        // crean sin foto, la request NO revienta, sin excepción propagada.
+        fixture.FakeR2.Configured = true;
+        var prefix = $"R4-{Guid.NewGuid():N}";
+
+        // Modelamos "el pre-work agotó el deadline": el ct del caller (RequestAborted) se cancela
+        // en el PRIMER upload a R2 (el componente colgado). El presupuesto queda en su default
+        // largo — si el fix dependiera del budget, este test seguiría reventando.
+        using var cts = new CancellationTokenSource();
+        fixture.FakeR2.UploadFailure = _ =>
+        {
+            cts.Cancel(); // el proxy corta la request a mitad del upload al R2 colgado
+            return new TaskCanceledException("proxy aborted mid-upload on hung R2");
+        };
+
+        // 12 places con foto de Google (con key): al degradar, la key se descarta → Photos=null.
+        var requests = Enumerable.Range(0, 12).Select(i => new CreatePlaceRequest
+        {
+            Name = $"{prefix} Place {i:D2}",
+            Category = "Food",
+            WhyThisPlace = "bulk test",
+            City = "Miami",
+            Photos = [GoogleUrl($"{prefix}-{i}")],
+        }).ToList();
+
+        using var scope = fixture.Services.CreateScope();
+        var importSvc = scope.ServiceProvider.GetRequiredService<PlaceImportService>();
+
+        // Presupuesto en DEFAULT (no se toca con WithIngestRehostBudget): el corte lo provoca el
+        // caller, no el budget. NO lanza pese al abort del proxy.
+        var result = await importSvc.BulkImportAsync(
+            requests, null, fixture.FakeTime.GetUtcNow(), cts.Token);
+        Assert.Equal(12, result.Created);
+
+        // TODOS los places creados (chunks commiteados con un CT que sobrevive el abort) y SIN foto
+        // (la URL de Google con key jamás se persiste al degradar).
+        var db = fixture.GetDbContext();
+        var persisted = await db.Places.AsNoTracking()
+            .Where(p => p.Name.StartsWith(prefix)).ToListAsync();
+        Assert.Equal(12, persisted.Count);
+        Assert.All(persisted, p => Assert.Null(p.Photos));
+
+        // Sólo el primer place llegó a intentar el upload (que canceló al caller); el resto degradó
+        // vía breaker.IsOpen sin descargar de Google. El presupuesto default nunca entró en juego.
+        Assert.Equal(1, fixture.FakePhotos.Calls.Count);
     }
 
     // ── M6: recuperación vía GooglePlaceId ─────────────────────────────────
@@ -413,6 +507,71 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         var secondBody = await second.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(0, secondBody.GetProperty("remainingMissingPlaces").GetInt32());
         Assert.Equal(0, secondBody.GetProperty("recoveredPlaces").GetInt32());
+    }
+
+    // ── m3: conflicto xmin en RECOVERY → backoff, no re-factura Details ─────
+
+    [Fact]
+    public async Task Backfill_RecoveryConflict_DefersPlace_DoesNotRebillGoogleDetailsNextRun()
+    {
+        fixture.FakeR2.Configured = true;
+        var client = CreateAdminClient();
+        var db = fixture.GetDbContext();
+        await ClearPlacesAsync(db);
+
+        // Place sin fotos pero con GooglePlaceId → recuperable vía Places Details.
+        var place = SeedPlace(db, "m3 Recovery Conflict", photos: null);
+        place.GooglePlaceId = "m3rec";
+        await db.SaveChangesAsync();
+
+        fixture.FakeGooglePlaces.DetailsByPlaceId["m3rec"] = new GooglePlaceDetails(
+            Id: "m3rec", Name: "m3 Recovery Conflict", FormattedAddress: "Addr", City: "Miami",
+            Neighborhood: null, Lat: 25.76m, Lng: -80.19m, PrimaryType: "restaurant",
+            Types: ["restaurant"], PriceLevel: "$$", Photos: [GoogleUrl("m3rec-a")],
+            Rating: 4.5m, ReviewCount: 10, Website: null, Phone: null, EditorialSummary: null);
+
+        // La descarga de recovery queda EN VUELO mientras otro escritor bumpea la fila (xmin++),
+        // forzando el conflicto xmin en el TrySaveChangesAsync de la recuperación.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.FakePhotos.AsyncResponder = async (req, ct) =>
+        {
+            if (req.RequestUri!.ToString().Contains("m3rec-a"))
+                await gate.Task.WaitAsync(ct);
+            return FakePhotoHandler.DefaultOk();
+        };
+
+        var backfillTask = client.PostAsync(
+            "/admin/places/backfill-photos?limit=200&recoverMissing=true", content: null);
+        await WaitUntilAsync(() => CallCount("m3rec-a") >= 1);
+
+        var other = fixture.GetDbContext();
+        var otherPlace = await other.Places.FirstAsync(p => p.Id == place.Id);
+        otherPlace.WhyThisPlace = "bumped by concurrent writer";
+        await other.SaveChangesAsync();
+
+        gate.SetResult();
+        var response = await backfillTask;
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // La recuperación chocó (xmin stale): no se recuperó y se contó el conflicto.
+        Assert.Equal(0, body.GetProperty("recoveredPlaces").GetInt32());
+        Assert.Equal(1, body.GetProperty("conflictPlaces").GetInt32());
+        Assert.Equal(1, CallCount("m3rec-a")); // Details se facturó y la foto se descargó UNA vez.
+
+        // m3: el place entró en backoff → un re-run recoverMissing SIN retryDeferred NO vuelve a
+        // facturar Google Details ni re-descarga (antes: se descartaba en silencio + detach, sin
+        // RecordFailure → el place re-facturaba Details en el siguiente barrido).
+        var second = await client.PostAsync(
+            "/admin/places/backfill-photos?limit=200&recoverMissing=true", content: null);
+        var secondBody = await second.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, secondBody.GetProperty("recoveredPlaces").GetInt32());
+        Assert.Equal(1, CallCount("m3rec-a")); // sigue en 1: no re-descargó → no re-facturó Details.
+
+        // La fila sigue sin fotos (el conflicto no la corrompió) — recuperable con retryDeferred.
+        var freshDb = fixture.GetDbContext();
+        var stillMissing = await freshDb.Places.AsNoTracking().SingleAsync(p => p.Id == place.Id);
+        Assert.Null(stillMissing.Photos);
     }
 
     // ── m1: la key de Google no sale por la API admin ──────────────────────
@@ -638,7 +797,7 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         // trivialmente y ocultaba que el coste real revienta el presupuesto de tiempo.)
         fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(1500);
         fixture.FakeR2.UploadFailure = _ => new TaskCanceledException("simulated S3 client timeout on hung R2");
-        SetIngestRehostBudget(TimeSpan.FromMilliseconds(250));
+        using var _budget = WithIngestRehostBudget(TimeSpan.FromMilliseconds(250));
 
         var client = CreateAdminClient();
         var prefix = $"G2-{Guid.NewGuid():N}";
@@ -665,12 +824,13 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         Assert.Equal(12, persisted.Count);
         Assert.All(persisted, p => Assert.Null(p.Photos));
 
-        // El presupuesto de wall-clock corta el sangrado ANTES del breaker por-intentos: un solo
-        // upload colgado agota el budget → el resto degrada sin descargar de Google. Menos de 3
-        // descargas (con UploadLatency=30ms el conteo por-intentos daba exactamente 3 y escondía
-        // que el tiempo real ya habría reventado el deadline).
-        Assert.True(fixture.FakePhotos.Calls.Count < IngestPhotoBreaker.DefaultThreshold,
-            $"expected fewer than {IngestPhotoBreaker.DefaultThreshold} Google downloads (budget cut), got {fixture.FakePhotos.Calls.Count}");
+        // El presupuesto de wall-clock corta el sangrado ANTES del breaker por-intentos: con
+        // budget=250ms y latency=1500ms el ÚNICO upload que se intenta (el del primer place) se
+        // corta a los 250ms → TripBudget → el resto degrada sin descargar de Google. El valor es
+        // determinista: EXACTAMENTE 1 descarga (m1: el `<3` viejo era correcto pero laxo — con
+        // UploadLatency=30ms daban exactamente 3 y escondían que el tiempo real revienta el
+        // deadline).
+        Assert.Equal(1, fixture.FakePhotos.Calls.Count);
     }
 
     [Fact]
@@ -679,7 +839,7 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         fixture.FakeR2.Configured = true;
         fixture.FakeR2.UploadLatency = TimeSpan.FromMilliseconds(1500);
         fixture.FakeR2.UploadFailure = _ => new TaskCanceledException("simulated S3 client timeout on hung R2");
-        SetIngestRehostBudget(TimeSpan.FromMilliseconds(250));
+        using var _budget = WithIngestRehostBudget(TimeSpan.FromMilliseconds(250));
 
         var client = CreateAdminClient();
         var prefix = $"G2b-{Guid.NewGuid():N}";
@@ -701,10 +861,9 @@ public class AdminPlacesPhotosHardeningTests(ApiFixture fixture) : IClassFixture
         var persisted = await db.Places.AsNoTracking().Where(p => p.Name.StartsWith(prefix)).ToListAsync();
         Assert.Equal(8, persisted.Count);
         Assert.All(persisted, p => Assert.StartsWith("https://wanderlog.com/", Assert.Single(p.Photos!)));
-        // El presupuesto de wall-clock corta antes del 3er intento — el resto conserva la
-        // original sin volver a intentar.
-        Assert.True(fixture.FakePhotos.Calls.Count < IngestPhotoBreaker.DefaultThreshold,
-            $"expected fewer than {IngestPhotoBreaker.DefaultThreshold} downloads (budget cut), got {fixture.FakePhotos.Calls.Count}");
+        // El presupuesto de wall-clock corta en el primer upload (budget 250ms < latency 1500ms):
+        // EXACTAMENTE 1 descarga, el resto conserva la original sin volver a intentar (m1).
+        Assert.Equal(1, fixture.FakePhotos.Calls.Count);
     }
 
     // ── g3: writers de Place stale → 409, no 500 (ronda 2) ─────────────────

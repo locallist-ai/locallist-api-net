@@ -789,7 +789,14 @@ public class AdminPlacesController : ControllerBase
                         }
                         else
                         {
+                            // m3: un conflicto xmin al persistir la recuperación (otro escritor
+                            // tocó la fila entre el load y el save) se contaba en silencio y el
+                            // place volvía a ser `missingCandidate` el siguiente run → re-facturaba
+                            // Google Details. Lo metemos en backoff (RecordFailure) para no
+                            // re-facturar Details por una carrera transitoria; `retryDeferred=true`
+                            // lo reintenta cuando el operador quiera.
                             conflictPlaces++;
+                            _backfill.RecordFailure(place.Id, now);
                             _db.Entry(place).State = EntityState.Detached;
                         }
                     }

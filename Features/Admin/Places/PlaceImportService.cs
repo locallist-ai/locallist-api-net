@@ -232,7 +232,14 @@ public class PlaceImportService
                 rows[i] = rows[i] with { Status = "skipped_duplicate", Error = "GooglePlaceId already in library." };
         }
 
-        if (addedPlaces.Count > 0)
+        // Los places ya están persistidos (chunks commiteados con un CT que sobrevive el abort).
+        // Las embeddings son best-effort y recuperables vía reindex-embeddings?onlyMissing=true,
+        // así que un caller-abort (RequestAborted) aquí NO debe propagar y "revertir" el éxito de
+        // la ingesta: si el ct ya está cancelado saltamos las embeddings, y un cancel a mitad se
+        // trata como cualquier otro fallo recuperable (invariante (d): la request no revienta tras
+        // crear los places). El SaveChanges de embeddings usa `ct` a propósito — si el caller
+        // abortó, no hace falta forzar esta escritura opcional.
+        if (addedPlaces.Count > 0 && !ct.IsCancellationRequested)
         {
             // Generate embeddings inline for newly created places
             try
@@ -259,9 +266,9 @@ public class PlaceImportService
                         addedPlaces.Count, vectors.Count);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Inline embedding generation failed after import-from-urls. Run reindex-embeddings?onlyMissing=true to recover.");
+                _logger.LogWarning(ex, "Inline embedding generation failed/canceled after import-from-urls. Run reindex-embeddings?onlyMissing=true to recover.");
             }
         }
 
@@ -339,6 +346,16 @@ public class PlaceImportService
         // de la cancelación queda persistido y el re-run dedupa por GooglePlaceId/Name+City.
         const int CommitChunkSize = 10;
 
+        // Invariante (d) — la persistencia del chunk debe SOBREVIVIR al abort del proxy. El `ct`
+        // del caller es el `RequestAborted` de Railway: si el proxy corta la request (deadline
+        // agotado por el pre-work + R2 colgado), `SaveChangesAsync(ct)` se cancelaría y perdería
+        // el chunk YA rehosteado (Google facturado, objetos R2 huérfanos). Tras la degradación
+        // incondicional del rehost (RehostForIngestAsync ya no propaga el OCE), el bucle sigue y
+        // COMMITEA con un CT que NO se cancela por RequestAborted (`CancellationToken.None`), así
+        // los places completados quedan persistidos aunque el caller ya haya abortado. Npgsql
+        // aplica su propio command timeout, así que esto no cuelga indefinidamente si la DB cae.
+        var commitCt = CancellationToken.None;
+
         // G2: circuit breaker de ingesta compartido por TODO el import (presupuesto agregado).
         // Con R2 colgado, tras N uploads fallidos consecutivos deja de intentar rehost en el
         // resto de places — no re-factura Google y persiste sin foto, sin propagar el fallo de
@@ -396,7 +413,7 @@ public class PlaceImportService
             if (pendingChunk.Count >= CommitChunkSize)
             {
                 _db.Places.AddRange(pendingChunk);
-                await _db.SaveChangesAsync(ct);
+                await _db.SaveChangesAsync(commitCt);
                 pendingChunk.Clear();
             }
         }
@@ -404,7 +421,7 @@ public class PlaceImportService
         if (pendingChunk.Count > 0)
         {
             _db.Places.AddRange(pendingChunk);
-            await _db.SaveChangesAsync(ct);
+            await _db.SaveChangesAsync(commitCt);
         }
 
         return (created, skipped, placesToAdd);
