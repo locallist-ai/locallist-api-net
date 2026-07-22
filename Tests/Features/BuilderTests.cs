@@ -376,6 +376,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         // AnchorNightlife ensures nightlife is always scheduled last in the day.
         // Use an isolated city so accumulated places from other tests don't interfere.
         const string city = "NightlifeTestCity";
+        fixture.MarkCityLive(city); // m1/F4: /builder/chat exige ciudad cubierta antes del gate
         await SeedPlace("CoffeeA", "coffee", "any", city: city);
         await SeedPlace("FoodA",   "food",   "any", city: city);
         await SeedPlace("LatinBar","nightlife","any", city: city);
@@ -729,6 +730,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         // After the fix: each task gets its own DbContext from _dbFactory → no conflict.
         var tag = Guid.NewGuid().ToString("N")[..8];
         var city = $"ConcCity-{tag}";
+        fixture.MarkCityLive(city); // m1/F4: /builder/chat exige ciudad cubierta antes del gate
         var db = fixture.GetDbContext();
         for (int i = 0; i < 5; i++)
         {

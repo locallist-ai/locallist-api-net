@@ -18,8 +18,9 @@ namespace LocalList.API.Tests.Features;
 ///     rollover de mes (FakeTime); increment ATÓMICO bajo concurrencia (servicio y endpoint).
 ///   - Cap antiabuso Plus (50/día) → 429 estructurado (no 403: un Plus no debe ver upsell).
 ///   - Duración por tier: free ≤ 3 (403 duration_requires_plus), hard cap 14 para todos (400),
-///     y clamp del pipeline sobre días derivados por el LLM del texto libre.
-///   - Cupo de planes guardados free (5) → 403 estructurado.
+///     y clamp del pipeline sobre días derivados por el LLM del texto libre (+ hint `clamped`).
+///   - Cupo de planes guardados (5 free): NO gatea la generación (decisión Pablo 2026-07-22);
+///     su enforcement vive en POST /plans (ver PlansTests). Aquí solo se prueba la independencia.
 ///   - Tier SIEMPRE fresco de DB: un claim "pro" forjado en el JWT no abre nada.
 ///   - Semántica del contador: NO se consume si un gate rechaza antes de generar; SÍ se
 ///     consume cuando la generación arranca aunque no produzca plan (sin places).
@@ -219,63 +220,48 @@ public class PlanGateTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDis
         var freeBody = await freeRes.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(3, freeBody.GetProperty("plan").GetProperty("durationDays").GetInt32());
 
-        // Pro: 10 ≤ 14 → sin clamp.
+        // m3/F6: el clamp silencioso emite un hint estructurado para el upsell de la app.
+        var clamped = freeBody.GetProperty("clamped");
+        Assert.Equal(JsonValueKind.Object, clamped.ValueKind);
+        Assert.Equal("days", clamped.GetProperty("field").GetString());
+        Assert.Equal(10, clamped.GetProperty("requested").GetInt32());
+        Assert.Equal(3, clamped.GetProperty("applied").GetInt32());
+        Assert.True(clamped.GetProperty("upsell").GetBoolean());
+
+        // Pro: 10 ≤ 14 → sin clamp → clamped null (nada que upsellear).
         var proClient = await fixture.CreateGenerationClientAsync(tier: "pro");
         var proRes = await proClient.PostAsJsonAsync("/builder/chat", BuilderBody(city, days: null));
         Assert.Equal(HttpStatusCode.OK, proRes.StatusCode);
         var proBody = await proRes.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(10, proBody.GetProperty("plan").GetProperty("durationDays").GetInt32());
+        // Sin clamp → hint omitido (la API serializa con WhenWritingNull); la app trata la
+        // ausencia de `clamped` como "no hubo recorte".
+        Assert.False(proBody.TryGetProperty("clamped", out _));
     }
 
-    // ── Cupo de planes guardados (free 5) ────────────────────────────────────
+    // ── F2: el cupo de planes guardados NO gatea la generación (límites independientes) ──
+    // La ENFORCEMENT del cupo de 5 vive ahora en POST /plans (ver PlansTests). Aquí solo
+    // verificamos la INDEPENDENCIA: la generación no se ve afectada por cuántos planes
+    // guardados tenga el usuario.
 
     [Fact]
-    public async Task Builder_FreeUser_FiveSavedPlans_Returns403_NoCounterConsumed()
+    public async Task Builder_FreeUser_FiveSavedPlans_StillGenerates_SavedQuotaIndependentFromMonthly()
     {
-        var userId = Guid.NewGuid();
-        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"free-saved-{userId:N}@test.com");
-        await SeedSavedPlans(userId, 5);
-
-        var res = await client.PostAsJsonAsync("/builder/chat", BuilderBody(IsolatedCity("saved5"), 1));
-        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
-
-        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("saved_plans_limit_reached", body.GetProperty("error").GetString());
-        Assert.Equal(5, body.GetProperty("used").GetInt32());
-        Assert.Equal(5, body.GetProperty("limit").GetInt32());
-        Assert.Equal(0, await MonthlyCount(userId));
-    }
-
-    [Fact]
-    public async Task Builder_FreeUser_FourSavedPlans_Ok_DeleteFreesSlot()
-    {
-        var city = IsolatedCity("saved4");
-        await SeedPlaces(city, 3);
+        // Decisión Pablo 2026-07-22: un free con 5 planes manuales sigue pudiendo consumir sus
+        // 3 planes IA/mes — el cupo de guardados y el contador mensual son límites separados.
+        var city = IsolatedCity("saved-indep");
+        await SeedPlaces(city, 4);
         SetGeminiExtraction(days: 1);
 
         var userId = Guid.NewGuid();
-        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"free-saved4-{userId:N}@test.com");
-        await SeedSavedPlans(userId, 4);
-
-        // 4 < 5 → la generación (que guarda el 5º) pasa.
-        var res = await client.PostAsJsonAsync("/builder/chat", BuilderBody(city, 1));
-        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-    }
-
-    [Fact]
-    public async Task Builder_ProUser_FiveSavedPlans_NotGated()
-    {
-        var city = IsolatedCity("prosaved");
-        await SeedPlaces(city, 3);
-        SetGeminiExtraction(days: 1);
-
-        var userId = Guid.NewGuid();
-        var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            userId, $"pro-saved-{userId:N}@test.com", tier: "pro");
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"free-savedindep-{userId:N}@test.com");
         await SeedSavedPlans(userId, 5);
 
         var res = await client.PostAsJsonAsync("/builder/chat", BuilderBody(city, 1));
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        // La generación consumió el contador mensual (no la bloqueó el cupo de guardados).
+        Assert.Equal(1, await MonthlyCount(userId));
     }
 
     // ── Plus: mensual ilimitado + cap antiabuso 50/día ───────────────────────
@@ -495,7 +481,14 @@ public class PlanGateTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDis
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static string IsolatedCity(string tag) => $"GateCity-{tag}-{Guid.NewGuid():N}"[..30];
+    private string IsolatedCity(string tag)
+    {
+        var city = $"GateCity-{tag}-{Guid.NewGuid():N}"[..30];
+        // Desde m1/F4 /builder/chat rechaza ciudades no cubiertas ANTES del gate; las ciudades
+        // aisladas representan "una ciudad cubierta con catálogo fresco", así que las marcamos live.
+        fixture.MarkCityLive(city);
+        return city;
+    }
 
     private static object BuilderBody(string city, int? days) => new
     {

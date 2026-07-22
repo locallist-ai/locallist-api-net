@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
@@ -33,6 +34,7 @@ public class BuilderController : ControllerBase
     private readonly ILogger<BuilderController> _logger;
     private readonly PostHogService _posthog;
     private readonly IPlanGenerationGateService _planGate;
+    private readonly ICityCoverageService _coverage;
 
     public BuilderController(
         LocalListDbContext db,
@@ -40,7 +42,8 @@ public class BuilderController : ControllerBase
         SchedulingService scheduler,
         ILogger<BuilderController> logger,
         PostHogService posthog,
-        IPlanGenerationGateService planGate)
+        IPlanGenerationGateService planGate,
+        ICityCoverageService coverage)
     {
         _db = db;
         _planGen = planGen;
@@ -48,6 +51,7 @@ public class BuilderController : ControllerBase
         _logger = logger;
         _posthog = posthog;
         _planGate = planGate;
+        _coverage = coverage;
     }
 
     /// <summary>
@@ -95,6 +99,22 @@ public class BuilderController : ControllerBase
             });
         }
 
+        // Defensa de cobertura ANTES del gate (m1/F4): espeja /chat/generate. Sin este check
+        // una ciudad no cubierta (retrieval 0 places → soft-fallback 200) consumía un permiso
+        // del contador mensual sin producir un plan real. El contador solo debe gastarse si la
+        // generación puede arrancar de verdad, así que rechazamos aquí sin consumir.
+        var city = request.TripContext?.City;
+        if (!_coverage.IsLive(city))
+        {
+            _logger.LogInformation("Builder: blocked, city not covered city={City}", city ?? "(null)");
+            return BadRequest(new
+            {
+                error = "city_unsupported",
+                city,
+                liveCities = _coverage.LiveCities,
+            });
+        }
+
         // Gate del catálogo Plus — último check antes de arrancar (y pagar) el pipeline.
         var gate = await _planGate.CheckAndConsumeAsync(userId.Value, request.TripContext?.Days, ct);
         if (!gate.Allowed)
@@ -110,8 +130,9 @@ public class BuilderController : ControllerBase
 
             if (result == null)
             {
-                // Soft fallback: no places found — return empty ephemeral plan rather than 404
-                // so the wizard doesn't surface an error to the user.
+                // Soft fallback: no places found — return an empty plan rather than 404 so the
+                // wizard doesn't surface an error to the user. (No IsEphemeral: los planes
+                // efímeros ya no existen en el contrato — era un resto muerto.)
                 var fallbackCity = request.TripContext?.City ?? "Miami";
                 return Ok(new
                 {
@@ -124,8 +145,7 @@ public class BuilderController : ControllerBase
                         Description = "No places found matching your preferences in this city yet.",
                         DurationDays = request.TripContext?.Days ?? 1,
                         TripContext = request.TripContext,
-                        IsPublic = false,
-                        IsEphemeral = true
+                        IsPublic = false
                     },
                     stops = Array.Empty<object>(),
                     message = "No places found for this city yet.",
@@ -208,7 +228,8 @@ public class BuilderController : ControllerBase
                 stops = _scheduler.ResolveStopPlaces(planStopsData, result.FilteredPlaces),
                 message = $"Created a {result.Prefs.Days}-day plan with {planStopsData.Count} stops!",
                 warnings = result.Schedule.Warnings,
-                appliedRefinements = result.Schedule.AppliedRefinements
+                appliedRefinements = result.Schedule.AppliedRefinements,
+                clamped = DaysClampInfo.ToHint(result.DaysClamp, gate.MaxDays),
             });
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

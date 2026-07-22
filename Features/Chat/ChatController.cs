@@ -348,7 +348,8 @@ public class ChatController : ControllerBase
             stops = _planGen.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
             message = $"Created a {result.Prefs.Days}-day plan with {result.Schedule.Stops.Count} stops!",
             warnings = result.Schedule.Warnings,
-            appliedRefinements = result.Schedule.AppliedRefinements
+            appliedRefinements = result.Schedule.AppliedRefinements,
+            clamped = DaysClampInfo.ToHint(result.DaysClamp, gate.MaxDays),
         });
     }
 

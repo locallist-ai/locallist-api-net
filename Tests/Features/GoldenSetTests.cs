@@ -226,7 +226,10 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
     [Fact]
     public async Task Builder_NoPlaces_Returns200_WithEmptyStopsAndWarning()
     {
-        // Do NOT seed any places for this city.
+        // Do NOT seed any places for this city — pero SÍ marcarla cubierta: desde m1/F4
+        // /builder/chat rechaza ciudades no cubiertas antes del gate; aquí probamos el
+        // soft-fallback de "ciudad cubierta pero sin catálogo todavía".
+        fixture.MarkCityLive("Reykjavik");
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(new
         {
             days = 1, categories = new[] { "food" }, vibes = new string[] { },

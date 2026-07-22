@@ -70,31 +70,52 @@ tabla `usage_counters`, migración `AddUsageCounters`). Los gates corren en los 
 generación (`POST /chat/generate` y `POST /builder/chat`), que desde F4 exigen `[Authorize]`
 (sin identidad no hay contador mensual posible; el funnel anónimo sigue vivo en `/chat/turn`).
 
-| Regla | Free | Plus (`users.tier = "pro"`) |
-|---|---|---|
-| Planes IA | 3/mes (mes natural UTC) | Ilimitado, cap antiabuso 50/día (UTC) |
-| Duración del plan | ≤ 3 días | ≤ 14 días (hard cap para todos) |
-| Multi-ciudad | no | sí (ver hueco abajo) |
-| Favoritos | 50 | ilimitado (ver hueco abajo) |
-| Planes guardados | 5 activos (filas en `plans` con `created_by`) | ilimitado |
-| Catálogo, edición manual, Follow online, `/chat/turn` | ilimitado | ilimitado |
+| Regla | Free | Plus (`users.tier = "pro"`) | Dónde se aplica |
+|---|---|---|---|
+| Planes IA | 3/mes (mes natural UTC) | Ilimitado, cap antiabuso 50/día (UTC) | `PlanGenerationGateService` (generación) |
+| Duración del plan | ≤ 3 días | ≤ 14 días (hard cap para todos) | gate de generación + `[Range]` de los DTOs |
+| Multi-ciudad | no | sí (ver hueco abajo) | (imposible por construcción hoy) |
+| Favoritos | 50 | ilimitado (ver hueco abajo) | (sin modelo todavía) |
+| Planes guardados | 5 activos (filas en `plans` con `created_by`) | ilimitado | **`POST /plans`** (PlansController) |
+| Catálogo, edición manual, Follow online, `/chat/turn` | ilimitado | ilimitado | — |
+
+> **Cupo de planes guardados — INDEPENDIENTE de la generación (decisión Pablo 2026-07-22).**
+> El cupo de 5 es un límite de ALMACENAMIENTO y se aplica en `POST /plans`, NO en el gate de
+> generación. Consecuencia buscada: un free con 5 planes manuales sigue pudiendo generar sus
+> 3 planes IA/mes (y viceversa). Antes vivía dentro de `PlanGenerationGateService` y contaminaba:
+> un free con 5 planes recibía `saved_plans_limit_reached` al GENERAR aunque tuviera 0/3 del mes.
+> `POST /plans` con un free a ≥5 planes activos → `403 {error:"saved_plans_limit_reached", used,
+> limit:5}`; `DELETE /plans/:id` libera hueco. Plus sin límite.
+
+### Duración: rango en una constante compartida (evita el drift 7→14)
+
+El hard cap de días (14) vive en `PlanLimits.MaxPlanDurationDays` (`Shared/Constants/`), única
+fuente de verdad para `PlanGenerationGateService.PlusMaxDays` Y para las validaciones `[Range]`
+de TODOS los DTOs con día/duración (edición: `PlanEditDtos`; admin: `AdminPlanDtos`). Antes el
+7→14 se aplicó solo en el path de generación y los DTOs de edición seguían en `[Range(1,7)]`,
+así que un Plus generaba 14 días pero recibía 400 al editar sus stops de día 8-14.
 
 ### Errores estructurados (la app los consume para el upsell)
 
-Orden de evaluación del gate (los rechazos de validación NO consumen contador):
+Orden de evaluación del gate de GENERACIÓN (los rechazos de validación NO consumen contador):
 
 1. `401 {error:"Invalid token claims."}` — token válido pero user inexistente en DB.
 2. `400 {error:"duration_invalid", requestedDays, maxDays:14}` — hard cap global (también lo
    corta la validación `[Range(1,14)]` de `TripContextDto.Days` con el 400 del framework).
 3. `403 {error:"duration_requires_plus", requestedDays, maxDays:3, plusMaxDays:14}` — free con
    más de 3 días explícitos.
-4. `403 {error:"saved_plans_limit_reached", used, limit:5}` — free con ≥5 planes guardados
-   (`DELETE /plans/:id` libera hueco).
-5. `403 {error:"plan_limit_reached", used:3, limit:3, resetsAt:<inicio del mes siguiente UTC>}`
+4. `403 {error:"plan_limit_reached", used:3, limit:3, resetsAt:<inicio del mes siguiente UTC>}`
    — free, contador mensual agotado.
-6. `429 {error:"daily_cap_reached", used:50, limit:50, resetsAt:<siguiente medianoche UTC>}` —
+5. `429 {error:"daily_cap_reached", used:50, limit:50, resetsAt:<siguiente medianoche UTC>}` —
    Plus, cap diario antiabuso. **Elegido 429, no 403**: es throttling, no falta de
    entitlement — la app no debe pintar upsell a un usuario que YA es Plus.
+
+Fuera del gate de generación: `POST /plans` → `403 {error:"saved_plans_limit_reached", used,
+limit:5}` (cupo de almacenamiento, ver arriba).
+
+Coverage: ambos endpoints de generación (`/builder/chat` y `/chat/generate`) rechazan una ciudad
+no cubierta ANTES del gate con `400 {error:"city_unsupported", city, liveCities}` — sin consumir
+contador (desde m1/F4; antes `/builder/chat` consumía un permiso en ciudad sin cobertura).
 
 ### Semántica del contador (elegida, con test en `PlanGateTests`)
 
@@ -114,11 +135,37 @@ servicio y a nivel endpoint). PK compuesta `(user_id, feature, period_start)`; f
 periodos comparten fecha. FK a `users` con cascade (GDPR); el reset-por-reregistro que permite
 el borrado de cuenta queda acotado por el techo horario por IP y el throttle de `/auth/register`.
 
-### Días derivados del texto libre
+### Días derivados del texto libre + hint `clamped` (m3/F6)
 
 El gate valida los días EXPLÍCITOS del request; los que el LLM derive del mensaje se acotan con
 el clamp `prefs.Days ≤ maxDays(tier)` dentro de `PlanGenerationService.GenerateAsync` — ningún
-camino produce un plan más largo que el techo del tier.
+camino produce un plan más largo que el techo del tier. Cuando ese clamp recorta, la respuesta
+de generación (`/builder/chat` y `/chat/generate`) incluye un hint estructurado para que la app
+pinte el upsell en vez de recortar en silencio:
+
+```jsonc
+"clamped": { "field": "days", "requested": 10, "applied": 3, "upsell": true }
+```
+
+- **Se OMITE** (la API serializa con `WhenWritingNull`) cuando no hubo clamp — la app trata la
+  ausencia de `clamped` como "sin recorte".
+- `upsell` es `true` solo cuando el techo aplicado está por debajo del hard cap global (un free
+  ganaría días subiendo a Plus); un Plus recortado al tope de 14 recibe `upsell:false`.
+- Nombres de campo ESTABLES (contrato con el task app-side `app-gates-errors.md`).
+
+### Cuota proactiva en `GET /account` (m4/F7)
+
+`GET /account` expone la cuota mensual de generación IA para que la app muestre "X de 3 planes
+este mes" sin tener que provocar el 403:
+
+```jsonc
+"aiPlansMonth": { "used": 2, "limit": 3, "resetsAt": "2026-08-01T00:00:00+00:00" }
+```
+
+- `used` = contador mensual consumido (0 si no hay fila); `resetsAt` = inicio del mes siguiente (UTC).
+- `limit` = 3 para free. Para **Plus** el límite mensual no aplica (usan el cap diario antiabuso):
+  `limit` se OMITE (`WhenWritingNull`) → la app interpreta su ausencia como ilimitado.
+- Nombres ESTABLES; contrato con el task app-side.
 
 ### Huecos documentados (NO inventados)
 

@@ -1,6 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
 using LocalList.API.NET.Features.Admin.Places;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
 
@@ -127,7 +128,7 @@ public class CreatePlanRequest
     public string? Description { get; set; }
     public string? ImageUrl { get; set; }
 
-    [Range(1, 7)]
+    [Range(1, PlanLimits.MaxPlanDurationDays)]
     public int DurationDays { get; set; } = 1;
 
     public bool IsPublic { get; set; } = true;
@@ -147,7 +148,7 @@ public class CreatePlanStopRequest
     /// <summary>Place name — resolved to PlaceId server-side if PlaceId is null</summary>
     public string? PlaceName { get; set; }
 
-    [Range(1, 7)]
+    [Range(1, PlanLimits.MaxPlanDurationDays)]
     public int DayNumber { get; set; } = 1;
 
     public int OrderIndex { get; set; }
@@ -173,7 +174,7 @@ public class UpdatePlanRequest
     public string? Description { get; set; }
     public string? ImageUrl { get; set; }
 
-    [Range(1, 7)]
+    [Range(1, PlanLimits.MaxPlanDurationDays)]
     public int? DurationDays { get; set; }
 
     public bool? IsPublic { get; set; }

@@ -65,7 +65,10 @@ Required User Secrets / Environment Variables:
 - `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Verificado antes de deserializar el body (fail-closed 503 si falta). También legible como `RevenueCat__WebhookAuthToken`.
 - `REVENUECAT_REST_API_KEY` — **requerido** para conceder tier. Secret API key (sk_...) de RC para verificar el suscriptor. Distinta del secreto del webhook. Sin ella no se concede upgrade (webhook 503, RC reintenta). También `RevenueCat__RestApiKey`.
 - `RevenueCat__PlusEntitlementId` — id del entitlement que mapea a tier `pro` (default `plus`).
-- Enforcement: catálogo Plus vs free DECIDIDO (2026-07-13) y aplicado server-side. `PlanGenerationGateService` (`Shared/Usage/`) gatea `POST /chat/generate` y `POST /builder/chat` (ambos `[Authorize]` desde F4): 3 planes IA/mes free (contador atómico en `usage_counters`, upsert condicional) · cap antiabuso 50/día Plus (429) · duración ≤3 días free / ≤14 Plus (hard cap global + clamp de días derivados por LLM) · ≤5 planes guardados free. Tier SIEMPRE fresco de DB. Errores estructurados para el upsell de la app (`plan_limit_reached`, `duration_requires_plus`, `saved_plans_limit_reached`, `daily_cap_reached`) — detalle y huecos (favoritos sin modelo, multi-ciudad imposible por construcción) en `Features/Billing/README.md`. `[RequirePro]` (`Shared/Auth/`) sigue disponible para gates binarios.
+- Enforcement: catálogo Plus vs free DECIDIDO (2026-07-13) y aplicado server-side. `PlanGenerationGateService` (`Shared/Usage/`) gatea `POST /chat/generate` y `POST /builder/chat` (ambos `[Authorize]` desde F4): 3 planes IA/mes free (contador atómico en `usage_counters`, upsert condicional) · cap antiabuso 50/día Plus (429) · duración ≤3 días free / ≤14 Plus. El hard cap de días vive en `PlanLimits.MaxPlanDurationDays` (`Shared/Constants/`), única fuente de verdad para `PlanGenerationGateService.PlusMaxDays` Y para el `[Range(1,14)]` de TODOS los DTOs con día/duración (edición + admin) — evita el drift 7→14 que dejaba a un Plus generando 14 días pero sin poder editarlos. Ambos endpoints rechazan ciudad no cubierta ANTES del gate (`400 city_unsupported`, sin consumir contador; `ICityCoverageService`). Cuando el clamp de días derivados por el LLM recorta, la respuesta trae `clamped:{field,requested,applied,upsell}`. Tier SIEMPRE fresco de DB. Errores estructurados para el upsell (`plan_limit_reached`, `duration_requires_plus`, `daily_cap_reached`).
+- **Cupo de planes guardados (5 free) — en `POST /plans` (PlansController), NO en la generación** (decisión Pablo 2026-07-22): límite de ALMACENAMIENTO independiente del contador mensual (un free con 5 planes manuales sigue generando sus 3 IA/mes). `403 {error:"saved_plans_limit_reached", used, limit:5}`; `DELETE /plans/:id` libera hueco; Plus sin límite.
+- `GET /account` expone la cuota mensual proactiva: `aiPlansMonth:{used, limit, resetsAt}` (`limit` omitido = ilimitado para Plus). Los campos `clamped` y `aiPlansMonth` los consume el task app-side — nombres estables, documentados en `Features/Billing/README.md`.
+- Detalle y huecos (favoritos sin modelo, multi-ciudad imposible por construcción) en `Features/Billing/README.md`. `[RequirePro]` (`Shared/Auth/`) sigue disponible para gates binarios.
 
 **Fase 3 — Video import (pendiente, sin plan activo)**
 - Sin Apify. Arquitectura prevista: video file → Gemini multimodal File API directo.
@@ -194,7 +197,7 @@ LocalList.API.NET/
     │   ├── RequireProAuthorizationFilter.cs  # Valida tier RE-CONSULTANDO la DB (no el claim `tier` del JWT, vida 15 min)
     │   └── FirebaseUserExtensions.cs    # GetFirebaseUid(), GetEmail(), GetUserIdAsync()
     ├── Constants/
-    │   ├── PlanLimits.cs               # Límites de stops por día, etc.
+    │   ├── PlanLimits.cs               # MaxStopsPerDay + MaxPlanDurationDays (hard cap 14, fuente única del [Range] de días)
     │   └── PriceRanges.cs              # Rangos de precio normalizados
     ├── Coverage/                       # Gate de ciudades en vivo (contrato cross-slice)
     │   ├── ICityCoverageService.cs      # IsLive(city) + LiveCities (impl en Features/Cities/)
@@ -252,7 +255,7 @@ LocalList.API.NET/
     │   ├── IUsageCounterService.cs      # TryConsumeAsync/GetUsedAsync — consumo atómico por (user, feature, periodo)
     │   ├── UsageCounterService.cs       # INSERT … ON CONFLICT … WHERE count < limit en 1 statement (sin ventana RMW)
     │   ├── IPlanGenerationGateService.cs # CheckAndConsumeAsync + PlanGateResult/PlanGateRejection
-    │   └── PlanGenerationGateService.cs # Catálogo Plus: 3/mes free, 50/día pro, duración por tier, cupo guardados
+    │   └── PlanGenerationGateService.cs # Catálogo Plus: 3/mes free, 50/día pro, duración por tier (cupo de guardados vive en POST /plans, no aquí)
     └── Taxonomy/
         ├── ITaxonomyService.cs
         ├── PlaceTaxonomy.cs            # Árbol de categorías/subcategorías
@@ -285,7 +288,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Places | `GET /places/`, `GET /places/:id` |
-| Plans | `GET /plans/`, `GET /plans/:id`, `DELETE /plans/:id` |
+| Plans | `GET /plans/`, `GET /plans/mine`, `GET /plans/:id`, `POST /plans` (crea plan de usuario; gate del cupo de guardados free = 5), `PUT /plans/:id/stops` (reemplazo atómico de stops, día ≤14), `DELETE /plans/:id` |
 | Profile | `GET /me/profile`, `DELETE /me/profile` |
 | Taxonomy | `GET /taxonomy` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |

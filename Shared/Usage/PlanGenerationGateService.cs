@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 
 namespace LocalList.API.NET.Shared.Usage;
@@ -13,8 +14,12 @@ namespace LocalList.API.NET.Shared.Usage;
 ///     imposible POR CONSTRUCCIÓN pedir un plan multi-ciudad — no hay nada que validar. Cuando
 ///     el modelo gane una lista de ciudades, este gate debe rechazar free con
 ///     <c>403 {error:"multicity_requires_plus"}</c> (código reservado para la app).
-///   - Planes guardados: free 5 activos (activos = filas en plans con created_by = user;
-///     DELETE /plans/:id libera hueco) · Plus ilimitado.
+///   - Planes guardados: free 5 activos · Plus ilimitado. IMPORTANTE (decisión Pablo
+///     2026-07-22): este límite es un cupo de ALMACENAMIENTO y NO vive aquí. Se aplica en
+///     <c>POST /plans</c> (PlansController), INDEPENDIENTE del contador mensual de generación:
+///     un free con 5 planes manuales puede seguir generando sus 3 planes IA/mes (y viceversa).
+///     Antes vivía en este gate y contaminaba la generación (un free con 5 planes recibía
+///     <c>saved_plans_limit_reached</c> al generar aunque tuviera 0/3 del mes).
 ///   - Favoritos: free 50 · Plus ilimitado. HUECO DOCUMENTADO: el backend no tiene modelo de
 ///     favoritos todavía (solo UserProfile.FavoriteCity, que es otra cosa) — el límite se
 ///     implementará con el modelo. No se inventa aquí.
@@ -24,26 +29,26 @@ namespace LocalList.API.NET.Shared.Usage;
 /// con el guard equivocado.
 ///
 /// Semántica del contador (elegida, con test): el permiso se consume cuando la generación
-/// ARRANCA. Los gates de validación (duración, planes guardados) rechazan ANTES de consumir;
-/// a partir de ahí el permiso no se devuelve aunque el pipeline falle (LLM caído, ciudad sin
-/// places…). Motivo: el coste (Gemini + RAG) ya se ha pagado, y "devolver si falla" abriría
-/// un lateral de retry-abuse barato contra el límite mensual.
-///
-/// Carrera residual (aceptada y acotada): el check de planes guardados es count-then-insert
-/// sin serialización por usuario; N generaciones simultáneas del mismo free user pueden
-/// dejarle en 5+N-1 planes. El contador mensual (atómico, máx 3/mes) acota N≤3, y el exceso
-/// no es explotable como bypass del catálogo (no genera planes extra, solo huecos de
-/// almacenamiento). Los gates de dinero del criterio de aceptación (4º plan del mes, 4+ días,
-/// multi-ciudad) NO dependen de este check.
+/// ARRANCA. El gate de validación de duración rechaza ANTES de consumir; a partir de ahí el
+/// permiso no se devuelve aunque el pipeline falle (LLM caído, ciudad sin places…). Motivo:
+/// el coste (Gemini + RAG) ya se ha pagado, y "devolver si falla" abriría un lateral de
+/// retry-abuse barato contra el límite mensual.
 /// </summary>
 public class PlanGenerationGateService : IPlanGenerationGateService
 {
     public const string TierPro = "pro";
 
     public const int FreeMaxDays = 3;
-    public const int PlusMaxDays = 14;
+
+    /// <summary>Plus duration ceiling = global hard cap. Single source of truth in
+    /// <see cref="PlanLimits.MaxPlanDurationDays"/> so the DTO <c>[Range]</c> validations and this
+    /// gate never desync.</summary>
+    public const int PlusMaxDays = PlanLimits.MaxPlanDurationDays;
     public const int FreeMonthlyPlanLimit = 3;
     public const int PlusDailyPlanCap = 50;
+
+    /// <summary>Free saved-plans quota. Enforced in <c>POST /plans</c> (PlansController), NOT in
+    /// this generation gate — storage cap independent from the monthly AI counter (see class doc).</summary>
     public const int FreeSavedPlansLimit = 5;
 
     /// <summary>Feature key del contador mensual free (periodo = primer día del mes UTC).</summary>
@@ -111,21 +116,9 @@ public class PlanGenerationGateService : IPlanGenerationGateService
                 });
         }
 
-        // 3. Cupo de planes guardados (free): la generación autenticada SIEMPRE persiste el
-        //    plan, así que el endpoint de generación ES el endpoint de guardado.
-        if (!isPro)
-        {
-            var saved = await _db.Plans.CountAsync(p => p.CreatedById == userId, ct);
-            if (saved >= FreeSavedPlansLimit)
-            {
-                _logger.LogInformation(
-                    "PlanGate: saved-plans denied userId={UserId} saved={Saved}", userId, saved);
-                return PlanGateResult.Reject(tier, maxDays, StatusCodes.Status403Forbidden,
-                    new { error = "saved_plans_limit_reached", used = saved, limit = FreeSavedPlansLimit });
-            }
-        }
-
-        // 4. Contador — último gate: si consume, la generación arranca sí o sí.
+        // 3. Contador — último gate: si consume, la generación arranca sí o sí.
+        //    (El cupo de planes guardados NO se comprueba aquí — es un límite de
+        //    almacenamiento independiente que vive en POST /plans; ver class doc.)
         var now = _time.GetUtcNow();
         if (!isPro)
         {

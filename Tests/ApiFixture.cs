@@ -25,11 +25,14 @@ using LocalList.API.NET.Features.Billing;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
+using Microsoft.Extensions.Configuration;
 
 namespace LocalList.API.Tests;
 
@@ -260,6 +263,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             foreach (var d in rcDesc) services.Remove(d);
             services.AddSingleton<IRevenueCatClient>(FakeRevenueCat);
 
+            // Coverage: envolvemos el CityCoverageService REAL (config Miami-only por defecto,
+            // normalización real) con un decorador que permite a los tests marcar ciudades
+            // aisladas como LIVE en runtime vía MarkCityLive. Necesario desde m1/F4: /builder/chat
+            // ahora rechaza ciudades no cubiertas ANTES del gate, y los tests de generación usan
+            // ciudades GUID aleatorias que no están en la allowlist de boot. Los tests que NO
+            // marcan nada (CoverageGateTests, CitiesTests) ven exactamente el servicio real.
+            services.RemoveAll<ICityCoverageService>();
+            services.AddSingleton<ICityCoverageService>(sp =>
+                new TestCityCoverageService(new CityCoverageService(sp.GetRequiredService<IConfiguration>())));
+
             // Disable rate limiting in tests (default). Las suites que testean el propio
             // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
             // reales registradas por AddRateLimitingPolicies.
@@ -424,6 +437,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     }
 
     /// <summary>
+    /// Marca una ciudad como cubierta (LIVE) para este fixture, además de la allowlist real
+    /// (Miami). Necesario para los tests de generación que usan ciudades aisladas: desde m1/F4
+    /// tanto /builder/chat como /chat/generate rechazan ciudades no cubiertas antes del gate.
+    /// </summary>
+    public void MarkCityLive(string city) =>
+        ((TestCityCoverageService)Services.GetRequiredService<ICityCoverageService>()).AddLive(city);
+
+    /// <summary>
     /// Creates an HS256 JWT signed with the test JWT_SECRET — mirrors what
     /// <see cref="JwtTokenService"/> emits for the real app flow.
     /// </summary>
@@ -445,6 +466,35 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             expires: now.AddMinutes(15),
             signingCredentials: credentials);
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+}
+
+/// <summary>
+/// Decorador de test sobre <see cref="CityCoverageService"/> real. Delega IsLive/LiveCities al
+/// servicio real (allowlist de boot + normalización real) y añade un set mutable de ciudades
+/// marcadas LIVE en runtime por los tests (<see cref="ApiFixture.MarkCityLive"/>). No altera
+/// <see cref="LiveCities"/> (lo que expone /cities/live) — solo amplía IsLive.
+/// </summary>
+public sealed class TestCityCoverageService : ICityCoverageService
+{
+    private readonly ICityCoverageService _inner;
+    private readonly HashSet<string> _extra = new(StringComparer.Ordinal);
+
+    public TestCityCoverageService(ICityCoverageService inner) => _inner = inner;
+
+    public IReadOnlyList<string> LiveCities => _inner.LiveCities;
+
+    public bool IsLive(string? cityName)
+    {
+        if (_inner.IsLive(cityName)) return true;
+        if (string.IsNullOrWhiteSpace(cityName)) return false;
+        lock (_extra) return _extra.Contains(CityNameNormalizer.Normalize(cityName));
+    }
+
+    public void AddLive(string city)
+    {
+        if (string.IsNullOrWhiteSpace(city)) return;
+        lock (_extra) _extra.Add(CityNameNormalizer.Normalize(city));
     }
 }
 

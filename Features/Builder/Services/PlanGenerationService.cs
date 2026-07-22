@@ -73,11 +73,14 @@ public class PlanGenerationService : IPlanGenerationService
         // Clamp de tier (F4): los días pedidos explícitamente ya pasaron el gate del
         // controller, pero el LLM puede derivar Days del texto libre ("10 días en Miami").
         // Acotar aquí — después de la extracción y antes de scheduling/naming — garantiza
-        // que NINGÚN camino produce un plan más largo que el techo del tier.
+        // que NINGÚN camino produce un plan más largo que el techo del tier. Cuando recortamos,
+        // registramos el clamp (m3/F6) para que el controller lo exponga como hint de upsell.
+        DaysClampInfo? daysClamp = null;
         if (prefs.Days > maxDays)
         {
             _logger.LogInformation(
                 "PlanGen: clamping extracted days {Days} -> {MaxDays} (tier cap)", prefs.Days, maxDays);
+            daysClamp = new DaysClampInfo(Requested: prefs.Days, Applied: maxDays);
             prefs.Days = maxDays;
         }
 
@@ -135,6 +138,7 @@ public class PlanGenerationService : IPlanGenerationService
             City = city,
             Lang = lang,
             LlmDiagnostics = llmDiag,
+            DaysClamp = daysClamp,
         };
     }
 

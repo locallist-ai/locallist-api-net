@@ -378,8 +378,14 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private static string IsolatedCity(string label) =>
-        $"PlanQuality-{label}-{Guid.NewGuid().ToString("N")[..8]}";
+    private string IsolatedCity(string label)
+    {
+        var city = $"PlanQuality-{label}-{Guid.NewGuid().ToString("N")[..8]}";
+        // Desde m1/F4 /builder/chat rechaza ciudades no cubiertas antes del gate — estas
+        // ciudades aisladas representan ciudades cubiertas con catálogo fresco.
+        fixture.MarkCityLive(city);
+        return city;
+    }
 
     private static HttpResponseMessage GeminiOk(string embeddedText)
     {
