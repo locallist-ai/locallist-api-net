@@ -55,6 +55,7 @@ public class PlanGenerationService : IPlanGenerationService
         string? message,
         TripContextDto? tripContext,
         string lang,
+        int maxDays,
         CancellationToken ct)
     {
         tripContext ??= new TripContextDto();
@@ -62,12 +63,23 @@ public class PlanGenerationService : IPlanGenerationService
         var city = tripContext.City ?? "Miami";
 
         _logger.LogInformation(
-            "PlanGen: city={City} days={Days} groupType={GT} categories={Cats} budget={Budget} msgLen={Len}",
-            city, tripContext.Days, tripContext.GroupType,
+            "PlanGen: city={City} days={Days} maxDays={MaxDays} groupType={GT} categories={Cats} budget={Budget} msgLen={Len}",
+            city, tripContext.Days, maxDays, tripContext.GroupType,
             tripContext.Categories == null ? "(null)" : string.Join(",", tripContext.Categories),
             tripContext.Budget, msg.Length);
 
         var (prefs, llmDiag) = await _aiProvider.ExtractPreferencesAsync(msg, tripContext, lang, ct);
+
+        // Clamp de tier (F4): los días pedidos explícitamente ya pasaron el gate del
+        // controller, pero el LLM puede derivar Days del texto libre ("10 días en Miami").
+        // Acotar aquí — después de la extracción y antes de scheduling/naming — garantiza
+        // que NINGÚN camino produce un plan más largo que el techo del tier.
+        if (prefs.Days > maxDays)
+        {
+            _logger.LogInformation(
+                "PlanGen: clamping extracted days {Days} -> {MaxDays} (tier cap)", prefs.Days, maxDays);
+            prefs.Days = maxDays;
+        }
 
         _logger.LogInformation(
             "PlanGen: prefs days={Days} cats={Cats} vibes={Vibes} maxStops={Max} name='{Name}'",

@@ -4,6 +4,7 @@ using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Builder.Services;
 
@@ -77,9 +78,10 @@ public class PreferenceExtractorService
     {
         if (context == null) return prefs;
 
-        // Days autoritativo desde el wizard.
+        // Days autoritativo desde el wizard. Cap global del catálogo (Plus 14); el techo
+        // por tier (free 3) lo aplican el gate del controller y el clamp de PlanGenerationService.
         if (context.Days.HasValue)
-            prefs.Days = Math.Clamp(context.Days.Value, 1, 7);
+            prefs.Days = Math.Clamp(context.Days.Value, 1, PlanGenerationGateService.PlusMaxDays);
 
         // GroupType autoritativo desde el wizard (si el valor está en whitelist).
         if (!string.IsNullOrWhiteSpace(context.GroupType)
@@ -215,7 +217,7 @@ Rules for planName:{langNote}
 
 Return JSON only, no markdown. EXACT shape:
 {{
-  ""days"": number (1-7, default 1),
+  ""days"": number (1-14, default 1),
   ""categories"": string[] (from: {string.Join(", ", AllowedCategories)}),
   ""vibes"": string[] (e.g. romantic, adventurous, relaxed, party, cultural),
   ""groupType"": string (solo/couple/friends/family-kids/family/group),
@@ -234,12 +236,12 @@ Return JSON only, no markdown. EXACT shape:
             var result = JsonSerializer.Deserialize<ExtractedPreferences>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                          ?? new ExtractedPreferences();
 
-            if (result.Days < 1 || result.Days > 7)
-                _logger.LogWarning("Gemini Days out of range: {Days} (clamping to 1-7)", result.Days);
+            if (result.Days < 1 || result.Days > PlanGenerationGateService.PlusMaxDays)
+                _logger.LogWarning("Gemini Days out of range: {Days} (clamping to 1-14)", result.Days);
             if (result.MaxStopsPerDay < 3 || result.MaxStopsPerDay > 6)
                 _logger.LogWarning("Gemini MaxStopsPerDay out of range: {Max} (clamping to 3-6)", result.MaxStopsPerDay);
 
-            result.Days = Math.Clamp(result.Days, 1, 7);
+            result.Days = Math.Clamp(result.Days, 1, PlanGenerationGateService.PlusMaxDays);
             result.MaxStopsPerDay = Math.Clamp(result.MaxStopsPerDay, 3, 6);
 
             if (result.Categories != null)

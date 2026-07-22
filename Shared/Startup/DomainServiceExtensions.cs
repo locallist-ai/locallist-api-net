@@ -73,6 +73,11 @@ public static class DomainServiceExtensions
         services.AddHttpClient<IRevenueCatClient, RevenueCatClient>(c => c.Timeout = TimeSpan.FromSeconds(8));
         services.AddScoped<BillingEventProcessor>();
 
+        // F4 — gates del catálogo Plus: contador atómico de uso + gate de generación
+        // (3 planes IA/mes free, cap 50/día Plus, duración por tier, cupo de guardados).
+        services.AddScoped<Shared.Usage.IUsageCounterService, Shared.Usage.UsageCounterService>();
+        services.AddScoped<Shared.Usage.IPlanGenerationGateService, Shared.Usage.PlanGenerationGateService>();
+
         // LLM fallback chain (camino crítico: chat slot-filling + builder preferences).
         // Timeouts cortos por provider: con varios providers en cadena el peor caso debe
         // caber en el presupuesto de ~20s del turno de chat.

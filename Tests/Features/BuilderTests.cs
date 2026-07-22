@@ -50,7 +50,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "Plan romántico de comida en Miami",
@@ -86,7 +86,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
             Content = new StringContent("Bad Gateway", Encoding.UTF8, "text/plain")
         };
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         // "restaurant" activa el keyword fallback con categoría food.
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
@@ -124,7 +124,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(geminiEnvelope));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "cafe por la mañana en Miami",
@@ -158,7 +158,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "romantic dinner in Wynwood",
@@ -204,7 +204,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "some food in Miami for my group",
@@ -232,7 +232,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
             Content = new StringContent("Bad Gateway", Encoding.UTF8, "text/plain")
         };
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "Hola",
@@ -267,7 +267,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
             Content = new StringContent("", Encoding.UTF8, "text/plain")
         };
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             // Mensaje SIN keywords de categories — todo lo que contenga categories tiene que venir del wizard.
@@ -316,7 +316,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "family trip with kids",
@@ -356,7 +356,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "family",
@@ -391,7 +391,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "a bit of everything",
@@ -442,7 +442,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(empty));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "x",
@@ -489,7 +489,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(conflict));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "family day out",
@@ -529,7 +529,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "weekend trip with my friends in Miami exploring food spots",
@@ -548,7 +548,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     [Fact]
     public async Task Chat_TrivialMessageNoContext_Returns400_InsufficientInput()
     {
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "x",
@@ -568,7 +568,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     [Fact]
     public async Task Chat_GreetingLongButNoContext_Returns400_InsufficientInput()
     {
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             // Long pero empieza con greeting → no cuenta como descriptivo.
@@ -583,7 +583,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     [Fact]
     public async Task Chat_OneWizardSignal_TrivialMessage_Returns400_InsufficientInput()
     {
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "x",
@@ -613,7 +613,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "x",
@@ -628,7 +628,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     {
         // Regla Pablo 2026-04-23: el chat NO sustituye al wizard, aunque sea descriptivo.
         // Siempre se requieren ≥3 señales wizard. Solo mensaje → 400.
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "romantic dinner in Wynwood with my wife",  // 40 chars pero sin wizard
@@ -658,7 +658,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             // Message omitido — es opcional.
@@ -686,7 +686,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             tripContext = new { city = Miami, days = 1, groupType = "couple", categories = new[] { "food" } },
@@ -701,7 +701,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     public async Task Chat_NoCategoriesNoInterests_BelowThreshold_Returns400()
     {
         // Sin categories ni subcategories, city + groupType = 2 señales → <3 → 400.
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             tripContext = new { city = Miami, groupType = "couple" },
@@ -771,7 +771,7 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
         };
         fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "food tour",

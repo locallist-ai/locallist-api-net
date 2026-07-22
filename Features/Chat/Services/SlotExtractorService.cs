@@ -2,6 +2,7 @@ using System.Text.Json;
 using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Chat.Services;
 
@@ -114,7 +115,7 @@ Extract into this schema (ONLY fill slots the user actually mentioned; never inv
 {{
   ""extracted"": {{
     ""city"": string | null,
-    ""days"": number (1-7) | null,
+    ""days"": number (1-14) | null,
     ""groupType"": one of [{string.Join(", ", AllowedGroupTypes.Select(g => $"\"{g}\""))}] | null,
     ""categories"": array of [{string.Join(", ", AllowedCategories.Select(c => $"\"{c}\""))}],
     ""budget"": one of [""budget"", ""moderate"", ""premium""] | null,
@@ -208,8 +209,10 @@ Rules:
         if (el.TryGetProperty("city", out var cityEl) && cityEl.ValueKind == JsonValueKind.String)
             s.City = Sanitize(cityEl.GetString());
 
+        // Cap global del catálogo (Plus 14 días); el techo free (3) lo aplica el gate
+        // de /chat/generate — aquí solo se acota lo que el LLM pueda inventar.
         if (el.TryGetProperty("days", out var daysEl) && daysEl.ValueKind == JsonValueKind.Number)
-            s.Days = Math.Clamp(daysEl.GetInt32(), 1, 7);
+            s.Days = Math.Clamp(daysEl.GetInt32(), 1, PlanGenerationGateService.PlusMaxDays);
 
         if (el.TryGetProperty("groupType", out var gtEl) && gtEl.ValueKind == JsonValueKind.String)
         {

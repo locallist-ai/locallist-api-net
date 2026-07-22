@@ -41,7 +41,7 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
             maxStopsPerDay = 3
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "3 días en Miami comida",
@@ -66,10 +66,11 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
     // ── Golden Set 2: Builder mobile contract shape ───────────────────────────
 
     [Fact]
-    public async Task Builder_Anonymous_PlanShape_MatchesMobileContract()
+    public async Task Builder_Authenticated_PlanShape_MatchesMobileContract()
     {
-        // Anonymous request must return all fields the mobile app reads:
-        // plan.id, plan.name, plan.city, plan.type, plan.durationDays, plan.isEphemeral=true
+        // F4: /builder/chat exige auth (el flujo anónimo devolvía plan efímero; ya no existe).
+        // The response must return all fields the mobile app reads:
+        // plan.id, plan.name, plan.city, plan.type, plan.durationDays (persisted, NOT ephemeral)
         // stops[i].placeId, stops[i].dayNumber, stops[i].orderIndex
         await SeedMiamiPlaces(3, "Food");
 
@@ -83,7 +84,7 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
             maxStopsPerDay = 3
         }));
 
-        var client = fixture.CreateClient(); // anonymous
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "día en miami solo",
@@ -101,7 +102,9 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
         Assert.Equal(Miami, plan.GetProperty("city").GetString());
         Assert.Equal("ai", plan.GetProperty("type").GetString());
         Assert.True(plan.TryGetProperty("durationDays", out _), "plan.durationDays missing");
-        Assert.True(plan.GetProperty("isEphemeral").GetBoolean(), "anonymous plan must be ephemeral");
+        // F4: la generación autenticada SIEMPRE persiste — nunca ephemeral.
+        Assert.False(plan.TryGetProperty("isEphemeral", out var eph) && eph.GetBoolean(),
+            "authenticated plan must not be ephemeral");
 
         // Stops contract
         var stops = body.GetProperty("stops").EnumerateArray().ToList();
@@ -230,7 +233,7 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
             groupType = "solo", planName = "Reykjavik Solo", maxStopsPerDay = 3
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "trip to Reykjavik",
@@ -266,7 +269,7 @@ public class GoldenSetTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDi
             maxStopsPerDay = 3
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "2 días miami pareja",

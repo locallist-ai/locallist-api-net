@@ -63,20 +63,71 @@ autorizado. Además, DoS de 2º orden (un atacante con el secreto floodeando `rc
 → un GET a la REST API de RC por cada uno → RC nos 429ea → lookups legítimos degradan a 503): se
 mitiga con el rate-limit por IP `RevenueCatWebhookLimit` (60/min, en `RateLimitingExtensions`).
 
-## PENDIENTE DE PRODUCTO — catálogo de features Plus
+## Catálogo Plus vs free (DECIDIDO 2026-07-13 — enforcement server-side activo)
 
-El guard `[RequirePro]` está **registrado y listo**, pero **no se aplica a ningún endpoint
-todavía**. Motivo: la definición de "qué es Plus vs free" es una decisión de producto que aún
-no está tomada. No se ha inventado aquí.
+Implementado en `Shared/Usage/` (`PlanGenerationGateService` + `UsageCounterService` sobre la
+tabla `usage_counters`, migración `AddUsageCounters`). Los gates corren en los DOS endpoints de
+generación (`POST /chat/generate` y `POST /builder/chat`), que desde F4 exigen `[Authorize]`
+(sin identidad no hay contador mensual posible; el funnel anónimo sigue vivo en `/chat/turn`).
 
-Se auditó el código en busca de una señal premium existente (`grep` de `Tier`/`pro`/`entitlement`
-sobre `Features/` y `Shared/`): el único uso de `Tier` es echo en `/account`, `/auth/*` y su firma
-en el JWT — **no hay ningún endpoint marcado como premium**. Por eso no se gateó ninguno.
+| Regla | Free | Plus (`users.tier = "pro"`) |
+|---|---|---|
+| Planes IA | 3/mes (mes natural UTC) | Ilimitado, cap antiabuso 50/día (UTC) |
+| Duración del plan | ≤ 3 días | ≤ 14 días (hard cap para todos) |
+| Multi-ciudad | no | sí (ver hueco abajo) |
+| Favoritos | 50 | ilimitado (ver hueco abajo) |
+| Planes guardados | 5 activos (filas en `plans` con `created_by`) | ilimitado |
+| Catálogo, edición manual, Follow online, `/chat/turn` | ilimitado | ilimitado |
 
-Cuando producto defina el catálogo, aplicar sobre los endpoints elegidos, encima de `[Authorize]`:
+### Errores estructurados (la app los consume para el upsell)
 
-```csharp
-[Authorize]
-[RequirePro]
-public async Task<IActionResult> AlgunEndpointPlus(...) { ... }
-```
+Orden de evaluación del gate (los rechazos de validación NO consumen contador):
+
+1. `401 {error:"Invalid token claims."}` — token válido pero user inexistente en DB.
+2. `400 {error:"duration_invalid", requestedDays, maxDays:14}` — hard cap global (también lo
+   corta la validación `[Range(1,14)]` de `TripContextDto.Days` con el 400 del framework).
+3. `403 {error:"duration_requires_plus", requestedDays, maxDays:3, plusMaxDays:14}` — free con
+   más de 3 días explícitos.
+4. `403 {error:"saved_plans_limit_reached", used, limit:5}` — free con ≥5 planes guardados
+   (`DELETE /plans/:id` libera hueco).
+5. `403 {error:"plan_limit_reached", used:3, limit:3, resetsAt:<inicio del mes siguiente UTC>}`
+   — free, contador mensual agotado.
+6. `429 {error:"daily_cap_reached", used:50, limit:50, resetsAt:<siguiente medianoche UTC>}` —
+   Plus, cap diario antiabuso. **Elegido 429, no 403**: es throttling, no falta de
+   entitlement — la app no debe pintar upsell a un usuario que YA es Plus.
+
+### Semántica del contador (elegida, con test en `PlanGateTests`)
+
+El permiso se consume cuando la generación **arranca** (último paso del gate, justo antes del
+pipeline LLM+RAG). A partir de ahí NO se devuelve aunque no salga plan (sin places, LLM caído):
+el coste ya se pagó y "devolver si falla" sería retry-abuse barato contra el límite mensual.
+Los paths que no generan no consumen: idempotencia de `/chat/generate` (releer plan existente),
+coverage (`city_unsupported`), validación de input y los rechazos 400/403 del propio gate.
+
+### Atomicidad
+
+`UsageCounterService.TryConsumeAsync` = `INSERT … ON CONFLICT … DO UPDATE SET count = count+1
+WHERE count < limit` en un único statement: el row-lock de Postgres serializa los increments y
+dos requests concurrentes no pueden gastar el mismo permiso (tests de concurrencia a nivel
+servicio y a nivel endpoint). PK compuesta `(user_id, feature, period_start)`; features:
+`ai_plans_month` (free) y `ai_plans_day` (Plus) — keys separadas porque el día 1 del mes ambos
+periodos comparten fecha. FK a `users` con cascade (GDPR); el reset-por-reregistro que permite
+el borrado de cuenta queda acotado por el techo horario por IP y el throttle de `/auth/register`.
+
+### Días derivados del texto libre
+
+El gate valida los días EXPLÍCITOS del request; los que el LLM derive del mensaje se acotan con
+el clamp `prefs.Days ≤ maxDays(tier)` dentro de `PlanGenerationService.GenerateAsync` — ningún
+camino produce un plan más largo que el techo del tier.
+
+### Huecos documentados (NO inventados)
+
+- **Favoritos (50 free)**: el backend no tiene modelo de favoritos (solo
+  `UserProfile.FavoriteCity`, que es otra cosa). El límite se implementará con el modelo.
+- **Multi-ciudad (solo Plus)**: el request es mono-ciudad por construcción
+  (`TripContextDto.City`/`ChatSlots.City`/`Plan.City` escalares) — hoy no hay nada que validar.
+  Código de error reservado para cuando exista: `403 {error:"multicity_requires_plus"}`.
+- **Follow offline (solo Plus)**: gate app-side; el backend solo expone el tier (ya existía).
+
+El guard genérico `[RequirePro]` sigue disponible para endpoints binarios (todo-o-nada); los
+gates de generación usan el servicio porque necesitan contador + errores estructurados.

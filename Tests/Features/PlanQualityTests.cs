@@ -52,7 +52,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             maxStopsPerDay = 4,
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "un buen día por la ciudad",
@@ -94,7 +94,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             maxStopsPerDay = 3,
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "food tour",
@@ -142,7 +142,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             maxStopsPerDay = 3,
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "dos días de museos",
@@ -205,7 +205,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             maxStopsPerDay = 3,
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "best eats in town",
@@ -251,7 +251,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             maxStopsPerDay = 4,
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "high end dining",
@@ -299,7 +299,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             tripContext = new { city, days = 2, groupType = "couple", categories = new[] { "food" } },
         };
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res1 = await client.PostAsJsonAsync("/builder/chat", request);
         var res2 = await client.PostAsJsonAsync("/builder/chat", request);
         Assert.Equal(HttpStatusCode.OK, res1.StatusCode);
@@ -341,7 +341,7 @@ public class PlanQualityTests(ApiFixture fixture) : IClassFixture<ApiFixture>, I
             maxStopsPerDay = 3,
         }));
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var res = await client.PostAsJsonAsync("/builder/chat", new
         {
             message = "escapada gastronómica",

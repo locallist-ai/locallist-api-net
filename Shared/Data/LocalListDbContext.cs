@@ -22,6 +22,7 @@ public class LocalListDbContext : DbContext
     public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
     public DbSet<Subcategory> Subcategories { get; set; } = null!;
     public DbSet<BillingEvent> BillingEvents { get; set; } = null!;
+    public DbSet<UsageCounter> UsageCounters { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -230,5 +231,18 @@ public class LocalListDbContext : DbContext
 
         modelBuilder.Entity<BillingEvent>()
             .HasIndex(be => new { be.UserId, be.EventTimestampMs });
+
+        // Usage counters (F4 — gates Plus). PK compuesta = target del ON CONFLICT del
+        // upsert atómico de UsageCounterService. FK con cascade: DELETE /account
+        // arrastra los contadores (GDPR); el reset-por-reregistro que eso permite
+        // queda acotado por el techo horario por IP de los endpoints medidos.
+        modelBuilder.Entity<UsageCounter>()
+            .HasKey(uc => new { uc.UserId, uc.Feature, uc.PeriodStart });
+
+        modelBuilder.Entity<UsageCounter>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(uc => uc.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }

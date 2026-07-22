@@ -10,6 +10,7 @@ using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -31,32 +32,43 @@ public class BuilderController : ControllerBase
     private readonly SchedulingService _scheduler;
     private readonly ILogger<BuilderController> _logger;
     private readonly PostHogService _posthog;
+    private readonly IPlanGenerationGateService _planGate;
 
     public BuilderController(
         LocalListDbContext db,
         PlanGenerationService planGen,
         SchedulingService scheduler,
         ILogger<BuilderController> logger,
-        PostHogService posthog)
+        PostHogService posthog,
+        IPlanGenerationGateService planGate)
     {
         _db = db;
         _planGen = planGen;
         _scheduler = scheduler;
         _logger = logger;
         _posthog = posthog;
+        _planGate = planGate;
     }
 
+    /// <summary>
+    /// F4: auth requerida — sin identidad no hay contador mensual posible. El gate del
+    /// catálogo Plus (PlanGenerationGateService) corre tras la validación de input y
+    /// ANTES de arrancar el pipeline: valida tier fresco de DB, duración y cupo de
+    /// guardados, y consume el contador (3/mes free · 50/día Plus). Una vez consumido,
+    /// el permiso no se devuelve aunque el LLM falle (ver README de Billing).
+    /// </summary>
     [HttpPost("chat")]
-    [AllowAnonymous]
+    [Authorize]
     [EnableRateLimiting("BuilderLimit")]
     public async Task<IActionResult> GeneratePlan([FromBody] BuilderChatRequest request, CancellationToken ct)
     {
-        var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
-        Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
+        Guid? userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
+            return Unauthorized(new { error = "Invalid token claims." });
 
         _logger.LogInformation(
-            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} categories={Categories} budget={Budget} msgLen={MsgLen}",
-            isAnonymous,
+            "Builder: request userId={UserId} city={City} days={Days} groupType={GroupType} categories={Categories} budget={Budget} msgLen={MsgLen}",
+            userId,
             request.TripContext?.City ?? "(unset)",
             request.TripContext?.Days?.ToString() ?? "(unset)",
             request.TripContext?.GroupType ?? "(unset)",
@@ -83,13 +95,18 @@ public class BuilderController : ControllerBase
             });
         }
 
+        // Gate del catálogo Plus — último check antes de arrancar (y pagar) el pipeline.
+        var gate = await _planGate.CheckAndConsumeAsync(userId.Value, request.TripContext?.Days, ct);
+        if (!gate.Allowed)
+            return StatusCode(gate.Rejection!.StatusCode, gate.Rejection.Body);
+
         using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         llmBudget.CancelAfter(GenerateLlmBudget);
 
         try
         {
             var lang = LanguageAccessor.ResolveRequestLanguage(Request);
-            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, llmBudget.Token);
+            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, gate.MaxDays, llmBudget.Token);
 
             if (result == null)
             {
@@ -118,29 +135,6 @@ public class BuilderController : ControllerBase
             }
 
             var planStopsData = result.Schedule.Stops;
-
-            if (isAnonymous)
-            {
-                return Ok(new
-                {
-                    plan = new
-                    {
-                        Id = Guid.NewGuid(),
-                        Name = result.PlanName,
-                        City = result.City,
-                        Type = "ai",
-                        Description = result.PlanDescription,
-                        DurationDays = result.Prefs.Days,
-                        TripContext = request.TripContext,
-                        IsPublic = false,
-                        IsEphemeral = true
-                    },
-                    stops = _scheduler.ResolveStopPlaces(planStopsData, result.FilteredPlaces),
-                    message = $"Created a {result.Prefs.Days}-day plan with {planStopsData.Count} stops!",
-                    warnings = result.Schedule.Warnings,
-                    appliedRefinements = result.Schedule.AppliedRefinements
-                });
-            }
 
             var plan = new Plan
             {

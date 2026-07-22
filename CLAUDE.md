@@ -11,7 +11,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Cadena de extracción (chat slot-filling + builder preferences) en `gemini-3.1-flash-lite` (primer provider de `Llm:Providers`). Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. Traducciones/descripciones/embeddings siguen su path Gemini propio (fuera de la cadena). |
-| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. `UseRateLimiter` va después de `UseAuthentication`. |
+| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** (desde F4 exigen `[Authorize]`: el bucket anon solo acota spam pre-401, nunca llega a Gemini) techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. `UseRateLimiter` va después de `UseAuthentication`. |
 
 ## Running Locally
 
@@ -65,7 +65,7 @@ Required User Secrets / Environment Variables:
 - `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Verificado antes de deserializar el body (fail-closed 503 si falta). También legible como `RevenueCat__WebhookAuthToken`.
 - `REVENUECAT_REST_API_KEY` — **requerido** para conceder tier. Secret API key (sk_...) de RC para verificar el suscriptor. Distinta del secreto del webhook. Sin ella no se concede upgrade (webhook 503, RC reintenta). También `RevenueCat__RestApiKey`.
 - `RevenueCat__PlusEntitlementId` — id del entitlement que mapea a tier `pro` (default `plus`).
-- Enforcement: `[RequirePro]` (`Shared/Auth/`) re-consulta el tier en la DB, NO el claim `tier` del JWT. Registrado y listo, **aún sin aplicar a ningún endpoint** — el catálogo "Plus vs free" es decisión de producto no tomada (ver `Features/Billing/README.md`).
+- Enforcement: catálogo Plus vs free DECIDIDO (2026-07-13) y aplicado server-side. `PlanGenerationGateService` (`Shared/Usage/`) gatea `POST /chat/generate` y `POST /builder/chat` (ambos `[Authorize]` desde F4): 3 planes IA/mes free (contador atómico en `usage_counters`, upsert condicional) · cap antiabuso 50/día Plus (429) · duración ≤3 días free / ≤14 Plus (hard cap global + clamp de días derivados por LLM) · ≤5 planes guardados free. Tier SIEMPRE fresco de DB. Errores estructurados para el upsell de la app (`plan_limit_reached`, `duration_requires_plus`, `saved_plans_limit_reached`, `daily_cap_reached`) — detalle y huecos (favoritos sin modelo, multi-ciudad imposible por construcción) en `Features/Billing/README.md`. `[RequirePro]` (`Shared/Auth/`) sigue disponible para gates binarios.
 
 **Fase 3 — Video import (pendiente, sin plan activo)**
 - Sin Apify. Arquitectura prevista: video file → Gemini multimodal File API directo.
@@ -190,7 +190,7 @@ LocalList.API.NET/
     │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain
     │   ├── AdminClaimsExtensions.cs     # Extensions para claims admin
     │   ├── AuthSchemes.cs              # Constantes de nombre de scheme
-    │   ├── RequireProAttribute.cs       # [RequirePro] — gate de tier premium (aún sin aplicar; catálogo Plus = decisión de producto)
+    │   ├── RequireProAttribute.cs       # [RequirePro] — gate binario de tier (los endpoints de generación usan PlanGenerationGateService)
     │   ├── RequireProAuthorizationFilter.cs  # Valida tier RE-CONSULTANDO la DB (no el claim `tier` del JWT, vida 15 min)
     │   └── FirebaseUserExtensions.cs    # GetFirebaseUid(), GetEmail(), GetUserIdAsync()
     ├── Constants/
@@ -217,6 +217,7 @@ LocalList.API.NET/
     │       ├── ChatSession.cs           # Sesión de chat slot-filling
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
     │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
+    │       ├── UsageCounter.cs          # Contador de uso (user, feature, period_start) — increment atómico vía UsageCounterService
     │       └── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
     ├── I18n/
     │   └── LanguageAccessor.cs         # Resolución de idioma por Accept-Language / query param
@@ -247,6 +248,11 @@ LocalList.API.NET/
     │   ├── AuthenticationExtensions.cs     # AddJwtAuthentication (multi-scheme JWT + app auth services)
     │   ├── CorsExtensions.cs               # AddCorsPolicy
     │   └── RateLimitingExtensions.cs       # AddRateLimitingPolicies
+    ├── Usage/                          # F4 — gates del catálogo Plus (cross-slice: Chat + Builder)
+    │   ├── IUsageCounterService.cs      # TryConsumeAsync/GetUsedAsync — consumo atómico por (user, feature, periodo)
+    │   ├── UsageCounterService.cs       # INSERT … ON CONFLICT … WHERE count < limit en 1 statement (sin ventana RMW)
+    │   ├── IPlanGenerationGateService.cs # CheckAndConsumeAsync + PlanGateResult/PlanGateRejection
+    │   └── PlanGenerationGateService.cs # Catálogo Plus: 3/mes free, 50/día pro, duración por tier, cupo guardados
     └── Taxonomy/
         ├── ITaxonomyService.cs
         ├── PlaceTaxonomy.cs            # Árbol de categorías/subcategorías
@@ -274,8 +280,8 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Billing | `POST /webhooks/revenuecat` (anonymous, verifica header `Authorization` vs secreto; escribe `User.Tier` idempotente + reorder-safe) |
 | Auth (admin / Firebase) | `POST /auth/sync` (Firebase token required) |
 | Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
-| Builder | `POST /builder/chat` |
-| Chat | `POST /chat/turn`, `POST /chat/generate`, `DELETE /chat/session/:id` |
+| Builder | `POST /builder/chat` (auth requerida desde F4; gates del catálogo Plus) |
+| Chat | `POST /chat/turn` (anonymous), `POST /chat/generate` (auth requerida desde F4; gates del catálogo Plus), `DELETE /chat/session/:id` |
 | Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Places | `GET /places/`, `GET /places/:id` |

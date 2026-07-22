@@ -353,7 +353,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// Convenience overload: seeds a user with the given ID and firebase_uid, returns an authenticated client.
     /// </summary>
     public async Task<HttpClient> CreateAuthenticatedClientWithUser(
-        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user")
+        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user",
+        string tier = "free")
     {
         var db = GetDbContext();
         var existing = await db.Users.FindAsync(userId);
@@ -364,11 +365,24 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 Id = userId,
                 Email = email,
                 FirebaseUid = firebaseUid,
-                Role = role
+                Role = role,
+                Tier = tier
             });
             await db.SaveChangesAsync();
         }
         return CreateAuthenticatedClient(userId, firebaseUid, email);
+    }
+
+    /// <summary>
+    /// F4: /builder/chat y /chat/generate exigen auth. Atajo para tests de generación que
+    /// no testean el gate: user App-auth NUEVO por llamada. Tier por defecto "pro" para no
+    /// chocar con el límite free de 3 planes/mes ni el cap de duración (el gate en sí se
+    /// testea aparte en PlanGateTests con users free explícitos).
+    /// </summary>
+    public Task<HttpClient> CreateGenerationClientAsync(string tier = "pro")
+    {
+        var uid = Guid.NewGuid();
+        return CreateAppAuthenticatedClientWithUser(uid, $"gen-{uid}@test.com", tier);
     }
 
     /// <summary>
@@ -378,7 +392,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// los tests de ese bucket deben usar este helper.
     /// </summary>
     public async Task<HttpClient> CreateAppAuthenticatedClientWithUser(
-        Guid userId, string email)
+        Guid userId, string email, string tier = "free")
     {
         var db = GetDbContext();
         var existing = await db.Users.FindAsync(userId);
@@ -389,13 +403,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 Id = userId,
                 Email = email,
                 FirebaseUid = "app-" + userId,
-                Role = "user"
+                Role = "user",
+                Tier = tier
             });
             await db.SaveChangesAsync();
         }
         var client = CreateClient();
+        // OJO: el claim tier del token NO decide nada server-side (los gates releen DB);
+        // se emite con el tier del user solo por realismo.
         client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email));
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email, tier));
         return client;
     }
 

@@ -6,7 +6,9 @@ public class TripContextDto
 {
     [MaxLength(20)]
     public string? GroupType { get; set; }
-    [Range(1, 7)]
+    // Hard cap global del catálogo (F4): Plus llega a 14 días; el gate por tier
+    // (free ≤ 3) se aplica server-side en PlanGenerationGateService, no aquí.
+    [Range(1, 14)]
     public int? Days { get; set; }
     [MaxLength(100)]
     public string? City { get; set; }
