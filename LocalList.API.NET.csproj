@@ -15,6 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.101.3" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" />
     <!-- Override de la transitiva Microsoft.OpenApi (AspNetCore.OpenApi la trae en 2.0.0, HIGH GHSA-v5pm-xwqc-g5wc / CVE-2026-49451, DoS por circular schema refs). Parcheada en 2.7.5+. -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.7.6" />
@@ -29,6 +30,7 @@
     <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
     <PackageReference Include="Serilog.Sinks.Async" Version="2.1.0" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="9.6.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
   </ItemGroup>
 
 </Project>

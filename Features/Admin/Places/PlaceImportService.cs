@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Photos;
 using LocalList.API.NET.Shared.Taxonomy;
 using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
 
@@ -21,6 +22,7 @@ public class PlaceImportService
     private readonly EmbeddingService _embeddings;
     private readonly IGooglePlacesService _googlePlaces;
     private readonly ITaxonomySvc _taxonomy;
+    private readonly IPhotoRehostService _photoRehost;
     private readonly ILogger<PlaceImportService> _logger;
     private readonly TimeProvider _clock;
 
@@ -30,6 +32,7 @@ public class PlaceImportService
         EmbeddingService embeddings,
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,
+        IPhotoRehostService photoRehost,
         ILogger<PlaceImportService> logger,
         TimeProvider clock)
     {
@@ -38,6 +41,7 @@ public class PlaceImportService
         _embeddings = embeddings;
         _googlePlaces = googlePlaces;
         _taxonomy = taxonomy;
+        _photoRehost = photoRehost;
         _logger = logger;
         _clock = clock;
     }
@@ -332,6 +336,10 @@ public class PlaceImportService
                 continue;
             }
 
+            // Rehost a R2 ANTES de persistir: Place.Photos solo debe contener URLs de R2.
+            // Solo se rehostean los requests que pasan dedup (no se sube nada para skips).
+            var photos = await _photoRehost.RehostForIngestAsync(req.Photos, req.Name, ct);
+
             var place = new Place
             {
                 Id = Guid.NewGuid(),
@@ -347,7 +355,7 @@ public class PlaceImportService
                 SuitableFor = req.SuitableFor,
                 BestTimes = req.BestTimes,
                 PriceRange = req.PriceRange?.Trim(),
-                Photos = req.Photos,
+                Photos = photos,
                 GooglePlaceId = req.GooglePlaceId?.Trim(),
                 GoogleRating = req.GoogleRating,
                 GoogleReviewCount = req.GoogleReviewCount,

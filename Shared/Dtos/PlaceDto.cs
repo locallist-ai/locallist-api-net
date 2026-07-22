@@ -1,5 +1,6 @@
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Photos;
 
 namespace LocalList.API.NET.Shared.Dtos;
 
@@ -60,7 +61,9 @@ public record PlaceDto(
             bestTimes,
             bestTimes?.FirstOrDefault(),
             p.PriceRange,
-            p.Photos,
+            // Defensa en profundidad: ninguna URL con key= (Google Places) sale por el DTO
+            // público aunque quede alguna persistida (p. ej. backfill pendiente o fallido).
+            PhotoUrls.Sanitize(p.Photos),
             p.GooglePlaceId,
             p.GoogleRating,
             p.GoogleReviewCount,

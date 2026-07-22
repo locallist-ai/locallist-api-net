@@ -624,7 +624,8 @@ public class SchedulingService
                         Neighborhood: place.Neighborhood,
                         WhyThisPlace: place.WhyThisPlace,
                         PriceRange: place.PriceRange,
-                        Photos: place.Photos,
+                        // Misma defensa que PlaceDto: nunca exponer URLs con key= al cliente.
+                        Photos: LocalList.API.NET.Shared.Photos.PhotoUrls.Sanitize(place.Photos),
                         Latitude: place.Latitude,
                         Longitude: place.Longitude)
                     : null);

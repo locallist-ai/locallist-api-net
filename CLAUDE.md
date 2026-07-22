@@ -48,6 +48,12 @@ Required User Secrets / Environment Variables:
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
 
+**Fotos → R2 (Cloudflare, S3 API)**
+- `R2__AccountId`, `R2__AccessKeyId`, `R2__SecretAccessKey` — credenciales del bucket. Sin ellas el rehost de fotos degrada graceful (se persiste la URL original + warning), patrón Mapbox/Klaviyo.
+- `R2__Bucket` — opcional, default `locallist-images`. `R2__PublicUrl` — opcional, default el dominio `pub-….r2.dev` público del bucket.
+- Con config activa, la ingesta (create/bulk/import-from-urls) rehostea cada foto server-side (descarga → webp máx 1200px vía ImageSharp → upload S3) y `Place.Photos` solo persiste URLs de R2; una URL de Google con `key=` que falle el rehost se descarta (nunca se persiste). `POST /admin/places/backfill-photos` migra lo existente y devuelve censo por dominio. Defensa a nivel DTO: `PlaceDto`/`ResolvedPlaceDto` filtran cualquier URL con `key=` (`PhotoUrls.Sanitize`).
+- Pendiente decisión de Pablo: ToS de Google Places sobre retención de fotos — la detección por fuente está centralizada en `Shared/Photos/PhotoUrls.cs` por si hay que tratar Google distinto.
+
 **Routing (Mapbox)**
 - `Mapbox__AccessToken` — opcional. Si no está, routing se deshabilita gracefully (stops sin `travelFromPrevious`).
 
@@ -206,6 +212,13 @@ LocalList.API.NET/
     │   ├── AiCallDiagnostics.cs        # DTO diagnósticos de llamadas Gemini (tokens, coste, latencia)
     │   ├── GeminiCostCalculator.cs     # Cálculo de coste por tokens
     │   └── PiiRedactor.cs              # Redacción de PII en logs y excerpts
+    ├── Photos/                         # Rehost de fotos a R2 (ingesta + backfill)
+    │   ├── R2Options.cs                 # Config binding sección R2 (credenciales, bucket, public url)
+    │   ├── PhotoUrls.cs                 # Clasificación por dominio + sanitización key= (defensa DTO)
+    │   ├── IR2ObjectStore.cs            # Abstracción del bucket (mockeable en tests; la DB no)
+    │   ├── R2ObjectStore.cs             # Impl real: AWSSDK.S3 → endpoint R2 de la cuenta
+    │   ├── IPhotoRehostService.cs       # Contrato + outcomes (AlreadyHosted/NotConfigured/Rehosted/Failed)
+    │   └── PhotoRehostService.cs        # Descarga → webp 1200px (ImageSharp) → upload → URL pública
     ├── PostHog/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
     ├── Dtos/
@@ -264,7 +277,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Profile | `GET /me/profile`, `DELETE /me/profile` |
 | Taxonomy | `GET /taxonomy` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
-| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
+| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/backfill-photos` (migra fotos a R2, idempotente, censo por dominio en la respuesta), `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
 | Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
 | Admin — Analytics | `GET /admin/chat-turns`, `GET /admin/chat-turns/stats`, `GET /admin/plan-metrics`, `GET /admin/plan-metrics/stats` |
 | Admin — Cities | `DELETE /admin/cities/:id` |

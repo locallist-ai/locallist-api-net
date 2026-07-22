@@ -236,6 +236,29 @@ public record ImportRowResult(
     string? Error
 );
 
+/// <summary>Fila del censo por dominio de POST /admin/places/backfill-photos.</summary>
+/// <param name="Photos">Fotos persistidas en este dominio ANTES de este run (censo global).</param>
+/// <param name="Migrated">Fotos de este dominio migradas a R2 en este run.</param>
+/// <param name="Failed">Fotos de este dominio cuyo rehost falló en este run (conservan la URL original).</param>
+public record PhotoDomainCensus(int Photos, int Migrated, int Failed);
+
+/// <summary>
+/// Respuesta de POST /admin/places/backfill-photos. <c>Census</c> siempre incluye los
+/// cuatro buckets (places.googleapis.com / r2.dev / wanderlog.com / other) aunque estén
+/// a cero; <c>OtherDomains</c> desglosa por host real las fotos del bucket "other".
+/// </summary>
+public record BackfillPhotosResponse(
+    bool R2Configured,
+    bool DryRun,
+    int TotalPlacesWithPhotos,
+    int CandidatePlaces,
+    int ProcessedPlaces,
+    int UpdatedPlaces,
+    int RemainingPlaces,
+    Dictionary<string, PhotoDomainCensus> Census,
+    Dictionary<string, int> OtherDomains
+);
+
 public class GoogleSearchRequest
 {
     [Required, StringLength(200, MinimumLength = 1)]

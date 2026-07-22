@@ -28,6 +28,7 @@ using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data;
+using LocalList.API.NET.Shared.Photos;
 using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.Tests;
@@ -63,6 +64,23 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// By default all methods return null (simulates missing API key).
     /// </summary>
     public FakeGooglePlacesService FakeGooglePlaces { get; } = new();
+
+    /// <summary>
+    /// Fake in-memory de <see cref="IR2ObjectStore"/>. Por defecto NO configurado
+    /// (espejo de prod sin credenciales R2 → rehost degrada graceful). Los tests de
+    /// rehost/backfill activan <see cref="FakeR2ObjectStore.Configured"/> y verifican
+    /// los objetos subidos en <see cref="FakeR2ObjectStore.Objects"/>.
+    /// La DB nunca se mockea; el cliente S3/R2 sí puede (política del repo).
+    /// </summary>
+    public FakeR2ObjectStore FakeR2 { get; } = new();
+
+    /// <summary>
+    /// Handler que intercepta las descargas de fotos de <see cref="PhotoRehostService"/>.
+    /// Por defecto devuelve un JPEG válido de 1600x900 (fuerza el resize a 1200px);
+    /// los tests pueden sobreescribir <see cref="FakePhotoHandler.Responder"/> para
+    /// simular 404s o bytes corruptos.
+    /// </summary>
+    public FakePhotoHandler FakePhotos { get; } = new();
 
     /// <summary>
     /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
@@ -239,6 +257,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             var googlePlacesDesc = services.Where(d => d.ServiceType == typeof(IGooglePlacesService)).ToList();
             foreach (var d in googlePlacesDesc) services.Remove(d);
             services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
+
+            // R2: sustituye el object store real por el fake in-memory y atrapa las
+            // descargas de fotos del PhotoRehostService con FakePhotos.
+            services.RemoveAll<IR2ObjectStore>();
+            services.AddSingleton<IR2ObjectStore>(FakeR2);
+            services.AddHttpClient<IPhotoRehostService, PhotoRehostService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakePhotos);
 
             // Disable rate limiting in tests (default). Las suites que testean el propio
             // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
@@ -530,6 +555,71 @@ public class FakeGooglePlacesService : IGooglePlacesService
         SearchResponder = null;
         DetailsByPlaceId.Clear();
         ResolvedByUrl.Clear();
+    }
+}
+
+/// <summary>
+/// Fake in-memory de <see cref="IR2ObjectStore"/> (el cliente S3/R2 puede mockearse; la DB no).
+/// <see cref="Configured"/> arranca en false — espejo de prod sin credenciales.
+/// </summary>
+public class FakeR2ObjectStore : IR2ObjectStore
+{
+    public bool Configured { get; set; }
+
+    public bool IsConfigured => Configured;
+
+    /// <summary>key → bytes subidos (webp reencodado por PhotoRehostService).</summary>
+    public ConcurrentDictionary<string, byte[]> Objects { get; } = new();
+
+    public Task UploadAsync(string key, byte[] content, string contentType, CancellationToken ct)
+    {
+        if (!Configured) throw new InvalidOperationException("FakeR2ObjectStore not configured.");
+        Objects[key] = content;
+        return Task.CompletedTask;
+    }
+
+    public void Reset()
+    {
+        Configured = false;
+        Objects.Clear();
+    }
+}
+
+/// <summary>
+/// Handler HTTP fake para las descargas de fotos de <see cref="PhotoRehostService"/>.
+/// Por defecto responde 200 con un JPEG real de 1600x900 generado con ImageSharp
+/// (obliga al resize a 1200px). <see cref="Responder"/> permite forzar 404, bytes
+/// corruptos, etc. por URL.
+/// </summary>
+public class FakePhotoHandler : HttpMessageHandler
+{
+    public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
+
+    public List<HttpRequestMessage> Calls { get; } = new();
+
+    private static readonly Lazy<byte[]> DefaultJpeg = new(() => CreateJpeg(1600, 900));
+
+    public static byte[] CreateJpeg(int width, int height)
+    {
+        using var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(width, height);
+        using var ms = new MemoryStream();
+        SixLabors.ImageSharp.ImageExtensions.SaveAsJpeg(image, ms);
+        return ms.ToArray();
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        lock (Calls) { Calls.Add(request); }
+
+        if (Responder is { } responder)
+            return Task.FromResult(responder(request));
+
+        var ok = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(DefaultJpeg.Value)
+        };
+        ok.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+        return Task.FromResult(ok);
     }
 }
 

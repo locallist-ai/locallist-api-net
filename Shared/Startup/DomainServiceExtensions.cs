@@ -8,6 +8,7 @@ using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Photos;
 using LocalList.API.NET.Shared.PostHog;
 using LocalList.API.NET.Shared.Routing;
 using Microsoft.Extensions.Http.Resilience;
@@ -62,6 +63,17 @@ public static class DomainServiceExtensions
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         services.AddScoped<RouteResolver>();
         services.AddScoped<PlaceImportService>();
+
+        // Fotos → R2: rehost server-side en ingesta + backfill. Sin credenciales R2 el
+        // servicio degrada graceful (persiste la URL original + warning), patrón Mapbox/Klaviyo.
+        services.Configure<R2Options>(configuration.GetSection(R2Options.SectionName));
+        services.AddSingleton<IR2ObjectStore, R2ObjectStore>();
+        services.AddHttpClient<IPhotoRehostService, PhotoRehostService>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(20);
+            c.MaxResponseContentBufferSize = PhotoRehostService.MaxDownloadBytes;
+        });
+
         services.AddScoped<ISegmentResolver>(sp => sp.GetRequiredService<RouteResolver>());
         services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
         services.AddScoped<IEmailMarketingService, KlaviyoService>();

@@ -7,6 +7,7 @@ using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Photos;
 using LocalList.API.NET.Shared.Search;
 using LocalList.API.NET.Shared.Taxonomy;
 using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
@@ -28,6 +29,7 @@ public class AdminPlacesController : ControllerBase
     private readonly IGooglePlacesService _googlePlaces;
     private readonly ITaxonomySvc _taxonomy;
     private readonly PlaceImportService _importSvc;
+    private readonly IPhotoRehostService _photoRehost;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -43,7 +45,8 @@ public class AdminPlacesController : ControllerBase
         IDescriptionGeneratorService descGen,
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,
-        PlaceImportService importSvc)
+        PlaceImportService importSvc,
+        IPhotoRehostService photoRehost)
     {
         _db = db;
         _logger = logger;
@@ -54,6 +57,7 @@ public class AdminPlacesController : ControllerBase
         _googlePlaces = googlePlaces;
         _taxonomy = taxonomy;
         _importSvc = importSvc;
+        _photoRehost = photoRehost;
     }
 
     [HttpGet("cities")]
@@ -165,6 +169,10 @@ public class AdminPlacesController : ControllerBase
         var userId = await User.GetUserIdAsync(_db, ct);
         var now = _clock.GetUtcNow();
 
+        // Rehost a R2 antes de persistir — Place.Photos solo debe contener URLs de R2
+        // (sin config R2 degrada graceful y conserva las originales).
+        var photos = await _photoRehost.RehostForIngestAsync(request.Photos, request.Name, ct);
+
         var place = new Place
         {
             Id = Guid.NewGuid(),
@@ -180,7 +188,7 @@ public class AdminPlacesController : ControllerBase
             SuitableFor = request.SuitableFor,
             BestTimes = request.BestTimes,
             PriceRange = request.PriceRange?.Trim(),
-            Photos = request.Photos,
+            Photos = photos,
             GooglePlaceId = request.GooglePlaceId?.Trim(),
             GoogleRating = request.GoogleRating,
             GoogleReviewCount = request.GoogleReviewCount,
@@ -261,7 +269,9 @@ public class AdminPlacesController : ControllerBase
         if (request.SuitableFor != null) place.SuitableFor = request.SuitableFor;
         if (request.BestTimes != null) place.BestTimes = request.BestTimes;
         if (request.PriceRange != null) place.PriceRange = request.PriceRange.Trim();
-        if (request.Photos != null) place.Photos = request.Photos;
+        // place.Name ya refleja el rename si venía en el request (se aplica arriba).
+        if (request.Photos != null)
+            place.Photos = await _photoRehost.RehostForIngestAsync(request.Photos, place.Name, ct);
         if (request.GooglePlaceId != null) place.GooglePlaceId = request.GooglePlaceId.Trim();
         if (request.GoogleRating.HasValue) place.GoogleRating = request.GoogleRating;
         if (request.GoogleReviewCount.HasValue) place.GoogleReviewCount = request.GoogleReviewCount;
@@ -475,6 +485,146 @@ public class AdminPlacesController : ControllerBase
             skipped = places.Count - backfilled - failed,
             total = places.Count
         });
+    }
+
+    /// <summary>
+    /// Migra a R2 las fotos persistidas cuyo dominio no sea ya el público de R2
+    /// (places.googleapis.com con key, hotlinks a wanderlog, etc.). Idempotente y
+    /// re-lanzable: las fotos ya en R2 se saltan y los fallos conservan la URL original
+    /// para el siguiente intento (PlaceDto filtra cualquier URL con key= hacia el cliente).
+    /// La respuesta incluye el censo por dominio (fotos existentes / migradas / fallidas).
+    /// Sin credenciales R2 devuelve solo el censo (r2Configured=false), sin tocar nada.
+    /// </summary>
+    [HttpPost("backfill-photos")]
+    public async Task<IActionResult> BackfillPhotos(
+        [FromQuery] int limit = 20,
+        [FromQuery] bool dryRun = false,
+        CancellationToken ct = default)
+    {
+        // Cada foto implica descarga + reencode + upload (~1-2s). El default 20 mantiene la
+        // request bajo el proxy timeout de 40s de Railway (mismo criterio que backfill-descriptions);
+        // el endpoint es re-lanzable hasta que remainingPlaces=0.
+        limit = Math.Clamp(limit, 1, 200);
+
+        var publicHost = _photoRehost.PublicHost;
+
+        // Censo global (todas las fotos persistidas, no solo la página procesada) — es el
+        // dato que espera la sesión hub en lugar de un pull manual de DB.
+        var allWithPhotos = (await _db.Places.AsNoTracking()
+                .Where(p => p.Photos != null)
+                .Select(p => new { p.Id, p.CreatedAt, p.Photos })
+                .ToListAsync(ct))
+            .Where(x => x.Photos is { Count: > 0 })
+            .ToList();
+
+        var censusPhotos = NewBucketCounter();
+        var otherDomains = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var url in allWithPhotos.SelectMany(x => x.Photos!))
+        {
+            var bucket = PhotoUrls.DomainBucket(url, publicHost);
+            censusPhotos[bucket]++;
+            if (bucket == PhotoUrls.BucketOther)
+            {
+                var host = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : "invalid-url";
+                otherDomains[host] = otherDomains.GetValueOrDefault(host) + 1;
+            }
+        }
+
+        var candidates = allWithPhotos
+            .Where(x => x.Photos!.Any(url => PhotoUrls.DomainBucket(url, publicHost) != PhotoUrls.BucketR2))
+            .OrderBy(x => x.CreatedAt)
+            .ToList();
+
+        var migrated = NewBucketCounter();
+        var failed = NewBucketCounter();
+        int processedPlaces = 0, updatedPlaces = 0;
+
+        if (!dryRun && _photoRehost.IsConfigured && candidates.Count > 0)
+        {
+            var pageIds = candidates.Take(limit).Select(x => x.Id).ToList();
+            var tracked = await _db.Places
+                .Where(p => pageIds.Contains(p.Id))
+                .ToListAsync(ct);
+            processedPlaces = tracked.Count;
+            var now = _clock.GetUtcNow();
+
+            foreach (var chunk in tracked.Chunk(10))
+            {
+                foreach (var place in chunk)
+                {
+                    if (ct.IsCancellationRequested) break;
+                    if (place.Photos is not { Count: > 0 }) continue;
+
+                    var changed = false;
+                    var newPhotos = new List<string>(place.Photos!.Count);
+                    foreach (var url in place.Photos!)
+                    {
+                        var bucket = PhotoUrls.DomainBucket(url, publicHost);
+                        if (bucket == PhotoUrls.BucketR2)
+                        {
+                            newPhotos.Add(url);
+                            continue;
+                        }
+
+                        var result = await _photoRehost.RehostAsync(url, place.Name, ct);
+                        if (result.Outcome == PhotoRehostOutcome.Rehosted)
+                        {
+                            newPhotos.Add(result.Url);
+                            migrated[bucket]++;
+                            changed = true;
+                        }
+                        else
+                        {
+                            // Se conserva la original para reintentarla en el siguiente run;
+                            // el cliente está protegido por el filtro key= de PlaceDto.
+                            newPhotos.Add(url);
+                            failed[bucket]++;
+                        }
+                    }
+
+                    if (changed)
+                    {
+                        place.Photos = newPhotos;
+                        place.UpdatedAt = now;
+                        updatedPlaces++;
+                    }
+                }
+
+                // Guardado por chunk — permite reanudar parcialmente ante un timeout.
+                if (!ct.IsCancellationRequested)
+                    await _db.SaveChangesAsync(ct);
+            }
+        }
+
+        var census = censusPhotos.ToDictionary(
+            kv => kv.Key,
+            kv => new PhotoDomainCensus(kv.Value, migrated[kv.Key], failed[kv.Key]));
+
+        var response = new BackfillPhotosResponse(
+            R2Configured: _photoRehost.IsConfigured,
+            DryRun: dryRun,
+            TotalPlacesWithPhotos: allWithPhotos.Count,
+            CandidatePlaces: candidates.Count,
+            ProcessedPlaces: processedPlaces,
+            UpdatedPlaces: updatedPlaces,
+            RemainingPlaces: candidates.Count - processedPlaces,
+            Census: census,
+            OtherDomains: otherDomains);
+
+        _logger.LogInformation(
+            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} processed={Proc} updated={Upd} migrated={Mig} failed={Fail}",
+            response.R2Configured, dryRun, response.TotalPlacesWithPhotos, response.CandidatePlaces,
+            processedPlaces, updatedPlaces, migrated.Values.Sum(), failed.Values.Sum());
+
+        return Ok(response);
+
+        static Dictionary<string, int> NewBucketCounter() => new()
+        {
+            [PhotoUrls.BucketGoogle] = 0,
+            [PhotoUrls.BucketR2] = 0,
+            [PhotoUrls.BucketWanderlog] = 0,
+            [PhotoUrls.BucketOther] = 0,
+        };
     }
 
     [HttpPost("{id}/translate")]
