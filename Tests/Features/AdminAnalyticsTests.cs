@@ -300,7 +300,7 @@ public class AdminAnalyticsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         var db = fixture.GetDbContext();
         var seededIds = new HashSet<Guid>();
-        for (var i = 0; i < 5; i++)
+        for (var i = 0; i < 8; i++)
         {
             var turn = new ChatTurn
             {
@@ -310,27 +310,35 @@ public class AdminAnalyticsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             };
             seededIds.Add(turn.Id);
             db.ChatTurns.Add(turn);
+            // SaveChanges por fila: EF ordena los inserts de un batch por PK, lo que
+            // haría el orden de inserción == Id ascendente y un backward index scan
+            // devolvería Id descendente sin tiebreaker (falso-pass determinista).
+            // Con batches de 1 el orden de inserción queda aleatorio respecto al Id.
+            await db.SaveChangesAsync();
         }
-        await db.SaveChangesAsync();
 
-        // Aislar los 5 seeds con from/to exactos al timestamp empatado.
+        // Aislar los 8 seeds con from/to exactos al timestamp empatado.
         var range = $"from={Uri.EscapeDataString(tied.ToString("o"))}&to={Uri.EscapeDataString(tied.ToString("o"))}";
         var client = CreateAdminClient();
 
         var pagedIds = new List<Guid>();
-        foreach (var offset in new[] { 0, 2, 4 })
+        foreach (var offset in new[] { 0, 2, 4, 6 })
         {
             var res = await client.GetAsync($"/admin/analytics/chat-turns?limit=2&offset={offset}&{range}");
             Assert.Equal(HttpStatusCode.OK, res.StatusCode);
             var body = await res.Content.ReadFromJsonAsync<JsonElement>();
-            Assert.Equal(5, body.GetProperty("total").GetInt32());
+            Assert.Equal(8, body.GetProperty("total").GetInt32());
             pagedIds.AddRange(body.GetProperty("turns").EnumerateArray()
                 .Select(t => t.GetProperty("id").GetGuid()));
         }
 
-        Assert.Equal(5, pagedIds.Count);                       // sin omisiones
-        Assert.Equal(5, pagedIds.Distinct().Count());          // sin duplicados
+        Assert.Equal(8, pagedIds.Count);                       // sin omisiones
+        Assert.Equal(8, pagedIds.Distinct().Count());          // sin duplicados
         Assert.Equal(seededIds, pagedIds.ToHashSet());         // exactamente los seeds
+        // Orden pactado por el tiebreaker: Id descendente. El orden memcmp de uuid
+        // en Postgres coincide con Guid.CompareTo, así que sin tiebreaker esto solo
+        // pasaría por azar (no-vacuidad del test).
+        Assert.Equal(seededIds.OrderByDescending(g => g).ToList(), pagedIds);
     }
 
     [Fact]
@@ -342,7 +350,7 @@ public class AdminAnalyticsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         var db = fixture.GetDbContext();
         var seededIds = new HashSet<Guid>();
-        for (var i = 0; i < 5; i++)
+        for (var i = 0; i < 8; i++)
         {
             // plan_metrics.plan_id es único → un Plan por métrica.
             var plan = new Plan { Id = Guid.NewGuid(), Name = $"Tie Plan {i}", City = city, Type = "ai" };
@@ -355,26 +363,30 @@ public class AdminAnalyticsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             };
             seededIds.Add(metric.Id);
             db.PlanMetrics.Add(metric);
+            // SaveChanges por fila: ver comentario en el test de chat-turns (evita que
+            // el sort por PK del batch de EF correlacione orden de inserción e Id).
+            await db.SaveChangesAsync();
         }
-        await db.SaveChangesAsync();
 
-        // Aislar los 5 seeds por la city única del test.
+        // Aislar los 8 seeds por la city única del test.
         var client = CreateAdminClient();
 
         var pagedIds = new List<Guid>();
-        foreach (var offset in new[] { 0, 2, 4 })
+        foreach (var offset in new[] { 0, 2, 4, 6 })
         {
             var res = await client.GetAsync($"/admin/analytics/plan-metrics?limit=2&offset={offset}&city={Uri.EscapeDataString(city)}");
             Assert.Equal(HttpStatusCode.OK, res.StatusCode);
             var body = await res.Content.ReadFromJsonAsync<JsonElement>();
-            Assert.Equal(5, body.GetProperty("total").GetInt32());
+            Assert.Equal(8, body.GetProperty("total").GetInt32());
             pagedIds.AddRange(body.GetProperty("metrics").EnumerateArray()
                 .Select(m => m.GetProperty("id").GetGuid()));
         }
 
-        Assert.Equal(5, pagedIds.Count);                       // sin omisiones
-        Assert.Equal(5, pagedIds.Distinct().Count());          // sin duplicados
+        Assert.Equal(8, pagedIds.Count);                       // sin omisiones
+        Assert.Equal(8, pagedIds.Distinct().Count());          // sin duplicados
         Assert.Equal(seededIds, pagedIds.ToHashSet());         // exactamente los seeds
+        // Orden pactado por el tiebreaker: Id descendente (memcmp uuid == Guid.CompareTo).
+        Assert.Equal(seededIds.OrderByDescending(g => g).ToList(), pagedIds);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
