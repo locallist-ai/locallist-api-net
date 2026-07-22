@@ -27,6 +27,30 @@ del payload. Si ningún id propio del user está Active en RC → no se concede.
 `rc_customer_id` lo hace la vía normal del purchase de la app, NO este webhook (no escribe
 `rc_customer_id` desde el payload — era el vector de secuestro persistente).
 
+### Eventos TRANSFER (suscripción que cambia de App User ID)
+
+Un TRANSFER (Restore en un Apple ID compartido, dispositivo revendido, Family Sharing…) **no trae
+`app_user_id`/`original_app_user_id`** — trae dos arrays: `transferred_from` y `transferred_to`
+(los App User IDs que PIERDEN vs. los que GANAN el entitlement). El DTO los deserializa
+(`RevenueCatEvent.TransferredFrom`/`TransferredTo`).
+
+Antes del fix estos eventos caían en `UserNotFound` (200 sin retry, descartado): el dueño original
+se quedaba con `tier=pro` huérfano para siempre y el nuevo dueño no veía pro hasta el próximo
+RENEWAL (hasta 1 año en anual). Ahora `BillingEventProcessor.ProcessTransferAsync`:
+
+- Resuelve **cada** id de AMBOS arrays a un `User` local (misma lógica Guid→`Id` / `RcCustomerId`);
+  los ids que no mapean a ningún user se loguean (como el path normal).
+- Para cada user resuelto **re-verifica su estado contra la REST API de RC usando SOLO sus ids
+  PROPIOS** (idéntica garantía que el path de un evento: un TRANSFER forjado no concede lo que RC
+  no confirma — cubierto por `ForgedTransfer_*` en `BillingAttackTests`). Resultado típico: origen →
+  free, destino → pro.
+- **Todo-o-nada ante indisponibilidad de RC**: si el lookup de CUALQUIER afectado da `Unavailable`,
+  se devuelve `RcUnavailable` (503) **sin escribir ningún tier ni la fila del ledger** — RC
+  reintrega el mismo `rc_event_id` y no queda estado a medias.
+- **Una fila** en `billing_events` por evento (la tabla tiene un solo `UserId`): se atribuye al
+  **destino resuelto** (fallback al origen); el detalle `from`/`to` completo va en `AppUserId` para
+  auditoría. Idempotente por `rc_event_id` igual que el resto.
+
 ## Qué hay aquí
 
 - **`BillingController`** — `POST /webhooks/revenuecat`. Verifica el header `Authorization`

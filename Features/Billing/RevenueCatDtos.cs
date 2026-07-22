@@ -24,6 +24,12 @@ public record RevenueCatEvent(
     [property: JsonPropertyName("app_user_id")] string? AppUserId,
     // Present after an anonymous→identified merge or transfer.
     [property: JsonPropertyName("original_app_user_id")] string? OriginalAppUserId,
+    // TRANSFER events carry NO app_user_id/original_app_user_id — instead the entitlement moves
+    // between these two arrays of app_user_ids (the losers vs the gainers of the transfer). Every
+    // affected id must be re-verified against RevenueCat's REST state (see BillingEventProcessor),
+    // never trusted from the payload. Null/absent on non-TRANSFER events.
+    [property: JsonPropertyName("transferred_from")] List<string>? TransferredFrom,
+    [property: JsonPropertyName("transferred_to")] List<string>? TransferredTo,
     // Entitlements active/affected by this event. Newer RC payloads use the array;
     // the scalar is kept for older integrations.
     [property: JsonPropertyName("entitlement_ids")] string[]? EntitlementIds,

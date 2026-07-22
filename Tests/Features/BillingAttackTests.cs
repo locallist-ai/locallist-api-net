@@ -170,4 +170,64 @@ public class BillingAttackTests : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         Assert.Equal("pro", await GetTierAsync(victimId));
     }
+
+    // A TRANSFER event carries no app_user_id — the entitlement moves between these two arrays.
+    private static object TransferEvent(string id, string[] from, string[] to, long ts = 1000) => new
+    {
+        api_version = "1.0",
+        @event = new
+        {
+            id,
+            type = "TRANSFER",
+            transferred_from = from,
+            transferred_to = to,
+            event_timestamp_ms = ts,
+            store = "app_store",
+        },
+    };
+
+    /// <summary>
+    /// FORGED TRANSFER (grant): attacker with the leaked secret crafts a TRANSFER naming the victim
+    /// as the gainer (transferred_to) and a ghost id RevenueCat reports Active as the loser
+    /// (transferred_from). The credit still hangs on verifying the victim's OWN id, which RC reports
+    /// inactive → the victim is not granted pro. The forged payload cannot mint what RC denies.
+    /// </summary>
+    [Fact]
+    public async Task ForgedTransfer_ToVictim_DoesNotGrantWhatRcDenies()
+    {
+        var victimId = await SeedUserAsync(tier: "free");
+        _fixture.FakeRevenueCat.ByAppUserId[victimId.ToString()] = RevenueCatEntitlementStatus.Inactive;
+        const string ghostActiveId = "$RCAnonymousID:ghost-active"; // Active at RC, no local user
+        _fixture.FakeRevenueCat.ByAppUserId[ghostActiveId] = RevenueCatEntitlementStatus.Active;
+        var client = _fixture.CreateClient();
+
+        var res = await client.SendAsync(BuildWebhook(
+            TransferEvent("attack-transfer-grant", new[] { ghostActiveId }, new[] { victimId.ToString() }),
+            authHeader: ApiFixture.TestRevenueCatWebhookSecret));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("free", await GetTierAsync(victimId));
+    }
+
+    /// <summary>
+    /// FORGED TRANSFER (griefing): attacker puts a genuinely-paying victim in transferred_from with
+    /// a garbage gainer, hoping the transfer revokes the victim. The victim's OWN id is re-verified
+    /// against RevenueCat (Active) → the victim stays pro. A forged transfer cannot strip an active
+    /// subscriber.
+    /// </summary>
+    [Fact]
+    public async Task ForgedTransfer_FromPayingVictim_DoesNotDowngradeWhatRcConfirms()
+    {
+        var victimId = await SeedUserAsync(tier: "pro");
+        _fixture.FakeRevenueCat.ByAppUserId[victimId.ToString()] = RevenueCatEntitlementStatus.Active;
+        const string ghostId = "$RCAnonymousID:ghost"; // fake default = Inactive, no local user
+        var client = _fixture.CreateClient();
+
+        var res = await client.SendAsync(BuildWebhook(
+            TransferEvent("attack-transfer-grief", new[] { victimId.ToString() }, new[] { ghostId }),
+            authHeader: ApiFixture.TestRevenueCatWebhookSecret));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("pro", await GetTierAsync(victimId));
+    }
 }

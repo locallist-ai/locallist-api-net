@@ -79,6 +79,21 @@ public class BillingTests : IClassFixture<ApiFixture>
     private void RcActive(Guid userId) =>
         _fixture.FakeRevenueCat.ByAppUserId[userId.ToString()] = RevenueCatEntitlementStatus.Active;
 
+    // A TRANSFER event carries no app_user_id — the entitlement moves between these arrays.
+    private static object TransferEvent(string id, string[] from, string[] to, long ts = 1000) => new
+    {
+        api_version = "1.0",
+        @event = new
+        {
+            id,
+            type = "TRANSFER",
+            transferred_from = from,
+            transferred_to = to,
+            event_timestamp_ms = ts,
+            store = "app_store",
+        },
+    };
+
     // ---- webhook auth ------------------------------------------------------
 
     [Fact]
@@ -305,6 +320,111 @@ public class BillingTests : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
         Assert.Equal("GrantedPro", (await retry.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
         Assert.Equal("pro", await GetTierAsync(userId));
+    }
+
+    // ---- TRANSFER events ---------------------------------------------------
+
+    [Fact]
+    public async Task Webhook_Transfer_MovesEntitlement_OriginToFree_DestinationToPro()
+    {
+        var originId = await SeedUserAsync(tier: "pro");
+        var destId = await SeedUserAsync(tier: "free");
+        // After the transfer, RevenueCat's authoritative state: origin no longer entitled, dest is.
+        _fixture.FakeRevenueCat.ByAppUserId[originId.ToString()] = RevenueCatEntitlementStatus.Inactive;
+        _fixture.FakeRevenueCat.ByAppUserId[destId.ToString()] = RevenueCatEntitlementStatus.Active;
+        var client = _fixture.CreateClient();
+
+        var res = await client.SendAsync(BuildWebhook(TransferEvent(
+            "evt-transfer-happy", new[] { originId.ToString() }, new[] { destId.ToString() })));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("Transferred", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("free", await GetTierAsync(originId));
+        Assert.Equal("pro", await GetTierAsync(destId));
+
+        // Exactly one ledger row for the event, attributed to the resolved destination.
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-transfer-happy");
+        Assert.Equal(destId, row.UserId);
+        Assert.Equal("TRANSFER", row.EventType);
+    }
+
+    [Fact]
+    public async Task Webhook_Transfer_DestinationNotRegistered_StillRevokesOrigin()
+    {
+        var originId = await SeedUserAsync(tier: "pro");
+        _fixture.FakeRevenueCat.ByAppUserId[originId.ToString()] = RevenueCatEntitlementStatus.Inactive;
+        var unknownDest = Guid.NewGuid().ToString(); // never seeded
+        var client = _fixture.CreateClient();
+
+        var res = await client.SendAsync(BuildWebhook(TransferEvent(
+            "evt-transfer-nodest", new[] { originId.ToString() }, new[] { unknownDest })));
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("Transferred", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        // The resolved origin is revoked even though the gainer maps to no local user.
+        Assert.Equal("free", await GetTierAsync(originId));
+
+        // Row attributed to the origin (destination unresolved).
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-transfer-nodest");
+        Assert.Equal(originId, row.UserId);
+    }
+
+    [Fact]
+    public async Task Webhook_Transfer_RcUnavailableMidway_Returns503_NoPartialState_ThenRetrySucceeds()
+    {
+        var originId = await SeedUserAsync(tier: "pro");
+        var destId = await SeedUserAsync(tier: "free");
+        // Origin is verifiable (inactive) but RevenueCat is down for the destination.
+        _fixture.FakeRevenueCat.ByAppUserId[originId.ToString()] = RevenueCatEntitlementStatus.Inactive;
+        _fixture.FakeRevenueCat.ByAppUserId[destId.ToString()] = RevenueCatEntitlementStatus.Unavailable;
+        var client = _fixture.CreateClient();
+        const string eventId = "evt-transfer-rcdown";
+
+        var first = await client.SendAsync(BuildWebhook(TransferEvent(
+            eventId, new[] { originId.ToString() }, new[] { destId.ToString() })));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, first.StatusCode);
+        // No half-applied transfer: origin NOT revoked, destination NOT granted, nothing recorded.
+        Assert.Equal("pro", await GetTierAsync(originId));
+        Assert.Equal("free", await GetTierAsync(destId));
+        var db = _fixture.GetDbContext();
+        Assert.Equal(0, await db.BillingEvents.CountAsync(be => be.RcEventId == eventId));
+
+        // RevenueCat recovers; the SAME event id is re-delivered and now applies in full.
+        _fixture.FakeRevenueCat.ByAppUserId[destId.ToString()] = RevenueCatEntitlementStatus.Active;
+        var retry = await client.SendAsync(BuildWebhook(TransferEvent(
+            eventId, new[] { originId.ToString() }, new[] { destId.ToString() })));
+
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Equal("free", await GetTierAsync(originId));
+        Assert.Equal("pro", await GetTierAsync(destId));
+    }
+
+    [Fact]
+    public async Task Webhook_Transfer_IsIdempotentOnReplay()
+    {
+        var originId = await SeedUserAsync(tier: "pro");
+        var destId = await SeedUserAsync(tier: "free");
+        _fixture.FakeRevenueCat.ByAppUserId[originId.ToString()] = RevenueCatEntitlementStatus.Inactive;
+        _fixture.FakeRevenueCat.ByAppUserId[destId.ToString()] = RevenueCatEntitlementStatus.Active;
+        var client = _fixture.CreateClient();
+        const string eventId = "evt-transfer-dup";
+
+        var first = await client.SendAsync(BuildWebhook(TransferEvent(
+            eventId, new[] { originId.ToString() }, new[] { destId.ToString() })));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var second = await client.SendAsync(BuildWebhook(TransferEvent(
+            eventId, new[] { originId.ToString() }, new[] { destId.ToString() })));
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Equal("Duplicate", (await second.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+
+        var db = _fixture.GetDbContext();
+        Assert.Equal(1, await db.BillingEvents.CountAsync(be => be.RcEventId == eventId));
+        Assert.Equal("free", await GetTierAsync(originId));
+        Assert.Equal("pro", await GetTierAsync(destId));
     }
 
     // ---- RequirePro guard (re-queries DB, ignores JWT claim) ---------------

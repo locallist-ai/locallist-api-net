@@ -13,6 +13,12 @@ public enum BillingEventOutcome
     GrantedPro,
     /// <summary>RevenueCat confirms the entitlement is inactive → user set/kept "free".</summary>
     RevokedToFree,
+    /// <summary>
+    /// A TRANSFER event was applied: every resolved user in transferred_from/transferred_to had
+    /// its tier re-derived from RevenueCat's REST state (origin typically → free, destination →
+    /// pro). At least one local user resolved. See <see cref="BillingEventProcessor"/>.
+    /// </summary>
+    Transferred,
     /// <summary>Recorded with a null user — the app_user_id did not map to any LocalList user.</summary>
     UserNotFound,
     /// <summary>
@@ -42,6 +48,17 @@ public enum BillingEventOutcome
 /// Idempotent (deduped by <see cref="BillingEvent.RcEventId"/> + its UNIQUE index race guard,
 /// scoped to that constraint only) and transactional (ledger insert + tier write commit together).
 /// Slice-local service (VSA): lives in Features/Billing, imports no other slice.
+///
+/// TRANSFER events: a subscription moving between App User IDs (Restore on a shared Apple ID,
+/// resold device, Family Sharing…) does NOT carry app_user_id/original_app_user_id — it carries
+/// <c>transferred_from</c>/<c>transferred_to</c> arrays. Each id in BOTH arrays is resolved to a
+/// local user and its tier re-derived from RevenueCat's REST state EXACTLY like a normal event
+/// (own-ids-only verification — a forged transfer cannot grant what RC does not confirm). The
+/// typical outcome: origin → free, destination → pro. If RC REST is unavailable for ANY affected
+/// user the whole event is retryable (503, nothing written) — no half-applied transfer. A single
+/// ledger row is written per event (the table has one <c>UserId</c>); it is attributed to the
+/// resolved destination (falling back to origin), with the full from/to lists in <c>AppUserId</c>
+/// for audit.
 /// </summary>
 public class BillingEventProcessor
 {
@@ -94,6 +111,11 @@ public class BillingEventProcessor
             return BillingEventOutcome.Duplicate;
         }
 
+        // TRANSFER events don't carry app_user_id — they move the entitlement between the
+        // transferred_from/transferred_to arrays. Handle them on a dedicated multi-user path.
+        if (IsTransfer(evt))
+            return await ProcessTransferAsync(evt, plusEntitlementId, rcEventId, ct);
+
         // (1) Resolve WHOM to credit first, from the payload identifiers.
         var user = await ResolveUserAsync(evt, ct);
 
@@ -145,27 +167,139 @@ public class BillingEventProcessor
             ProcessedAt = _clock.GetUtcNow(),
         });
 
+        var result = await SaveLedgerAsync(rcEventId, outcome, ct);
+        _logger.LogInformation(
+            "RevenueCat event {EventId} ({Type}) processed for user {UserId}: {Outcome}",
+            rcEventId, evt.Type, user?.Id, result);
+        return result;
+    }
+
+    /// <summary>
+    /// Handles a TRANSFER event. RevenueCat moves the entitlement between the
+    /// <c>transferred_from</c> and <c>transferred_to</c> App User IDs; there is no single
+    /// app_user_id to credit. For EVERY id in both arrays we resolve the local user and re-derive
+    /// its tier from RevenueCat's REST state using ONLY that user's own ids (same guarantee as the
+    /// single-event path — the payload can never grant what RC does not confirm).
+    ///
+    /// All-or-nothing on RC availability: we verify every affected user FIRST and only mutate tiers
+    /// once none came back Unavailable, so a mid-transfer RC outage leaves ZERO partial state and
+    /// the event is retried (503, unrecorded). One ledger row per event, attributed to the resolved
+    /// destination (fallback origin), with both id lists captured in <c>AppUserId</c> for audit.
+    /// </summary>
+    private async Task<BillingEventOutcome> ProcessTransferAsync(
+        RevenueCatEvent evt, string plusEntitlementId, string rcEventId, CancellationToken ct)
+    {
+        // Resolve destination ids first (so the ledger row is attributed to the gainer), then
+        // origin. Dedup by User.Id — the same user could appear more than once across the arrays.
+        var resolved = new Dictionary<Guid, User>();
+        var unresolved = new List<string>();
+        User? destination = null;
+        User? origin = null;
+
+        foreach (var candidate in evt.TransferredTo ?? Enumerable.Empty<string>())
+        {
+            var u = await ResolveSingleAsync(candidate, ct);
+            if (u is null) { if (!string.IsNullOrWhiteSpace(candidate)) unresolved.Add(candidate); continue; }
+            destination ??= u;
+            resolved[u.Id] = u;
+        }
+        foreach (var candidate in evt.TransferredFrom ?? Enumerable.Empty<string>())
+        {
+            var u = await ResolveSingleAsync(candidate, ct);
+            if (u is null) { if (!string.IsNullOrWhiteSpace(candidate)) unresolved.Add(candidate); continue; }
+            origin ??= u;
+            resolved[u.Id] = u;
+        }
+
+        // Verify EVERY resolved user against RevenueCat BEFORE touching any tier. If any lookup is
+        // Unavailable, bail out retryable without writing tiers or the ledger row (no partial state).
+        var verified = new List<(User user, RevenueCatEntitlementStatus status)>(resolved.Count);
+        foreach (var user in resolved.Values)
+        {
+            var status = await VerifyAnyActiveAsync(user, plusEntitlementId, ct);
+            if (status == RevenueCatEntitlementStatus.Unavailable)
+            {
+                _logger.LogWarning(
+                    "RevenueCat TRANSFER {EventId}: RC state unavailable verifying user {UserId}; " +
+                    "no tier written, will retry",
+                    rcEventId, user.Id);
+                return BillingEventOutcome.RcUnavailable;
+            }
+            verified.Add((user, status));
+        }
+
+        // All affected users verified — now apply the RC-derived tiers.
+        foreach (var (user, status) in verified)
+        {
+            var desired = status == RevenueCatEntitlementStatus.Active ? TierPro : TierFree;
+            if (user.Tier != desired) user.Tier = desired;
+            user.UpdatedAt = _clock.GetUtcNow();
+        }
+
+        if (unresolved.Count > 0)
+        {
+            _logger.LogWarning(
+                "RevenueCat TRANSFER {EventId}: {Count} transferred id(s) mapped to no LocalList user: {Ids}",
+                rcEventId, unresolved.Count, string.Join(", ", unresolved));
+        }
+
+        var attributed = destination ?? origin;
+        _db.BillingEvents.Add(new BillingEvent
+        {
+            RcEventId = rcEventId,
+            UserId = attributed?.Id,
+            AppUserId = BuildTransferAudit(evt),
+            EventType = evt.Type ?? "TRANSFER",
+            EventTimestampMs = ClampTimestamp(evt.EventTimestampMs),
+            ProcessedAt = _clock.GetUtcNow(),
+        });
+
+        // If not a single id resolved there is nothing to credit — record as unresolved.
+        var outcome = resolved.Count > 0 ? BillingEventOutcome.Transferred : BillingEventOutcome.UserNotFound;
+        var result = await SaveLedgerAsync(rcEventId, outcome, ct);
+        _logger.LogInformation(
+            "RevenueCat TRANSFER {EventId} processed: {Resolved} user(s) re-verified, {Unresolved} unresolved → {Outcome}",
+            rcEventId, resolved.Count, unresolved.Count, result);
+        return result;
+    }
+
+    /// <summary>
+    /// Commits the tracked tier writes + the ledger row atomically. Returns <paramref name="outcome"/>
+    /// on success, or <see cref="BillingEventOutcome.Duplicate"/> when a concurrent delivery of the
+    /// SAME event id won the INSERT race on the rc_event_id unique index (the tier writes in THIS
+    /// transaction roll back with it — the winner already applied the identical, RC-derived effect).
+    /// Only that specific constraint is swallowed; any other unique violation propagates.
+    /// </summary>
+    private async Task<BillingEventOutcome> SaveLedgerAsync(
+        string rcEventId, BillingEventOutcome outcome, CancellationToken ct)
+    {
         try
         {
             await _db.SaveChangesAsync(ct);
+            return outcome;
         }
         catch (DbUpdateException ex) when (IsDuplicateEventRace(ex))
         {
-            // A concurrent delivery of the SAME event id won the INSERT race on the
-            // rc_event_id unique index. The tier write in THIS transaction rolls back with
-            // it — the winner already applied the identical, RC-derived effect. Idempotent.
-            // NOTE: only this specific constraint is swallowed; any other unique violation
-            // propagates rather than silently 200-ing.
             _logger.LogInformation(
                 "RevenueCat event {EventId} lost the insert race (concurrent duplicate); treating as processed",
                 rcEventId);
             return BillingEventOutcome.Duplicate;
         }
+    }
 
-        _logger.LogInformation(
-            "RevenueCat event {EventId} ({Type}) processed for user {UserId}: {Outcome}",
-            rcEventId, evt.Type, user?.Id, outcome);
-        return outcome;
+    /// <summary>True when this is a TRANSFER event (by type, or by populated transfer arrays).</summary>
+    private static bool IsTransfer(RevenueCatEvent evt) =>
+        string.Equals(evt.Type, "TRANSFER", StringComparison.OrdinalIgnoreCase) ||
+        evt.TransferredFrom is { Count: > 0 } ||
+        evt.TransferredTo is { Count: > 0 };
+
+    /// <summary>Compact from/to audit string for the ledger row, truncated to the column width.</summary>
+    private static string BuildTransferAudit(RevenueCatEvent evt)
+    {
+        var from = evt.TransferredFrom is { Count: > 0 } ? string.Join(",", evt.TransferredFrom) : "-";
+        var to = evt.TransferredTo is { Count: > 0 } ? string.Join(",", evt.TransferredTo) : "-";
+        var s = $"transfer from=[{from}] to=[{to}]";
+        return s.Length > 255 ? s[..255] : s;
     }
 
     /// <summary>
@@ -209,18 +343,29 @@ public class BillingEventProcessor
     {
         foreach (var candidate in new[] { evt.AppUserId, evt.OriginalAppUserId })
         {
-            if (string.IsNullOrWhiteSpace(candidate)) continue;
-
-            if (Guid.TryParse(candidate, out var userId))
-            {
-                var byId = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
-                if (byId is not null) return byId;
-            }
-
-            var byRc = await _db.Users.FirstOrDefaultAsync(u => u.RcCustomerId == candidate, ct);
-            if (byRc is not null) return byRc;
+            var user = await ResolveSingleAsync(candidate, ct);
+            if (user is not null) return user;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Maps ONE RevenueCat app_user_id string to a local user: Guid → <see cref="User.Id"/> first,
+    /// then <see cref="User.RcCustomerId"/>. Shared by the single-event and TRANSFER paths. As with
+    /// <see cref="ResolveUserAsync"/>, resolving here only decides WHICH user is affected — the tier
+    /// is still verified against that user's OWN ids (see <see cref="VerifyAnyActiveAsync"/>).
+    /// </summary>
+    private async Task<User?> ResolveSingleAsync(string? candidate, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(candidate)) return null;
+
+        if (Guid.TryParse(candidate, out var userId))
+        {
+            var byId = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
+            if (byId is not null) return byId;
+        }
+
+        return await _db.Users.FirstOrDefaultAsync(u => u.RcCustomerId == candidate, ct);
     }
 
     /// <summary>Clamps an absurdly-future timestamp to "now" for audit sanity (see field doc).</summary>
