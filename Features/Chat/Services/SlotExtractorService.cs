@@ -1,5 +1,6 @@
 using System.Text.Json;
 using LocalList.API.NET.Shared.AI.Llm;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
 using LocalList.API.NET.Shared.Usage;
@@ -115,7 +116,7 @@ Extract into this schema (ONLY fill slots the user actually mentioned; never inv
 {{
   ""extracted"": {{
     ""city"": string | null,
-    ""days"": number (1-14) | null,
+    ""days"": number (1-{PlanLimits.MaxPlanDurationDays}) | null,
     ""groupType"": one of [{string.Join(", ", AllowedGroupTypes.Select(g => $"\"{g}\""))}] | null,
     ""categories"": array of [{string.Join(", ", AllowedCategories.Select(c => $"\"{c}\""))}],
     ""budget"": one of [""budget"", ""moderate"", ""premium""] | null,

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Shared;
 using LocalList.API.NET.Shared.AI.Llm;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.Taxonomy;
@@ -217,7 +218,7 @@ Rules for planName:{langNote}
 
 Return JSON only, no markdown. EXACT shape:
 {{
-  ""days"": number (1-14, default 1),
+  ""days"": number (1-{PlanLimits.MaxPlanDurationDays}, default 1),
   ""categories"": string[] (from: {string.Join(", ", AllowedCategories)}),
   ""vibes"": string[] (e.g. romantic, adventurous, relaxed, party, cultural),
   ""groupType"": string (solo/couple/friends/family-kids/family/group),

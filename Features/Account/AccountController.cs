@@ -60,7 +60,7 @@ public class AccountController : ControllerBase
         // Cuota de generación IA mensual, expuesta proactivamente (m4/F7) para que la app
         // pinte "X de 3 planes este mes" sin tener que provocar el 403. Contrato ESTABLE con
         // el task app-side: aiPlansMonth = { used, limit, resetsAt }. Para Plus (`pro`) el
-        // límite mensual no aplica (usan el cap diario antiabuso) → limit:null = ilimitado;
+        // límite mensual no aplica (usan el cap diario antiabuso) → limit omitido = ilimitado;
         // used sigue siendo el contador mensual (0 para Plus). resetsAt = inicio del mes
         // siguiente (UTC), el momento en que el contador free se resetea.
         var isPro = string.Equals(user.tier, PlanGenerationGateService.TierPro, StringComparison.Ordinal);
