@@ -25,7 +25,10 @@ public class PlaceRankingService
     //   → suma total subió a 1.20 (deuda técnica DT-5).
     // - 2026-06-09: renormalizar todo a 1.0; WeightNeighborhoodPenalty (subtractivo) = 0.04
     //   → rango efectivo del score final: [-0.04, 1.0].
-    private const float WeightCosine = 0.34f;
+    // - 2026-07-13 (fix plan-quality): Budget 0.04→0.10 (el tier elegido por el usuario
+    //   apenas movía el ranking); compensado con Cosine 0.34→0.30 y StyleTags 0.05→0.03
+    //   (StyleTags nunca se puebla desde TripContextDto — peso casi muerto).
+    private const float WeightCosine = 0.30f;
     private const float WeightCategory = 0.12f;
     private const float WeightBestFor = 0.12f;
     private const float WeightSuitableFor = 0.12f;
@@ -33,8 +36,8 @@ public class PlaceRankingService
     private const float WeightNeighborhoodPenalty = 0.04f;
     private const float WeightSubcategory = 0.08f;
     private const float WeightCompanyTags = 0.05f;
-    private const float WeightStyleTags = 0.05f;
-    private const float WeightBudget = 0.04f;
+    private const float WeightStyleTags = 0.03f;
+    private const float WeightBudget = 0.10f;
 
     public readonly record struct ScoredCandidate(Place Place, float Score, ScoreBreakdown Breakdown);
 
@@ -272,26 +275,41 @@ public class PlaceRankingService
         return matches > 0 ? Math.Min(1f, matches / (float)prefs.StyleTags.Count) : 0f;
     }
 
-    // Budget match — derivamos tier desde BudgetAmount (USD/día/persona) y
-    // lo comparamos con place.PriceRange ("$"/"$$"/"$$$"/"$$$$"). El frontend
-    // ya envía Budget tier (string), pero BudgetAmount permite match más fino:
-    //   - <80 budget → prefiere $/$$
-    //   - 80-199 moderate → $$/$$$
-    //   - >=200 premium → $$$/$$$$
-    // Returns 1.0 si tier-place encaja, 0.5 si está adyacente, 0 si discrepa.
+    // Budget match — compara la banda de tiers deseada con place.PriceRange
+    // ("$"/"$$"/"$$$"/"$$$$"). Dos fuentes, por orden de precisión:
+    //   1. BudgetAmount (USD/día/persona, custom input): <80 → $, 80-199 → $$,
+    //      200-399 → $$$, >=400 → $$$$ (banda de un solo tier).
+    //   2. BudgetTier del wizard: budget → $/$$, moderate → $$/$$$, premium → $$$/$$$$.
+    // Returns 1.0 si el place cae en la banda, 0.6 si está a 1 tier, 0 si discrepa más.
     private static float ScoreBudgetMatch(Place place, ExtractedPreferences prefs)
     {
-        if (!prefs.BudgetAmount.HasValue) return 0f;
+        (int Min, int Max)? band = null;
+        if (prefs.BudgetAmount.HasValue)
+        {
+            var amount = prefs.BudgetAmount.Value;
+            int desiredTier = amount < 80 ? 1 : amount < 200 ? 2 : amount < 400 ? 3 : 4;
+            band = (desiredTier, desiredTier);
+        }
+        else if (!string.IsNullOrWhiteSpace(prefs.BudgetTier))
+        {
+            band = prefs.BudgetTier.ToLowerInvariant() switch
+            {
+                "budget"   => (1, 2),
+                "moderate" => (2, 3),
+                "premium"  => (3, 4),
+                _          => ((int, int)?)null,
+            };
+        }
+        if (band is null) return 0f;
         if (string.IsNullOrWhiteSpace(place.PriceRange)) return 0.5f; // sin info, neutral
 
-        var amount = prefs.BudgetAmount.Value;
-        // tier deseado por amount
-        int desiredTier = amount < 80 ? 1 : amount < 200 ? 2 : amount < 400 ? 3 : 4;
         // tier del place por count de '$'
         int placeTier = place.PriceRange.Count(c => c == '$');
         if (placeTier == 0) return 0.5f;
 
-        var diff = Math.Abs(desiredTier - placeTier);
+        int diff = placeTier < band.Value.Min ? band.Value.Min - placeTier
+                 : placeTier > band.Value.Max ? placeTier - band.Value.Max
+                 : 0;
         return diff switch
         {
             0 => 1f,

@@ -452,6 +452,80 @@ public class PlaceRankingServiceTests
         Assert.Equal(0f, scored[0].Breakdown.BudgetMatch);
     }
 
+    // ── Budget tier del wizard (fix/plan-quality-params) ─────────────────────
+    // Antes el tier ("budget"/"moderate"/"premium") se descartaba en el merge y
+    // ScoreBudgetMatch devolvía 0 salvo que llegara BudgetAmount. Ahora el tier
+    // mapea a una banda de PriceRange: budget→$/$$, moderate→$$/$$$, premium→$$$/$$$$.
+
+    [Theory]
+    [InlineData("budget",   "$",    1f)]
+    [InlineData("budget",   "$$",   1f)]
+    [InlineData("budget",   "$$$",  0.6f)]
+    [InlineData("budget",   "$$$$", 0f)]
+    [InlineData("moderate", "$",    0.6f)]
+    [InlineData("moderate", "$$",   1f)]
+    [InlineData("moderate", "$$$",  1f)]
+    [InlineData("moderate", "$$$$", 0.6f)]
+    [InlineData("premium",  "$",    0f)]
+    [InlineData("premium",  "$$",   0.6f)]
+    [InlineData("premium",  "$$$",  1f)]
+    [InlineData("premium",  "$$$$", 1f)]
+    public void ScoreBudgetMatch_TierBand_MatchesExpected(string tier, string priceRange, float expected)
+    {
+        var svc = new PlaceRankingService();
+        var place = P("Spot", priceRange: priceRange);
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetTier = tier,
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(expected, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_AmountTakesPrecedenceOverTier()
+    {
+        var svc = new PlaceRankingService();
+        // amount 50 → banda ($), tier premium → banda ($$$/$$$$). Amount gana:
+        // place "$" debe puntuar 1.0, no 0.
+        var place = P("Cheap", priceRange: "$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 50,
+            BudgetTier = "premium",
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void Rank_PremiumTier_ExpensiveBeatsCheapAtCosineParity()
+    {
+        // El peso de budget (0.04→0.10) debe bastar para reordenar a paridad de cosine:
+        // el usuario eligió premium y el place $$$$ tiene que ganar al $.
+        var svc = new PlaceRankingService();
+        var cheap = P("CheapEats", priceRange: "$");
+        var fancy = P("FancyDinner", priceRange: "$$$$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetTier = "premium",
+        };
+
+        var ranked = svc.Rank(new[]
+        {
+            (cheap, 0.10f),
+            (fancy, 0.10f),
+        }, prefs);
+
+        Assert.Equal(fancy.Id, ranked[0].Id);
+        Assert.Equal(cheap.Id, ranked[1].Id);
+    }
+
     // ── TC-1: Invariante de normalización (DT-5 guard) ────────────────────────
     // Asegura que la suma de pesos positivos = 1.0 se mantiene.
     // Si se añade un signal nuevo sin ajustar los existentes, este test falla.
