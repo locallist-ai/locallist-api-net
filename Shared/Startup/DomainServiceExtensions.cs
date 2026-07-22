@@ -68,11 +68,16 @@ public static class DomainServiceExtensions
         // servicio degrada graceful (persiste la URL original + warning), patrón Mapbox/Klaviyo.
         services.Configure<R2Options>(configuration.GetSection(R2Options.SectionName));
         services.AddSingleton<IR2ObjectStore, R2ObjectStore>();
+        // Lock + deferral del backfill de fotos — in-process, ver Scaling invariants (CLAUDE.md).
+        services.AddSingleton<BackfillPhotosCoordinator>();
         services.AddHttpClient<IPhotoRehostService, PhotoRehostService>(c =>
-        {
-            c.Timeout = TimeSpan.FromSeconds(20);
-            c.MaxResponseContentBufferSize = PhotoRehostService.MaxDownloadBytes;
-        });
+            {
+                c.Timeout = TimeSpan.FromSeconds(20);
+                c.MaxResponseContentBufferSize = PhotoRehostService.MaxDownloadBytes;
+            })
+            // SSRF hardening: sin redirects automáticos (una fuente allowlisted no puede
+            // redirigir el GET a un host interno) — mismo criterio que el cliente de routing.
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 
         services.AddScoped<ISegmentResolver>(sp => sp.GetRequiredService<RouteResolver>());
         services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));

@@ -51,6 +51,48 @@ public static class PhotoUrls
     }
 
     /// <summary>
+    /// Valida que una URL sea una fuente aceptable para el rehost server-side (defensa SSRF):
+    /// https estricto, sin IP literals (privadas o no — los hosts legítimos siempre son DNS),
+    /// sin localhost, y host dentro de la allowlist (<paramref name="allowedHostPatterns"/>,
+    /// exacto o wildcard <c>*.sufijo</c>). El GET del rehost parte de input admin (bulk import),
+    /// pero un admin comprometido o un JSON pegado sin revisar no debe poder apuntar el
+    /// servidor a metadata endpoints ni a la red interna.
+    /// </summary>
+    public static bool IsAllowedSource(string url, IReadOnlyCollection<string> allowedHostPatterns)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (!uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+
+        // IP literals nunca: las fuentes legítimas (Google/CDNs) siempre van por hostname.
+        // Esto bloquea de paso 169.254.169.254, rangos privados y [::1] sin lista de rangos.
+        if (uri.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6) return false;
+
+        var host = uri.Host;
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        foreach (var pattern in allowedHostPatterns)
+        {
+            if (string.IsNullOrWhiteSpace(pattern)) continue;
+            if (pattern.StartsWith("*.", StringComparison.Ordinal))
+            {
+                var suffix = pattern[1..]; // ".dominio.com"
+                if (host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) &&
+                    host.Length > suffix.Length)
+                    return true;
+            }
+            else if (host.Equals(pattern, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Clasifica una URL en los buckets del censo por dominio:
     /// places.googleapis.com / r2.dev / wanderlog.com / other.
     /// <paramref name="r2PublicHost"/> permite reconocer un dominio público custom

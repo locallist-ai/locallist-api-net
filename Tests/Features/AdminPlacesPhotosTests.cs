@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Shared.Data.Entities;
+using Microsoft.Extensions.DependencyInjection;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Webp;
 
@@ -26,8 +27,9 @@ public class AdminPlacesPhotosTests(ApiFixture fixture) : IClassFixture<ApiFixtu
     public void Dispose()
     {
         fixture.FakeR2.Reset();
-        fixture.FakePhotos.Responder = null;
+        fixture.FakePhotos.Reset();
         fixture.FakeGooglePlaces.Reset();
+        fixture.Services.GetRequiredService<LocalList.API.NET.Shared.Photos.BackfillPhotosCoordinator>().Reset();
     }
 
     // ── Ingesta ────────────────────────────────────────────────────────────
@@ -197,7 +199,9 @@ public class AdminPlacesPhotosTests(ApiFixture fixture) : IClassFixture<ApiFixtu
         SeedPlace(db, "Google Place", [GoogleUrl("bf-1"), GoogleUrl("bf-2")]);
         SeedPlace(db, "Wanderlog Place", ["https://wanderlog.com/photos/bf.jpg"]);
         SeedPlace(db, "Hosted Place", [alreadyHosted]);
-        SeedPlace(db, "Other Place", ["https://cdn.example.com/photo.jpg"]);
+        // Bucket "other" con host allowlisted (googleusercontent) — un host fuera de la
+        // allowlist SSRF no se migra (cubierto en AdminPlacesPhotosHardeningTests).
+        SeedPlace(db, "Other Place", ["https://lh3.googleusercontent.com/photo.jpg"]);
         SeedPlace(db, "No Photos Place", null);
         await db.SaveChangesAsync();
 
@@ -219,7 +223,7 @@ public class AdminPlacesPhotosTests(ApiFixture fixture) : IClassFixture<ApiFixtu
         AssertCensusRow(census, "r2.dev", photos: 1, migrated: 0, failed: 0);
         AssertCensusRow(census, "other", photos: 1, migrated: 1, failed: 0);
         Assert.Equal(1, census.GetProperty("other").GetProperty("photos").GetInt32());
-        Assert.Equal(1, body.GetProperty("otherDomains").GetProperty("cdn.example.com").GetInt32());
+        Assert.Equal(1, body.GetProperty("otherDomains").GetProperty("lh3.googleusercontent.com").GetInt32());
 
         // DB: ya no queda ninguna URL fuera de R2 (y la ya hosteada no se tocó).
         var freshDb = fixture.GetDbContext();

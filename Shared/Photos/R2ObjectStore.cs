@@ -35,6 +35,13 @@ public sealed class R2ObjectStore : IR2ObjectStore, IDisposable
             ServiceURL = $"https://{_options.AccountId}.r2.cloudflarestorage.com",
             ForcePathStyle = true,
             AuthenticationRegion = "auto",
+            // Timeouts agresivos: el rehost corre inline en la creación de places y bajo el
+            // proxy de Railway (40s). El default del SDK (100s × reintentos) dejaría un R2
+            // colgado reteniendo la request hasta que el proxy la mata — el place NO se
+            // crearía. Con 10s + 1 retry el peor caso cabe en el presupuesto y el fallo
+            // degrada a "sin foto" en PhotoRehostService (nunca aborta la creación).
+            Timeout = TimeSpan.FromSeconds(10),
+            MaxErrorRetry = 1,
             // R2 no soporta los checksums CRC por defecto del SDK v4 en todos los paths;
             // WHEN_REQUIRED replica el comportamiento clásico compatible con R2.
             RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,

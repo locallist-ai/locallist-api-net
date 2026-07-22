@@ -15,7 +15,34 @@ public enum PhotoRehostOutcome
     Failed,
 }
 
-public readonly record struct PhotoRehostResult(PhotoRehostOutcome Outcome, string Url);
+/// <summary>
+/// En qué fase falló un rehost (<see cref="PhotoRehostOutcome.Failed"/>). Los callers la usan
+/// para decidir política de coste: un fallo de <see cref="Upload"/> significa que la descarga
+/// de Google YA se facturó sin resultado — el backfill corta el barrido (circuit breaker)
+/// para no seguir quemando dinero contra un R2 caído. Un fallo de <see cref="Blocked"/> o
+/// <see cref="Download"/> no facturó nada útil pero es atribuible a la fuente, no a R2.
+/// </summary>
+public enum PhotoRehostFailureStage
+{
+    None,
+
+    /// <summary>La URL no pasó la validación de fuente (allowlist SSRF / esquema / IP literal).</summary>
+    Blocked,
+
+    /// <summary>El GET a la fuente falló (4xx/5xx, timeout, content-type no imagen, tamaño).</summary>
+    Download,
+
+    /// <summary>Los bytes no decodifican como imagen o exceden los límites de dimensiones.</summary>
+    Decode,
+
+    /// <summary>La subida a R2 falló — la descarga (facturable) ya se hizo.</summary>
+    Upload,
+}
+
+public readonly record struct PhotoRehostResult(
+    PhotoRehostOutcome Outcome,
+    string Url,
+    PhotoRehostFailureStage FailureStage = PhotoRehostFailureStage.None);
 
 public interface IPhotoRehostService
 {

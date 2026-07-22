@@ -20,6 +20,13 @@ public class PhotoRehostService : IPhotoRehostService
     public const int WebpQuality = 80;
     public const long MaxDownloadBytes = 20 * 1024 * 1024; // 20 MB por foto
 
+    /// <summary>
+    /// Tope de dimensiones de la fuente ANTES de decodificar (defensa decompression bomb:
+    /// un PNG/webp diminuto puede declarar 60000×60000 y reventar la memoria en Image.Load).
+    /// Se valida con Image.Identify (solo lee el header). Google sirve máx ~4800px.
+    /// </summary>
+    public const int MaxSourceDimensionPx = 8192;
+
     private static readonly Regex NonSlugChars = new("[^a-z0-9]+", RegexOptions.Compiled);
 
     private readonly HttpClient _http;
@@ -57,14 +64,26 @@ public class PhotoRehostService : IPhotoRehostService
             return new(PhotoRehostOutcome.NotConfigured, sourceUrl);
         }
 
+        // Defensa SSRF: el GET server-side solo puede apuntar a fuentes de imagen conocidas
+        // (https, sin IP literals, host en la allowlist). Input admin != input de confianza.
+        if (!PhotoUrls.IsAllowedSource(sourceUrl, _options.AllowedPhotoSourceHosts))
+        {
+            _logger.LogWarning(
+                "Photo rehost blocked — source host not allowlisted (host {Host}, keyHint '{KeyHint}')",
+                Uri.TryCreate(sourceUrl, UriKind.Absolute, out var bu) ? bu.Host : "invalid", keyHint);
+            return new(PhotoRehostOutcome.Failed, sourceUrl, PhotoRehostFailureStage.Blocked);
+        }
+
+        var stage = PhotoRehostFailureStage.Download;
         try
         {
-            var raw = await _http.GetByteArrayAsync(sourceUrl, ct);
-            if (raw.LongLength > MaxDownloadBytes)
-                throw new InvalidOperationException($"Photo exceeds {MaxDownloadBytes} bytes.");
+            var raw = await DownloadAsync(sourceUrl, ct);
 
+            stage = PhotoRehostFailureStage.Decode;
             var webp = Reencode(raw);
             var key = BuildObjectKey(keyHint, sourceUrl);
+
+            stage = PhotoRehostFailureStage.Upload;
             await _store.UploadAsync(key, webp, "image/webp", ct);
 
             var publicUrl = $"{_options.PublicUrl.TrimEnd('/')}/{key}";
@@ -73,14 +92,60 @@ public class PhotoRehostService : IPhotoRehostService
                 key, raw.Length / 1024, webp.Length / 1024);
             return new(PhotoRehostOutcome.Rehosted, publicUrl);
         }
+        // Un timeout interno del HttpClient o del cliente S3 llega como OperationCanceledException
+        // SIN que el ct del caller esté cancelado. Nunca debe propagar: un R2/una fuente colgada
+        // no puede tumbar la creación de places (degrada a Failed). La cancelación real del
+        // caller (proxy/cliente abortó) sí propaga.
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex,
+                "Photo rehost timed out at stage {Stage} for host {Host} (keyHint '{KeyHint}')",
+                stage, Uri.TryCreate(sourceUrl, UriKind.Absolute, out var u) ? u.Host : "invalid", keyHint);
+            return new(PhotoRehostOutcome.Failed, sourceUrl, stage);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // La URL con key nunca se loguea entera — solo el host (política PiiRedactor/keys).
             _logger.LogWarning(ex,
-                "Photo rehost failed for host {Host} (keyHint '{KeyHint}')",
-                Uri.TryCreate(sourceUrl, UriKind.Absolute, out var u) ? u.Host : "invalid", keyHint);
-            return new(PhotoRehostOutcome.Failed, sourceUrl);
+                "Photo rehost failed at stage {Stage} for host {Host} (keyHint '{KeyHint}')",
+                stage, Uri.TryCreate(sourceUrl, UriKind.Absolute, out var u) ? u.Host : "invalid", keyHint);
+            return new(PhotoRehostOutcome.Failed, sourceUrl, stage);
         }
+    }
+
+    /// <summary>
+    /// Descarga validando content-type (debe ser image/* si el server lo declara) y tamaño
+    /// (Content-Length y conteo real de bytes, ambos contra <see cref="MaxDownloadBytes"/> —
+    /// el header puede mentir o faltar).
+    /// </summary>
+    private async Task<byte[]> DownloadAsync(string sourceUrl, CancellationToken ct)
+    {
+        using var response = await _http.GetAsync(
+            sourceUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+        if (mediaType is not null &&
+            !mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) &&
+            !mediaType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Photo source returned non-image content-type '{mediaType}'.");
+        }
+
+        if (response.Content.Headers.ContentLength is > MaxDownloadBytes)
+            throw new InvalidOperationException($"Photo exceeds {MaxDownloadBytes} bytes (Content-Length).");
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > MaxDownloadBytes)
+                throw new InvalidOperationException($"Photo exceeds {MaxDownloadBytes} bytes.");
+            buffer.Write(chunk, 0, read);
+        }
+        return buffer.ToArray();
     }
 
     public async Task<List<string>?> RehostForIngestAsync(
@@ -108,7 +173,15 @@ public class PhotoRehostService : IPhotoRehostService
 
     private static byte[] Reencode(byte[] raw)
     {
-        using var image = Image.Load(raw);
+        // Decompression bomb: Identify solo lee el header — rechaza dimensiones absurdas
+        // ANTES de materializar el bitmap completo en memoria con Image.Load.
+        var info = Image.Identify(raw);
+        if (info.Width > MaxSourceDimensionPx || info.Height > MaxSourceDimensionPx)
+            throw new InvalidOperationException(
+                $"Source image {info.Width}x{info.Height} exceeds {MaxSourceDimensionPx}px limit.");
+
+        var decoderOptions = new SixLabors.ImageSharp.Formats.DecoderOptions { MaxFrames = 1 };
+        using var image = Image.Load(decoderOptions, raw);
         if (image.Width > MaxWidthPx)
         {
             // Height 0 = mantener aspect ratio (equivalente a withoutEnlargement del script JS:
@@ -125,6 +198,10 @@ public class PhotoRehostService : IPhotoRehostService
     /// Key determinista: <c>places/{slug}-{hash8}.webp</c>. El hash se calcula sobre
     /// scheme+host+path (sin query) para que una rotación de la API key de Google no
     /// cambie el key — re-ejecutar el backfill sobreescribe el mismo objeto (idempotente).
+    /// Decisión (m5): dos URLs que solo difieren en la query colapsan al mismo key; aceptable
+    /// porque en las fuentes allowlisted la identidad de la imagen vive en el path (Google
+    /// photo ref, wanderlog). Si se allowlista una fuente query-based, añadir aquí un
+    /// discriminador de query. Detalle en Shared/Photos/README.md.
     /// </summary>
     internal static string BuildObjectKey(string keyHint, string sourceUrl)
     {

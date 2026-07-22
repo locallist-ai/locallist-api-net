@@ -204,6 +204,174 @@ public class PhotoRehostServiceTests
             Array.Empty<string>(), "X", TestContext.Current.CancellationToken));
     }
 
+    // ── SSRF / hardening de la descarga (m2, m3, M4) ──────────────────────
+
+    [Theory]
+    [InlineData("http://places.googleapis.com/v1/p/media?key=S")]      // https estricto
+    [InlineData("https://cdn.example.com/photo.jpg")]                  // host fuera de allowlist
+    [InlineData("https://evil.com/places.googleapis.com/photo.jpg")]   // host real evil.com
+    [InlineData("https://169.254.169.254/latest/meta-data")]           // IMDS
+    [InlineData("https://10.0.0.8/internal.jpg")]                      // IP privada
+    [InlineData("https://[::1]/photo.jpg")]                            // IPv6 loopback
+    [InlineData("https://localhost/photo.jpg")]
+    [InlineData("https://api.internal/photo.jpg")]
+    [InlineData("ftp://wanderlog.com/photo.jpg")]
+    [InlineData("not-a-url")]
+    public async Task Rehost_DisallowedSource_IsBlockedWithoutAnyNetworkCall(string url)
+    {
+        var store = new FakeR2ObjectStore { Configured = true };
+        var handler = new FakePhotoHandler();
+        var service = CreateService(store, handler);
+
+        var result = await service.RehostAsync(url, "Blocked", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Failed, result.Outcome);
+        Assert.Equal(PhotoRehostFailureStage.Blocked, result.FailureStage);
+        Assert.Equal(url, result.Url);
+        Assert.Empty(handler.Calls); // bloqueado ANTES de tocar la red
+        Assert.Empty(store.Objects);
+    }
+
+    [Theory]
+    [InlineData("https://places.googleapis.com/v1/p/media?maxWidthPx=1600&key=S")]
+    [InlineData("https://wanderlog.com/photos/a.jpg")]
+    [InlineData("https://itin-dev.wanderlog.com/photos/a.jpg")]  // wildcard *.wanderlog.com
+    [InlineData("https://lh3.googleusercontent.com/p/photo")]    // wildcard *.googleusercontent.com
+    public async Task Rehost_AllowlistedSource_IsFetched(string url)
+    {
+        var store = new FakeR2ObjectStore { Configured = true };
+        var handler = new FakePhotoHandler();
+        var service = CreateService(store, handler);
+
+        var result = await service.RehostAsync(url, "Allowed", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Rehosted, result.Outcome);
+        Assert.Single(handler.Calls);
+    }
+
+    [Fact]
+    public async Task Rehost_RedirectResponse_FailsInsteadOfFollowing()
+    {
+        // AllowAutoRedirect=false en el handler de producción; el servicio además trata
+        // cualquier no-2xx como fallo — un 302 desde una fuente allowlisted no puede
+        // arrastrar el GET a otro host.
+        var store = new FakeR2ObjectStore { Configured = true };
+        var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+        redirect.Headers.Location = new Uri("https://internal-target.example/steal");
+        var handler = new FakePhotoHandler { Responder = _ => redirect };
+        var service = CreateService(store, handler);
+
+        var result = await service.RehostAsync(WanderlogUrl, "Redirected", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Failed, result.Outcome);
+        Assert.Equal(PhotoRehostFailureStage.Download, result.FailureStage);
+        Assert.Single(handler.Calls); // no siguió el Location
+        Assert.Empty(store.Objects);
+    }
+
+    [Fact]
+    public async Task Rehost_NonImageContentType_IsRejected()
+    {
+        var store = new FakeR2ObjectStore { Configured = true };
+        var html = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<html>not a photo</html>", System.Text.Encoding.UTF8, "text/html")
+        };
+        var handler = new FakePhotoHandler { Responder = _ => html };
+        var service = CreateService(store, handler);
+
+        var result = await service.RehostAsync(WanderlogUrl, "Html", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Failed, result.Outcome);
+        Assert.Equal(PhotoRehostFailureStage.Download, result.FailureStage);
+        Assert.Empty(store.Objects);
+    }
+
+    [Fact]
+    public async Task Rehost_ContentLengthOverLimit_IsRejected()
+    {
+        var store = new FakeR2ObjectStore { Configured = true };
+        var big = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(FakePhotoHandler.CreateJpeg(100, 100))
+        };
+        big.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+        big.Content.Headers.ContentLength = PhotoRehostService.MaxDownloadBytes + 1;
+        var handler = new FakePhotoHandler { Responder = _ => big };
+        var service = CreateService(store, handler);
+
+        var result = await service.RehostAsync(WanderlogUrl, "TooBig", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Failed, result.Outcome);
+        Assert.Equal(PhotoRehostFailureStage.Download, result.FailureStage);
+        Assert.Empty(store.Objects);
+    }
+
+    [Fact]
+    public async Task Rehost_OversizedDimensions_AreRejectedBeforeFullDecode()
+    {
+        // Decompression bomb: las dimensiones se validan con Identify (solo header)
+        // antes de materializar el bitmap con Image.Load.
+        var store = new FakeR2ObjectStore { Configured = true };
+        var handler = new FakePhotoHandler
+        {
+            Responder = _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(
+                    FakePhotoHandler.CreateJpeg(PhotoRehostService.MaxSourceDimensionPx + 8, 8))
+            }
+        };
+        var service = CreateService(store, handler);
+
+        var result = await service.RehostAsync(WanderlogUrl, "Bomb", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Failed, result.Outcome);
+        Assert.Equal(PhotoRehostFailureStage.Decode, result.FailureStage);
+        Assert.Empty(store.Objects);
+    }
+
+    [Fact]
+    public async Task Rehost_UploadTimeout_DegradesToFailed_NeverPropagatesCancellation()
+    {
+        // M4: el timeout del cliente S3 aflora como TaskCanceledException SIN que el ct del
+        // caller esté cancelado. Debe degradar a Failed(Upload) — nunca abortar la request
+        // que creaba el place.
+        var store = new FakeR2ObjectStore
+        {
+            Configured = true,
+            UploadFailure = _ => new TaskCanceledException("simulated S3 timeout"),
+        };
+        var service = CreateService(store);
+
+        var result = await service.RehostAsync(WanderlogUrl, "Hung R2", TestContext.Current.CancellationToken);
+
+        Assert.Equal(PhotoRehostOutcome.Failed, result.Outcome);
+        Assert.Equal(PhotoRehostFailureStage.Upload, result.FailureStage);
+        Assert.Equal(WanderlogUrl, result.Url);
+    }
+
+    [Fact]
+    public async Task Rehost_CallerCancellation_DoesPropagate()
+    {
+        // La cancelación REAL del caller (proxy/cliente abortó) sí debe propagar — solo los
+        // timeouts internos degradan.
+        var store = new FakeR2ObjectStore { Configured = true };
+        using var cts = new CancellationTokenSource();
+        var handler = new FakePhotoHandler
+        {
+            AsyncResponder = (_, ct) =>
+            {
+                cts.Cancel();
+                ct.ThrowIfCancellationRequested();
+                return Task.FromResult(FakePhotoHandler.DefaultOk());
+            }
+        };
+        var service = CreateService(store, handler);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.RehostAsync(WanderlogUrl, "Canceled", cts.Token));
+    }
+
     [Fact]
     public void BuildObjectKey_IgnoresQueryString_SoKeyRotationDoesNotChangeTheKey()
     {

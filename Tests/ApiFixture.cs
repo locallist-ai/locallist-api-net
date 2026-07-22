@@ -571,9 +571,17 @@ public class FakeR2ObjectStore : IR2ObjectStore
     /// <summary>key → bytes subidos (webp reencodado por PhotoRehostService).</summary>
     public ConcurrentDictionary<string, byte[]> Objects { get; } = new();
 
+    /// <summary>
+    /// Si no es null, cada upload lanza esta excepción — simula R2 caído (5xx) o colgado
+    /// (TaskCanceledException del timeout del SDK) para los tests del circuit breaker (M3)
+    /// y de la degradación de la ingesta (M4).
+    /// </summary>
+    public Func<string, Exception>? UploadFailure { get; set; }
+
     public Task UploadAsync(string key, byte[] content, string contentType, CancellationToken ct)
     {
         if (!Configured) throw new InvalidOperationException("FakeR2ObjectStore not configured.");
+        if (UploadFailure is { } failure) throw failure(key);
         Objects[key] = content;
         return Task.CompletedTask;
     }
@@ -581,6 +589,7 @@ public class FakeR2ObjectStore : IR2ObjectStore
     public void Reset()
     {
         Configured = false;
+        UploadFailure = null;
         Objects.Clear();
     }
 }
@@ -595,6 +604,13 @@ public class FakePhotoHandler : HttpMessageHandler
 {
     public Func<HttpRequestMessage, HttpResponseMessage>? Responder { get; set; }
 
+    /// <summary>
+    /// Variante async — tiene prioridad sobre <see cref="Responder"/>. Para tests de
+    /// concurrencia que necesitan una descarga REALMENTE en vuelo (bloqueada en un
+    /// TaskCompletionSource) mientras otra request compite (lock del backfill, lost update).
+    /// </summary>
+    public Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? AsyncResponder { get; set; }
+
     public List<HttpRequestMessage> Calls { get; } = new();
 
     private static readonly Lazy<byte[]> DefaultJpeg = new(() => CreateJpeg(1600, 900));
@@ -607,19 +623,35 @@ public class FakePhotoHandler : HttpMessageHandler
         return ms.ToArray();
     }
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    /// <summary>Respuesta 200 con el JPEG por defecto (1600x900) — para responders selectivos.</summary>
+    public static HttpResponseMessage DefaultOk()
     {
-        lock (Calls) { Calls.Add(request); }
-
-        if (Responder is { } responder)
-            return Task.FromResult(responder(request));
-
         var ok = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(DefaultJpeg.Value)
         };
         ok.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
-        return Task.FromResult(ok);
+        return ok;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        lock (Calls) { Calls.Add(request); }
+
+        if (AsyncResponder is { } asyncR)
+            return await asyncR(request, cancellationToken);
+
+        if (Responder is { } responder)
+            return responder(request);
+
+        return DefaultOk();
+    }
+
+    public void Reset()
+    {
+        Responder = null;
+        AsyncResponder = null;
+        lock (Calls) { Calls.Clear(); }
     }
 }
 

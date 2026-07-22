@@ -3,6 +3,7 @@ using System.Text.Json;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Photos;
 
 namespace LocalList.API.NET.Features.Admin.Places;
 
@@ -56,7 +57,12 @@ public record AdminPlaceDto(
         return new(
             p.Id, p.Name, p.Category, subs, p.Neighborhood, p.City,
             p.Latitude, p.Longitude, p.WhyThisPlace, p.BestFor, p.SuitableFor,
-            bestTimes, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
+            // La key de Google tampoco sale por la API admin: el panel no la necesita para
+            // MOSTRAR fotos (renderizarlas facturaría el SKU Place Photos en cada carga y
+            // expondría la key en el tráfico del admin). El único flujo que necesita URLs
+            // con key es el IMPORT, y esas viajan en GooglePlacePreview (google-search) como
+            // input del rehost server-side, nunca desde places persistidos.
+            bestTimes, p.PriceRange, PhotoUrls.Sanitize(p.Photos), p.GooglePlaceId, p.GoogleRating,
             p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
             p.RejectionReason, p.AiVibeScore, p.VisitDurationMin, p.Flags,
             p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
@@ -246,15 +252,33 @@ public record PhotoDomainCensus(int Photos, int Migrated, int Failed);
 /// Respuesta de POST /admin/places/backfill-photos. <c>Census</c> siempre incluye los
 /// cuatro buckets (places.googleapis.com / r2.dev / wanderlog.com / other) aunque estén
 /// a cero; <c>OtherDomains</c> desglosa por host real las fotos del bucket "other".
+/// Places soft-deleted/rejected quedan fuera de censo y candidatos.
+///
+/// Semántica del bucle del runbook (Shared/Photos/README.md): repetir hasta
+/// <c>RemainingPlaces=0</c>. <c>DeferredPlaces</c> = candidatos en backoff por fallos de
+/// fuente (excluidos del barrido — así el bucle converge aunque haya fuentes rotas);
+/// se reintentan al expirar el backoff o con <c>retryDeferred=true</c>.
+/// <c>Aborted=true</c> = barrido cortado por el circuit breaker de uploads a R2
+/// (<c>AbortReason=r2_upload_unavailable</c>): revisar R2 y relanzar.
+/// <c>MissingPhotoPlaces</c>/<c>RecoveredPlaces</c>/<c>RemainingMissingPlaces</c> = modo
+/// <c>recoverMissing=true</c> (places sin fotos con GooglePlaceId, recuperables vía Details).
 /// </summary>
 public record BackfillPhotosResponse(
     bool R2Configured,
     bool DryRun,
     int TotalPlacesWithPhotos,
     int CandidatePlaces,
+    int DeferredPlaces,
     int ProcessedPlaces,
     int UpdatedPlaces,
+    int FailedPlaces,
+    int ConflictPlaces,
     int RemainingPlaces,
+    bool Aborted,
+    string? AbortReason,
+    int MissingPhotoPlaces,
+    int RecoveredPlaces,
+    int RemainingMissingPlaces,
     Dictionary<string, PhotoDomainCensus> Census,
     Dictionary<string, int> OtherDomains
 );

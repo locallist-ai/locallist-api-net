@@ -326,7 +326,15 @@ public class PlaceImportService
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var placesToAdd = new List<Place>();
+        var pendingChunk = new List<Place>();
         int created = 0, skipped = 0;
+
+        // M5: commit por chunks de 10. El rehost inline es lento (descarga+reencode+upload
+        // por foto) y un import de 500 places no cabe bajo el proxy de 40s de Railway — con
+        // un único SaveChanges al final, la cancelación perdía TODO lo ya rehosteado (Google
+        // facturado + objetos R2 huérfanos sin fila en DB). Con chunks, lo completado antes
+        // de la cancelación queda persistido y el re-run dedupa por GooglePlaceId/Name+City.
+        const int CommitChunkSize = 10;
 
         foreach (var req in requests)
         {
@@ -372,13 +380,21 @@ public class PlaceImportService
             };
 
             placesToAdd.Add(place);
+            pendingChunk.Add(place);
             existingGoogleIds.Add(req.GooglePlaceId ?? "");
             created++;
+
+            if (pendingChunk.Count >= CommitChunkSize)
+            {
+                _db.Places.AddRange(pendingChunk);
+                await _db.SaveChangesAsync(ct);
+                pendingChunk.Clear();
+            }
         }
 
-        if (placesToAdd.Count > 0)
+        if (pendingChunk.Count > 0)
         {
-            _db.Places.AddRange(placesToAdd);
+            _db.Places.AddRange(pendingChunk);
             await _db.SaveChangesAsync(ct);
         }
 

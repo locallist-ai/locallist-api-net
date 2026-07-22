@@ -83,6 +83,17 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<Place>().HasIndex(p => p.Category);
         modelBuilder.Entity<Place>().HasIndex(p => p.GooglePlaceId).IsUnique();
 
+        // Concurrency token vía la columna de sistema xmin de Postgres (sin columna extra):
+        // el backfill de fotos y los PATCH admin pueden escribir el mismo place a la vez.
+        // Sin token, el último SaveChanges pisa silenciosamente al otro (lost update de Photos).
+        // Con xmin, el escritor stale recibe DbUpdateConcurrencyException: el backfill hace
+        // reload+merge (AdminPlacesController.BackfillPhotos) y el PATCH responde 409.
+        modelBuilder.Entity<Place>().Property<uint>("xmin")
+            .HasColumnName("xmin")
+            .HasColumnType("xid")
+            .ValueGeneratedOnAddOrUpdate()
+            .IsConcurrencyToken();
+
         // Cities — unique normalized_name evita duplicados (Miami/miami/MIAMI).
         modelBuilder.Entity<City>().HasIndex(c => c.NormalizedName).IsUnique();
 

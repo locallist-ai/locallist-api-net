@@ -30,6 +30,7 @@ public class AdminPlacesController : ControllerBase
     private readonly ITaxonomySvc _taxonomy;
     private readonly PlaceImportService _importSvc;
     private readonly IPhotoRehostService _photoRehost;
+    private readonly BackfillPhotosCoordinator _backfill;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -46,7 +47,8 @@ public class AdminPlacesController : ControllerBase
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,
         PlaceImportService importSvc,
-        IPhotoRehostService photoRehost)
+        IPhotoRehostService photoRehost,
+        BackfillPhotosCoordinator backfill)
     {
         _db = db;
         _logger = logger;
@@ -58,6 +60,7 @@ public class AdminPlacesController : ControllerBase
         _taxonomy = taxonomy;
         _importSvc = importSvc;
         _photoRehost = photoRehost;
+        _backfill = backfill;
     }
 
     [HttpGet("cities")]
@@ -300,11 +303,36 @@ public class AdminPlacesController : ControllerBase
             place.TranslationStatus = LanguageAccessor.SetI18nString(place.TranslationStatus, "es", request.TranslationStatusEs);
 
         place.UpdatedAt = _clock.GetUtcNow();
-        await _db.SaveChangesAsync(ct);
+        // M2: xmin es concurrency token en Place. Si el backfill de fotos (u otro admin)
+        // escribió el place entre nuestro read y este save, NO pisamos sus cambios en
+        // silencio — 409 y el admin recarga y reintenta con el estado fresco.
+        if (!await TrySaveChangesAsync(ct))
+            return Conflict(new
+            {
+                error = "concurrent_update",
+                message = "The place was modified by another operation (e.g. photo backfill). Reload and retry."
+            });
 
         _logger.LogInformation("Admin updated place {PlaceId}", place.Id);
 
         return Ok(AdminPlaceDto.FromEntity(place));
+    }
+
+    /// <summary>
+    /// SaveChanges que trata <see cref="DbUpdateConcurrencyException"/> (token xmin de Place)
+    /// como resultado, no como excepción: false = otro escritor ganó, el caller decide (409).
+    /// </summary>
+    private async Task<bool> TrySaveChangesAsync(CancellationToken ct)
+    {
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return false;
+        }
     }
 
     [HttpPatch("{id}/review")]
@@ -322,7 +350,8 @@ public class AdminPlacesController : ControllerBase
         place.ReviewedById = await User.GetUserIdAsync(_db, ct);
         place.UpdatedAt = _clock.GetUtcNow();
 
-        await _db.SaveChangesAsync(ct);
+        if (!await TrySaveChangesAsync(ct))
+            return Conflict(new { error = "concurrent_update", message = "The place was modified by another operation. Reload and retry." });
 
         _logger.LogInformation("Admin {Action} place {PlaceId}", request.Status, place.Id);
 
@@ -338,7 +367,8 @@ public class AdminPlacesController : ControllerBase
 
         place.ReviewDeferredAt = _clock.GetUtcNow();
         place.UpdatedAt = _clock.GetUtcNow();
-        await _db.SaveChangesAsync(ct);
+        if (!await TrySaveChangesAsync(ct))
+            return Conflict(new { error = "concurrent_update", message = "The place was modified by another operation. Reload and retry." });
 
         _logger.LogInformation("Admin postponed place {PlaceId}", place.Id);
         return Ok(AdminPlaceDto.FromEntity(place));
@@ -490,15 +520,23 @@ public class AdminPlacesController : ControllerBase
     /// <summary>
     /// Migra a R2 las fotos persistidas cuyo dominio no sea ya el público de R2
     /// (places.googleapis.com con key, hotlinks a wanderlog, etc.). Idempotente y
-    /// re-lanzable: las fotos ya en R2 se saltan y los fallos conservan la URL original
-    /// para el siguiente intento (PlaceDto filtra cualquier URL con key= hacia el cliente).
-    /// La respuesta incluye el censo por dominio (fotos existentes / migradas / fallidas).
-    /// Sin credenciales R2 devuelve solo el censo (r2Configured=false), sin tocar nada.
+    /// re-lanzable en bucle hasta <c>remainingPlaces=0</c>; converge garantizado:
+    /// los places cuyo rehost falla por la fuente entran en backoff (deferral del
+    /// <see cref="BackfillPhotosCoordinator"/>) y dejan paso a los migrables de detrás.
+    /// Solo un barrido a la vez (409 <c>backfill_already_running</c> si hay otro en curso).
+    /// Fallos consecutivos de upload a R2 abortan el barrido (circuit breaker: no se
+    /// factura Google sin poder persistir el resultado). Con <c>recoverMissing=true</c>
+    /// re-obtiene vía Google Details las fotos de places sin fotos con GooglePlaceId.
+    /// La respuesta incluye el censo por dominio (fotos existentes / migradas / fallidas),
+    /// excluyendo places soft-deleted/rejected. Sin credenciales R2 devuelve solo el censo
+    /// (r2Configured=false), sin tocar nada. Runbook completo: Shared/Photos/README.md.
     /// </summary>
     [HttpPost("backfill-photos")]
     public async Task<IActionResult> BackfillPhotos(
         [FromQuery] int limit = 20,
         [FromQuery] bool dryRun = false,
+        [FromQuery] bool recoverMissing = false,
+        [FromQuery] bool retryDeferred = false,
         CancellationToken ct = default)
     {
         // Cada foto implica descarga + reencode + upload (~1-2s). El default 20 mantiene la
@@ -506,12 +544,44 @@ public class AdminPlacesController : ControllerBase
         // el endpoint es re-lanzable hasta que remainingPlaces=0.
         limit = Math.Clamp(limit, 1, 200);
 
+        // C1: serialización del barrido. dryRun es read-only y no compite por el lock.
+        // Nunca se espera el lock (encolarse duplicaría coste al liberar) — 409 inmediato.
+        var lockAcquired = false;
+        if (!dryRun)
+        {
+            lockAcquired = _backfill.TryAcquireRun();
+            if (!lockAcquired)
+                return Conflict(new
+                {
+                    error = "backfill_already_running",
+                    message = "A photo backfill sweep is already in progress. Wait for it to finish and retry."
+                });
+        }
+
+        try
+        {
+            return await RunBackfillPhotosAsync(limit, dryRun, recoverMissing, retryDeferred, ct);
+        }
+        finally
+        {
+            if (lockAcquired) _backfill.ReleaseRun();
+        }
+    }
+
+    private async Task<IActionResult> RunBackfillPhotosAsync(
+        int limit, bool dryRun, bool recoverMissing, bool retryDeferred, CancellationToken ct)
+    {
+        const int UploadFailureAbortThreshold = 3;
+
         var publicHost = _photoRehost.PublicHost;
+        var now = _clock.GetUtcNow();
 
         // Censo global (todas las fotos persistidas, no solo la página procesada) — es el
-        // dato que espera la sesión hub en lugar de un pull manual de DB.
+        // dato que espera la sesión hub en lugar de un pull manual de DB. Los places
+        // soft-deleted/rejected se excluyen de censo y candidatos: migrar sus fotos
+        // pagaría descargas de Google por contenido que la app jamás sirve.
         var allWithPhotos = (await _db.Places.AsNoTracking()
-                .Where(p => p.Photos != null)
+                .Where(p => p.Photos != null && p.Status != "deleted" && p.Status != "rejected")
                 .Select(p => new { p.Id, p.CreatedAt, p.Photos })
                 .ToListAsync(ct))
             .Where(x => x.Photos is { Count: > 0 })
@@ -530,69 +600,181 @@ public class AdminPlacesController : ControllerBase
             }
         }
 
+        // M1: orden estable (CreatedAt, Id) + exclusión de deferred. Un place que falla
+        // entra en backoff y NO vuelve a ocupar la primera página del siguiente run — los
+        // places migrables de detrás avanzan y remainingPlaces converge a 0 aunque haya
+        // fuentes rotas permanentes. retryDeferred=true ignora el backoff (reintento manual).
         var candidates = allWithPhotos
             .Where(x => x.Photos!.Any(url => PhotoUrls.DomainBucket(url, publicHost) != PhotoUrls.BucketR2))
-            .OrderBy(x => x.CreatedAt)
+            .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
             .ToList();
+        var eligible = retryDeferred
+            ? candidates
+            : candidates.Where(x => !_backfill.IsDeferred(x.Id, now)).ToList();
+        var deferredPlaces = candidates.Count - eligible.Count;
+
+        // M6: places sin fotos (ingesta fallida en su día) pero con GooglePlaceId — se pueden
+        // recuperar re-obteniendo los photo refs de Places Details. Photos==null es el único
+        // estado que escribe la ingesta/backfill para "sin fotos" (nunca lista vacía).
+        var missingCandidates = await _db.Places.AsNoTracking()
+            .Where(p => p.Photos == null && p.GooglePlaceId != null &&
+                        p.Status != "deleted" && p.Status != "rejected")
+            .OrderBy(p => p.CreatedAt).ThenBy(p => p.Id)
+            .Select(p => new { p.Id, p.GooglePlaceId })
+            .ToListAsync(ct);
+        var missingEligible = retryDeferred
+            ? missingCandidates
+            : missingCandidates.Where(x => !_backfill.IsDeferred(x.Id, now)).ToList();
 
         var migrated = NewBucketCounter();
         var failed = NewBucketCounter();
-        int processedPlaces = 0, updatedPlaces = 0;
+        int processedPlaces = 0, updatedPlaces = 0, failedPlaces = 0, conflictPlaces = 0;
+        int recoveredPlaces = 0, processedMissing = 0;
+        var uploadFailureStreak = 0;
+        var aborted = false;
+        string? abortReason = null;
 
-        if (!dryRun && _photoRehost.IsConfigured && candidates.Count > 0)
+        if (!dryRun && _photoRehost.IsConfigured)
         {
-            var pageIds = candidates.Take(limit).Select(x => x.Id).ToList();
-            var tracked = await _db.Places
-                .Where(p => pageIds.Contains(p.Id))
-                .ToListAsync(ct);
-            processedPlaces = tracked.Count;
-            var now = _clock.GetUtcNow();
-
-            foreach (var chunk in tracked.Chunk(10))
+            foreach (var candidate in eligible.Take(limit))
             {
-                foreach (var place in chunk)
+                if (ct.IsCancellationRequested || aborted) break;
+
+                // M2: scope de tracking corto — el place se carga fresco justo antes de
+                // procesarlo y se guarda justo después (no se retienen entidades trackeadas
+                // durante todo el barrido).
+                var place = await _db.Places.FirstOrDefaultAsync(p => p.Id == candidate.Id, ct);
+                if (place is null) continue;
+                processedPlaces++;
+                if (place.Photos is not { Count: > 0 }) continue;
+
+                var rehostedMap = new Dictionary<string, string>();
+                var sourceFailure = false;
+
+                foreach (var url in place.Photos.Distinct().ToList())
                 {
                     if (ct.IsCancellationRequested) break;
-                    if (place.Photos is not { Count: > 0 }) continue;
+                    var bucket = PhotoUrls.DomainBucket(url, publicHost);
+                    if (bucket == PhotoUrls.BucketR2) continue;
 
-                    var changed = false;
-                    var newPhotos = new List<string>(place.Photos!.Count);
-                    foreach (var url in place.Photos!)
+                    var result = await _photoRehost.RehostAsync(url, place.Name, ct);
+                    if (result.Outcome == PhotoRehostOutcome.Rehosted)
                     {
-                        var bucket = PhotoUrls.DomainBucket(url, publicHost);
-                        if (bucket == PhotoUrls.BucketR2)
-                        {
-                            newPhotos.Add(url);
-                            continue;
-                        }
-
-                        var result = await _photoRehost.RehostAsync(url, place.Name, ct);
-                        if (result.Outcome == PhotoRehostOutcome.Rehosted)
-                        {
-                            newPhotos.Add(result.Url);
-                            migrated[bucket]++;
-                            changed = true;
-                        }
-                        else
-                        {
-                            // Se conserva la original para reintentarla en el siguiente run;
-                            // el cliente está protegido por el filtro key= de PlaceDto.
-                            newPhotos.Add(url);
-                            failed[bucket]++;
-                        }
+                        rehostedMap[url] = result.Url;
+                        migrated[bucket]++;
+                        uploadFailureStreak = 0;
+                        continue;
                     }
 
-                    if (changed)
+                    // Se conserva la original para un intento futuro; el cliente está
+                    // protegido por el filtro key= de PlaceDto.
+                    failed[bucket]++;
+                    if (result.FailureStage == PhotoRehostFailureStage.Upload)
                     {
-                        place.Photos = newPhotos;
-                        place.UpdatedAt = now;
-                        updatedPlaces++;
+                        // M3: la descarga (facturable) funcionó pero R2 no persiste. Tras N
+                        // fallos consecutivos abortamos el barrido — seguir descargando de
+                        // Google sin poder subir es quemar dinero sin progreso. El place NO
+                        // se difiere (no es culpa de su fuente); el siguiente run lo retoma.
+                        if (++uploadFailureStreak >= UploadFailureAbortThreshold)
+                        {
+                            aborted = true;
+                            abortReason = "r2_upload_unavailable";
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        sourceFailure = true;
                     }
                 }
 
-                // Guardado por chunk — permite reanudar parcialmente ante un timeout.
-                if (!ct.IsCancellationRequested)
-                    await _db.SaveChangesAsync(ct);
+                var (updated, conflicted) = await ApplyRehostMapAsync(place, rehostedMap, now, ct);
+                if (updated) updatedPlaces++;
+                if (conflicted) conflictPlaces++;
+
+                var fullyMigrated = place.Photos is not { Count: > 0 } ||
+                                    place.Photos.All(u => PhotoUrls.DomainBucket(u, publicHost) == PhotoUrls.BucketR2);
+                if (fullyMigrated)
+                {
+                    _backfill.RecordSuccess(place.Id);
+                }
+                else if (sourceFailure)
+                {
+                    _backfill.RecordFailure(place.Id, now);
+                    failedPlaces++;
+                }
+                // Ni migrado ni fallo de fuente (abort por R2 / conflicto): queda elegible
+                // para el próximo run sin backoff.
+            }
+
+            if (recoverMissing && !aborted && !ct.IsCancellationRequested)
+            {
+                var recoveryBudget = Math.Max(0, limit - processedPlaces);
+                foreach (var candidate in missingEligible.Take(recoveryBudget))
+                {
+                    if (ct.IsCancellationRequested || aborted) break;
+
+                    var place = await _db.Places.FirstOrDefaultAsync(p => p.Id == candidate.Id, ct);
+                    if (place is null || place.Photos is { Count: > 0 }) continue;
+                    processedMissing++;
+
+                    var details = await _googlePlaces.GetDetailsAsync(place.GooglePlaceId!, ct);
+                    if (details?.Photos is not { Count: > 0 })
+                    {
+                        // Sin fotos en Google (o Details caído): backoff — no re-facturar
+                        // Details por este place en cada barrido.
+                        _backfill.RecordFailure(place.Id, now);
+                        continue;
+                    }
+
+                    var newPhotos = new List<string>();
+                    var recoverySourceFailure = false;
+                    foreach (var url in details.Photos)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        var result = await _photoRehost.RehostAsync(url, place.Name, ct);
+                        if (result.Outcome == PhotoRehostOutcome.Rehosted)
+                        {
+                            // En recovery solo se persisten URLs de R2 — las de Details
+                            // llevan key= y jamás se escriben en Photos.
+                            newPhotos.Add(result.Url);
+                            uploadFailureStreak = 0;
+                        }
+                        else if (result.FailureStage == PhotoRehostFailureStage.Upload)
+                        {
+                            if (++uploadFailureStreak >= UploadFailureAbortThreshold)
+                            {
+                                aborted = true;
+                                abortReason = "r2_upload_unavailable";
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            recoverySourceFailure = true;
+                        }
+                    }
+
+                    if (newPhotos.Count > 0)
+                    {
+                        place.Photos = newPhotos;
+                        place.UpdatedAt = now;
+                        if (await TrySaveChangesAsync(ct))
+                        {
+                            recoveredPlaces++;
+                            _backfill.RecordSuccess(place.Id);
+                        }
+                        else
+                        {
+                            conflictPlaces++;
+                            _db.Entry(place).State = EntityState.Detached;
+                        }
+                    }
+                    else if (recoverySourceFailure)
+                    {
+                        _backfill.RecordFailure(place.Id, now);
+                    }
+                }
             }
         }
 
@@ -605,16 +787,25 @@ public class AdminPlacesController : ControllerBase
             DryRun: dryRun,
             TotalPlacesWithPhotos: allWithPhotos.Count,
             CandidatePlaces: candidates.Count,
+            DeferredPlaces: deferredPlaces,
             ProcessedPlaces: processedPlaces,
             UpdatedPlaces: updatedPlaces,
-            RemainingPlaces: candidates.Count - processedPlaces,
+            FailedPlaces: failedPlaces,
+            ConflictPlaces: conflictPlaces,
+            RemainingPlaces: Math.Max(0, eligible.Count - processedPlaces),
+            Aborted: aborted,
+            AbortReason: abortReason,
+            MissingPhotoPlaces: missingCandidates.Count,
+            RecoveredPlaces: recoveredPlaces,
+            RemainingMissingPlaces: Math.Max(0, missingEligible.Count - processedMissing),
             Census: census,
             OtherDomains: otherDomains);
 
         _logger.LogInformation(
-            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} processed={Proc} updated={Upd} migrated={Mig} failed={Fail}",
+            "backfill-photos: configured={Cfg} dryRun={Dry} totalWithPhotos={Total} candidates={Cand} deferred={Def} processed={Proc} updated={Upd} failedPlaces={FailP} conflicts={Conf} aborted={Abort} migrated={Mig} failed={Fail} recovered={Rec}",
             response.R2Configured, dryRun, response.TotalPlacesWithPhotos, response.CandidatePlaces,
-            processedPlaces, updatedPlaces, migrated.Values.Sum(), failed.Values.Sum());
+            deferredPlaces, processedPlaces, updatedPlaces, failedPlaces, conflictPlaces, aborted,
+            migrated.Values.Sum(), failed.Values.Sum(), recoveredPlaces);
 
         return Ok(response);
 
@@ -625,6 +816,46 @@ public class AdminPlacesController : ControllerBase
             [PhotoUrls.BucketWanderlog] = 0,
             [PhotoUrls.BucketOther] = 0,
         };
+    }
+
+    /// <summary>
+    /// Aplica el mapa sourceUrl→r2Url sobre <c>place.Photos</c> y guarda. Si un PATCH admin
+    /// escribió el place mientras rehosteábamos (token xmin), recarga el estado fresco y
+    /// re-aplica el mapa SOLO sobre las URLs que siguen presentes — los cambios del PATCH
+    /// (fotos añadidas/quitadas, otros campos) se conservan siempre (M2: nunca lost update).
+    /// </summary>
+    private async Task<(bool updated, bool conflicted)> ApplyRehostMapAsync(
+        Place place, IReadOnlyDictionary<string, string> rehostedMap, DateTimeOffset now, CancellationToken ct)
+    {
+        if (rehostedMap.Count == 0) return (false, false);
+
+        var conflicted = false;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (place.Photos is not { Count: > 0 }) return (false, conflicted);
+
+            var newPhotos = place.Photos.Select(u => rehostedMap.GetValueOrDefault(u, u)).ToList();
+            if (newPhotos.SequenceEqual(place.Photos)) return (false, conflicted);
+
+            place.Photos = newPhotos;
+            place.UpdatedAt = now;
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+                return (true, conflicted);
+            }
+            catch (DbUpdateConcurrencyException ex)
+            {
+                conflicted = true;
+                foreach (var entry in ex.Entries)
+                    await entry.ReloadAsync(ct); // estado fresco (incluye lo que escribió el PATCH)
+            }
+        }
+
+        _logger.LogWarning(
+            "backfill-photos: giving up on place {PlaceId} after repeated concurrency conflicts (will retry next run)",
+            place.Id);
+        return (false, conflicted);
     }
 
     [HttpPost("{id}/translate")]
@@ -716,6 +947,14 @@ public class AdminPlacesController : ControllerBase
             .Where(p => p.WhyThisPlace == PlaceTaxonomy.GooglePlaceholderWhyThisPlace)
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.WhyThisPlace, _ => ""), ct);
         _logger.LogInformation("backfill-descriptions: clearedLegacyPlaceholder={N}", clearedLegacy);
+
+        // El ExecuteUpdate anterior bumpea xmin (concurrency token) de las filas placeholder
+        // FUERA de banda — pero esas mismas filas están trackeadas en `candidates`. Sin refrescar
+        // su xmin, el SaveChanges de abajo dispararía DbUpdateConcurrencyException contra nuestra
+        // propia escritura. Recargamos las trackeadas (deja WhyThisPlace="" en las placeholder,
+        // que es justo el estado a regenerar).
+        foreach (var entry in _db.ChangeTracker.Entries<Place>().ToList())
+            await entry.ReloadAsync(ct);
 
         int googleFilled = 0, geminiFilled = 0, failed = 0;
         var errors = new List<object>();

@@ -22,4 +22,19 @@ public class R2Options
     /// del bucket (mismo default que Scripts/upload-photos-to-r2.js — es información pública).
     /// </summary>
     public string PublicUrl { get; set; } = "https://pub-7f09e69b5b644703825b6068a05dee8f.r2.dev";
+
+    /// <summary>
+    /// Allowlist de hosts desde los que el rehost puede descargar (defensa SSRF —
+    /// <see cref="PhotoUrls.IsAllowedSource"/>). Soporta exacto y wildcard <c>*.sufijo</c>.
+    /// Ampliable por config (<c>R2__AllowedPhotoSourceHosts__0=...</c>) si aparece una fuente
+    /// nueva legítima — el backfill reporta los hosts no migrados en <c>otherDomains</c>.
+    /// </summary>
+    public List<string> AllowedPhotoSourceHosts { get; set; } =
+    [
+        "places.googleapis.com",
+        "*.googleusercontent.com",
+        "*.ggpht.com",
+        "wanderlog.com",
+        "*.wanderlog.com",
+    ];
 }
