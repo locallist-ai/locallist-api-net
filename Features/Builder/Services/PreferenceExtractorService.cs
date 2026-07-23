@@ -162,6 +162,10 @@ public class PreferenceExtractorService
         if (context.Exclusions != null && context.Exclusions.Count > 0)
             prefs.Exclusions = context.Exclusions.Take(5).ToList();
 
+        // StartDate — fecha de calendario del viaje, la lleva el scheduler day-aware.
+        // El JSON del LLM no puede setearla (JsonIgnore en el DTO); solo fluye por aquí.
+        prefs.StartDate = context.StartDate;
+
         // VibesPrimary → added to Vibes list for the RAG embedding query
         if (!string.IsNullOrWhiteSpace(context.VibesPrimary))
         {

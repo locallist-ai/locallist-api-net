@@ -70,6 +70,13 @@ public class ChatGenerateRequest
 {
     [Required]
     public Guid SessionId { get; set; }
+
+    /// <summary>
+    /// Fecha de inicio del viaje (calendario, sin tz). El flujo chat deriva el
+    /// TripContext server-side desde los slots, así que la fecha NO viaja en slots:
+    /// viaja en el request de generación. Nullable = compat. Validada en el controller.
+    /// </summary>
+    public DateOnly? StartDate { get; set; }
 }
 
 // Extractor JSON schema that Gemini must return

@@ -351,7 +351,8 @@ public class PlanGenerationService : IPlanGenerationService
             context.Pace ?? "",
             CanonicalList(context.Dietary),
             CanonicalList(context.Exclusions),
-            context.VibesPrimary ?? "");
+            context.VibesPrimary ?? "",
+            context.StartDate?.ToString("yyyy-MM-dd") ?? "");
 
         unchecked
         {

@@ -103,6 +103,149 @@ public class OpeningHoursTests
         Assert.Null(next);
     }
 
+    // ── Day-aware IsOpenAt (viability C1) ──────────────────────────────────────
+    // Google Places open.day: 0=Sunday…6=Saturday == (int)DayOfWeek.
+
+    [Fact]
+    public void IsOpenAt_DayAware_MatchesSameDay()
+    {
+        // Tuesday(2) 10:00–18:00
+        var data = DayHours(2, 10, 18);
+        Assert.True(data.IsOpenAt(DayOfWeek.Tuesday, TimeSpan.FromHours(12)));
+    }
+
+    [Fact]
+    public void IsOpenAt_DayAware_MondayClosed_DoesNotMatchTuesdayHours()
+    {
+        // Vizcaya case: only open Tuesday(2); arriving on Monday must NOT match.
+        var data = DayHours(2, 10, 18);
+        Assert.False(data.IsOpenAt(DayOfWeek.Monday, TimeSpan.FromHours(12)));
+        Assert.True(data.IsOpenAt(DayOfWeek.Tuesday, TimeSpan.FromHours(12)));
+    }
+
+    [Fact]
+    public void IsOpenAt_DayAware_BeforeOpen_And_AfterClose_False()
+    {
+        var data = DayHours(2, 10, 18);
+        Assert.False(data.IsOpenAt(DayOfWeek.Tuesday, TimeSpan.FromHours(9)));
+        Assert.False(data.IsOpenAt(DayOfWeek.Tuesday, TimeSpan.FromHours(18)));
+    }
+
+    [Fact]
+    public void IsOpenAt_DayAware_CrossMidnight_EveningOnOpenDay()
+    {
+        // Friday(5) 22:00 → Saturday(6) 02:00
+        var data = CrossMidnight(5, 22, 6, 2);
+        Assert.True(data.IsOpenAt(DayOfWeek.Friday, TimeSpan.FromHours(23)));
+    }
+
+    [Fact]
+    public void IsOpenAt_DayAware_CrossMidnight_TailAttributedToNextDay()
+    {
+        // Friday 22:00 → Saturday 02:00: arrival Saturday 01:00 matches the tail.
+        var data = CrossMidnight(5, 22, 6, 2);
+        Assert.True(data.IsOpenAt(DayOfWeek.Saturday, TimeSpan.FromHours(1)));
+    }
+
+    [Fact]
+    public void IsOpenAt_DayAware_CrossMidnight_DoesNotBleedToOtherDays()
+    {
+        var data = CrossMidnight(5, 22, 6, 2);
+        // Sunday 01:00 is NOT covered (only Friday's tail spills into Saturday).
+        Assert.False(data.IsOpenAt(DayOfWeek.Sunday, TimeSpan.FromHours(1)));
+        // Saturday evening 22:00 is NOT covered (no Saturday period).
+        Assert.False(data.IsOpenAt(DayOfWeek.Saturday, TimeSpan.FromHours(22)));
+    }
+
+    [Fact]
+    public void IsOpenAt_DayAware_NullClose_OpenEveryDay()
+    {
+        var data = new OpeningHoursData(
+            Periods: [new OpeningPeriod(new OpeningTime(0, 0, 0), null)],
+            WeekdayDescriptions: []);
+        Assert.True(data.IsOpenAt(DayOfWeek.Wednesday, TimeSpan.FromHours(3)));
+        Assert.True(data.IsOpenAt(DayOfWeek.Sunday, TimeSpan.FromHours(23)));
+    }
+
+    // ── Day-aware NextOpenAt (M4: never jump to another day) ───────────────────
+
+    [Fact]
+    public void NextOpenAt_DayAware_SameDayLaterWindow_ReturnsIt()
+    {
+        // Monday(1) 14:00–18:00 + Tuesday(2) 09:00–12:00.
+        var data = new OpeningHoursData(
+            Periods:
+            [
+                new OpeningPeriod(new OpeningTime(1, 14, 0), new OpeningTime(1, 18, 0)),
+                new OpeningPeriod(new OpeningTime(2, 9, 0),  new OpeningTime(2, 12, 0)),
+            ],
+            WeekdayDescriptions: []);
+        // Clock 09:00 Monday → must return Monday 14:00, NOT Tuesday 09:00.
+        Assert.Equal(TimeSpan.FromHours(14), data.NextOpenAt(DayOfWeek.Monday, TimeSpan.FromHours(9)));
+    }
+
+    [Fact]
+    public void NextOpenAt_DayAware_NoSameDayWindow_ReturnsNull()
+    {
+        // Only Tuesday hours; asking on Monday must NOT jump to Tuesday.
+        var data = DayHours(2, 9, 12);
+        Assert.Null(data.NextOpenAt(DayOfWeek.Monday, TimeSpan.FromHours(9)));
+    }
+
+    // ── NextFitAt (duration must fit; same calendar day only) ──────────────────
+
+    [Fact]
+    public void NextFitAt_ClockBeforeOpen_ReturnsOpenWhenDurationFits()
+    {
+        var data = DayHours(1, 14, 18); // Monday 14–18
+        Assert.Equal(TimeSpan.FromHours(14), data.NextFitAt(DayOfWeek.Monday, TimeSpan.FromHours(9), 60));
+    }
+
+    [Fact]
+    public void NextFitAt_ClockInsideWindow_ReturnsClock()
+    {
+        var data = DayHours(1, 9, 17);
+        Assert.Equal(TimeSpan.FromHours(15), data.NextFitAt(DayOfWeek.Monday, TimeSpan.FromHours(15), 60));
+    }
+
+    [Fact]
+    public void NextFitAt_NotEnoughTimeBeforeClose_ReturnsNull()
+    {
+        var data = DayHours(1, 9, 17); // closes 17:00
+        // 16:30 + 60min = 17:30 > 17:00 → does not fit, and no later window that day.
+        Assert.Null(data.NextFitAt(DayOfWeek.Monday, new TimeSpan(16, 30, 0), 60));
+    }
+
+    [Fact]
+    public void NextFitAt_DoesNotCrossToAnotherDay()
+    {
+        // Monday 9–17 (won't fit a 120min visit at 16:30) + Tuesday 9–12.
+        var data = new OpeningHoursData(
+            Periods:
+            [
+                new OpeningPeriod(new OpeningTime(1, 9, 0),  new OpeningTime(1, 17, 0)),
+                new OpeningPeriod(new OpeningTime(2, 9, 0),  new OpeningTime(2, 12, 0)),
+            ],
+            WeekdayDescriptions: []);
+        // Monday can't fit; must NOT borrow Tuesday's window → null.
+        Assert.Null(data.NextFitAt(DayOfWeek.Monday, new TimeSpan(16, 30, 0), 120));
+    }
+
+    [Fact]
+    public void NextFitAt_MultipleWindows_ReturnsEarliestThatFits()
+    {
+        // Monday 9–12 and Monday 14–18. Clock 11:30, 60min: first window fails
+        // (11:30+60=12:30>12), second fits → 14:00.
+        var data = new OpeningHoursData(
+            Periods:
+            [
+                new OpeningPeriod(new OpeningTime(1, 9, 0),  new OpeningTime(1, 12, 0)),
+                new OpeningPeriod(new OpeningTime(1, 14, 0), new OpeningTime(1, 18, 0)),
+            ],
+            WeekdayDescriptions: []);
+        Assert.Equal(TimeSpan.FromHours(14), data.NextFitAt(DayOfWeek.Monday, new TimeSpan(11, 30, 0), 60));
+    }
+
     // ── Scheduler integration ─────────────────────────────────────────────────
 
     [Fact]
@@ -193,5 +336,17 @@ public class OpeningHoursTests
     private static OpeningHoursData SimpleHours(int openHour, int closeHour) =>
         new(
             Periods: [new OpeningPeriod(new OpeningTime(1, openHour, 0), new OpeningTime(1, closeHour, 0))],
+            WeekdayDescriptions: []);
+
+    // Single window on a specific weekday (Google day int: 0=Sun…6=Sat).
+    private static OpeningHoursData DayHours(int day, int openHour, int closeHour) =>
+        new(
+            Periods: [new OpeningPeriod(new OpeningTime(day, openHour, 0), new OpeningTime(day, closeHour, 0))],
+            WeekdayDescriptions: []);
+
+    // A single window that crosses midnight (open on openDay, closes on closeDay).
+    private static OpeningHoursData CrossMidnight(int openDay, int openHour, int closeDay, int closeHour) =>
+        new(
+            Periods: [new OpeningPeriod(new OpeningTime(openDay, openHour, 0), new OpeningTime(closeDay, closeHour, 0))],
             WeekdayDescriptions: []);
 }
