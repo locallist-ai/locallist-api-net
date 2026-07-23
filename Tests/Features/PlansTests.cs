@@ -294,6 +294,70 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(await db.Plans.AsNoTracking().AnyAsync(p => p.Name == uniqueName));
     }
 
+    // ── Bordes exactos de la ventana [today-1, today+MaxTripHorizonDays] via HTTP real. Cierra
+    // ── el MINOR de review: los tests de arriba solo pineaban el interior (+30) y muy fuera
+    // ── (+400); estos pinean el borde exacto en ambos extremos, aceptado y rechazado. El offset
+    // ── se calcula sobre el mismo DateTime.UtcNow que usa el controller (ver PlansController.cs).
+
+    [Theory]
+    [InlineData(-1)]  // ayer: borde inferior aceptado (margen de 1 dia por desfase de huso horario)
+    [InlineData(365)] // MaxTripHorizonDays: borde superior aceptado
+    public async Task CreatePlan_WithStartDateAtAcceptedBoundary_Returns201AndPersists(int offsetDays)
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-sdb-{offsetDays}-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-sdb-{offsetDays}-{userId:N}@test.com");
+
+        var startDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(offsetDays);
+        var startIso = startDate.ToString("yyyy-MM-dd");
+        var uniqueName = $"Manual Plan Boundary Accept {offsetDays} {userId:N}";
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = uniqueName,
+            city = "Miami",
+            durationDays = 1,
+            startDate = startIso,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var createBody = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = createBody.GetProperty("id").GetGuid();
+        Assert.Equal(startIso, createBody.GetProperty("startDate").GetString());
+
+        var db = fixture.GetDbContext();
+        var persisted = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+        Assert.Equal(startDate, persisted.StartDate);
+    }
+
+    [Theory]
+    [InlineData(-2)]  // anteayer: justo por debajo del margen de -1 dia
+    [InlineData(366)] // justo por encima de MaxTripHorizonDays (365)
+    public async Task CreatePlan_WithStartDateJustOutsideBoundary_Returns400AndDoesNotPersist(int offsetDays)
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-sdr-{offsetDays}-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-sdr-{offsetDays}-{userId:N}@test.com");
+
+        var badDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(offsetDays).ToString("yyyy-MM-dd");
+        var uniqueName = $"Manual Plan Boundary Reject {offsetDays} {userId:N}";
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = uniqueName,
+            city = "Miami",
+            durationDays = 1,
+            startDate = badDate,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, createResponse.StatusCode);
+        var body = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("invalid_start_date", body.GetProperty("error").GetString());
+
+        var db = fixture.GetDbContext();
+        Assert.False(await db.Plans.AsNoTracking().AnyAsync(p => p.Name == uniqueName));
+    }
+
     private static Plan MakePlan(
         string name,
         bool isPublic = true,
