@@ -439,10 +439,15 @@ public class SchedulingService
             }
             else if (weekday is DayOfWeek wd)
             {
-                // Day-aware gate (C1 + M2 + M4). NextFitAt only sees the given weekday's own
-                // windows and requires the full visit to fit before close (M2). IsOpenAt is
-                // tail-aware ("open right now", including a previous day's cross-midnight tail
-                // that NextFitAt cannot see) — hence the two are combined for the open-now case.
+                // Day-aware gate (C1 + M2 + M4). NextFitAt only sees THIS weekday's own windows and
+                // requires the full visit to fit before close (M2); a same-day cross-midnight window
+                // (Open.Day == wd, e.g. Sat 22:00 to Sun 02:00) is handled by it. IsOpenAt is
+                // additionally tail-aware: it also reports "open right now" for a PREVIOUS day's
+                // cross-midnight tail (Fri 22:00 to Sat 02:00 seen at Sat 01:00) that NextFitAt does
+                // not see. Such a pure tail therefore fails the openNow && fit == arrival guard (fit
+                // is null) and is treated as closed — not a viability violation, just a false
+                // negative, and unreachable in practice since the walk clock starts at DayStart
+                // (09:30) and only advances, so a pre-dawn arrival never occurs.
                 var fit      = openingHours.NextFitAt(wd, arrival, duration);
                 bool openNow = openingHours.IsOpenAt(wd, arrival);
 
@@ -479,35 +484,62 @@ public class SchedulingService
             else
             {
                 // Legacy day-agnostic fallback (StartDate == null / old clients): accept a window
-                // on ANY weekday. No duration-fit or dead-gap check — preserves prior behavior.
-                if (!openingHours.IsOpenAt(arrival))
+                // on ANY weekday. C1 (closed THIS weekday) is inapplicable without a date and stays
+                // that way by design, but M2 (the visit must fit before close) is day-independent —
+                // so the fit-before-close check is enforced here too, mirroring the day-aware gate.
+                // The invariant "impossible to schedule a visit that does not fit before close" is
+                // therefore UNCONDITIONAL, with or without a trip date.
+                var fit      = openingHours.NextFitAt(arrival, duration);
+                bool openNow = openingHours.IsOpenAt(arrival);
+
+                if (openNow && fit == arrival)
                 {
-                    var next = openingHours.NextOpenAt(arrival);
-                    if (next is null)
-                    {
-                        AddWarningOnce(result.Warnings, "place_closed_skipped");
-                        _logger.LogInformation(
-                            "Builder: schedule day={Day} place={Place} skipped (closed, no later window)",
-                            day, place.Name);
-                        continue;
-                    }
-                    arrival    = next.Value;
+                    // Open now and the full visit fits before this window closes → schedule as-is.
+                }
+                else if (fit is null)
+                {
+                    // No window on any weekday admits the full visit before close (M2), or the place
+                    // never opens later. Same skip semantics as the day-aware path.
+                    AddWarningOnce(result.Warnings, "place_closed_skipped");
+                    _logger.LogInformation(
+                        "Builder: schedule day={Day} place={Place} skipped (closed or does-not-fit)",
+                        day, place.Name);
+                    continue;
+                }
+                else if (fit.Value - arrival > MaxWaitForOpen)
+                {
+                    // A fitting window exists but the wait exceeds the dead-gap tolerance (M4).
+                    // Skip WITHOUT advancing the clock — no huge empty gaps in the itinerary.
+                    AddWarningOnce(result.Warnings, "dead_gap_skipped");
+                    _logger.LogInformation(
+                        "Builder: schedule day={Day} place={Place} skipped (dead gap {Gap}min > {Cap}min)",
+                        day, place.Name, (int)(fit.Value - arrival).TotalMinutes, (int)MaxWaitForOpen.TotalMinutes);
+                    continue;
+                }
+                else
+                {
+                    // Wait until the next fitting window (within tolerance).
+                    arrival    = fit.Value;
                     travelInfo = null; // gap absorbed by the opening wait (legacy semantics)
                 }
             }
 
             // ── M3: hard day cap ──────────────────────────────────────────────────
-            // Any arrival past the cap truncates the day (break — the remaining candidates,
-            // being later on the monotonic clock, cannot fit either). Nightlife gets a later
-            // cap since it is anchored last. Replaces the old "clamp any ≥23h to 23:59".
+            // Any arrival past the cap is dropped, but we keep evaluating the rest of the day
+            // instead of breaking: the clock is NOT advanced on a skip, and arrival =
+            // last_emitted_clock + travel(prev -> candidate), so a LATER candidate with a shorter
+            // leg can have a smaller arrival that still fits before the cap. A hard break here
+            // (wrongly assuming a monotonic clock across candidates) would leave viable stops —
+            // even a whole day — dropped. Nightlife gets a later cap since it is anchored last.
+            // Replaces the old "clamp any >=23h to 23:59".
             var hardCap = IsNightlife(place) ? NightlifeHardCap : DayHardCap;
             if (arrival > hardCap)
             {
                 AddWarningOnce(result.Warnings, "day_truncated");
                 _logger.LogInformation(
-                    "Builder: schedule day={Day} truncated at {Arrival} (hard cap {Cap}) — {Remaining} candidate(s) dropped",
-                    day, arrival, hardCap, places.Count - i);
-                break;
+                    "Builder: schedule day={Day} place={Place} dropped, arrival {Arrival} past hard cap {Cap}",
+                    day, place.Name, arrival, hardCap);
+                continue;
             }
 
             if (!overpacked && arrival > DaySoftCap)

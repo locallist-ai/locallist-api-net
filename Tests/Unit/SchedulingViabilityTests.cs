@@ -174,6 +174,47 @@ public class SchedulingViabilityTests
         AssertViable(result, [place], startDate: null);
     }
 
+    [Fact]
+    public void Legacy_NullStartDate_VisitRunsPastClose_NotScheduled()
+    {
+        // MAJOR (round 2): the M2 fit-before-close invariant must hold WITHOUT a trip date too.
+        // Place open every day 16:00-17:00 (a 60-min window). A 90-min food visit cannot fit
+        // before close on ANY weekday, so with StartDate == null it must NOT be scheduled — the
+        // day-agnostic gate has to enforce M2 just like the day-aware one. Before the fix, the
+        // legacy path jumped the clock to 16:00 and scheduled a visit ending at 17:30, 30 min
+        // past close.
+        var narrow = new OpeningHoursData(
+            Periods: Enumerable.Range(0, 7)
+                .Select(d => new OpeningPeriod(new OpeningTime(d, 16, 0), new OpeningTime(d, 17, 0)))
+                .ToList(),
+            WeekdayDescriptions: []);
+        var place  = MakePlace("food", narrow, durationMin: 90);
+        var result = Svc().BuildPlanSchedule([place], Prefs(startDate: null), seed: 1);
+
+        Assert.DoesNotContain(result.Stops, s => s.PlaceId == place.Id);
+        Assert.Contains("place_closed_skipped", result.Warnings);
+        AssertViable(result, [place], startDate: null);
+    }
+
+    [Fact]
+    public void Legacy_NullStartDate_VisitFitsBeforeClose_Scheduled()
+    {
+        // Companion to the above: a 45-min coffee visit DOES fit inside the same 16:00-17:00
+        // window, and the wait from 09:30 is skipped only for the fit — but here the place opens
+        // 10:00-18:00 so the wait is within tolerance and the full visit fits → scheduled and
+        // viable under the day-agnostic gate.
+        var hours = new OpeningHoursData(
+            Periods: Enumerable.Range(0, 7)
+                .Select(d => new OpeningPeriod(new OpeningTime(d, 10, 0), new OpeningTime(d, 18, 0)))
+                .ToList(),
+            WeekdayDescriptions: []);
+        var place  = MakePlace("coffee", hours, durationMin: 45);
+        var result = Svc().BuildPlanSchedule([place], Prefs(startDate: null), seed: 1);
+
+        Assert.Contains(result.Stops, s => s.PlaceId == place.Id);
+        AssertViable(result, [place], startDate: null);
+    }
+
     // ── Determinism + viability together ──────────────────────────────────────
 
     [Fact]
@@ -227,16 +268,29 @@ public class SchedulingViabilityTests
                     Assert.True(arrival > p, $"arrivals not strictly increasing on day {stop.DayNumber}: {p} then {arrival}");
                 prev = arrival;
 
-                if (startDate is DateOnly sd && place.OpeningHours is not null)
+                if (place.OpeningHours is not null)
                 {
                     var data = OpeningHoursData.FromJsonDocument(place.OpeningHours);
                     Assert.NotNull(data);
-                    var weekday = sd.AddDays(stop.DayNumber - 1).DayOfWeek;
 
-                    Assert.True(data!.IsOpenAt(weekday, arrival),
-                        $"stop at {arrival} on {weekday} is NOT within an opening window");
-                    // The full visit must fit before close: NextFitAt at this arrival returns it unchanged.
-                    Assert.Equal(arrival, data.NextFitAt(weekday, arrival, stop.SuggestedDurationMin));
+                    if (startDate is DateOnly sd)
+                    {
+                        // Day-aware: open on the correct weekday AND the full visit fits before close.
+                        var weekday = sd.AddDays(stop.DayNumber - 1).DayOfWeek;
+                        Assert.True(data!.IsOpenAt(weekday, arrival),
+                            $"stop at {arrival} on {weekday} is NOT within an opening window");
+                        // The full visit must fit before close: NextFitAt at this arrival returns it unchanged.
+                        Assert.Equal(arrival, data.NextFitAt(weekday, arrival, stop.SuggestedDurationMin));
+                    }
+                    else
+                    {
+                        // Legacy day-agnostic (StartDate == null): C1 cannot be checked without a date,
+                        // but M2 (fit before close) is day-independent and MUST still hold. This is the
+                        // hardening that makes the invariant unconditional — with or without a trip date.
+                        Assert.True(data!.IsOpenAt(arrival),
+                            $"legacy stop at {arrival} is NOT within any opening window");
+                        Assert.Equal(arrival, data.NextFitAt(arrival, stop.SuggestedDurationMin));
+                    }
                 }
             }
         }

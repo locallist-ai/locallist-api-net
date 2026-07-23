@@ -174,6 +174,42 @@ public sealed record OpeningHoursData(
         return candidates.Count > 0 ? candidates[0] : null;
     }
 
+    /// <summary>
+    /// Day-agnostic counterpart of <see cref="NextFitAt(DayOfWeek, TimeSpan, int)"/>: returns the
+    /// earliest arrival at or after <paramref name="timeOfDay"/> such that a visit of
+    /// <paramref name="durationMin"/> minutes fits entirely within an opening window on ANY weekday
+    /// (start + duration &lt;= close). Returns null when no window can accommodate the full duration.
+    /// Fallback used when the trip date is unknown (StartDate == null): C1 (closed this weekday)
+    /// cannot be enforced without a date, but M2 (the visit must fit before close) is day-independent
+    /// and IS enforced here.
+    /// </summary>
+    public TimeSpan? NextFitAt(TimeSpan timeOfDay, int durationMin)
+    {
+        var duration = TimeSpan.FromMinutes(durationMin);
+        TimeSpan? best = null;
+
+        foreach (var period in Periods)
+        {
+            if (period.Open is null) continue;
+            if (period.Close is null)
+            {
+                // 24/7 open (null Close) — fits from the clock, no close constraint.
+                if (best is null || timeOfDay < best) best = timeOfDay;
+                continue;
+            }
+
+            var start = ToTimeSpan(period.Open);
+            var end   = ToTimeSpan(period.Close);
+            if (end <= start) end += OneDay; // crosses midnight
+
+            var effectiveStart = timeOfDay > start ? timeOfDay : start;
+            if (effectiveStart + duration <= end && (best is null || effectiveStart < best))
+                best = effectiveStart;
+        }
+
+        return best;
+    }
+
     private OpeningPeriod? FindWindowAt(TimeSpan timeOfDay)
     {
         double h = timeOfDay.TotalHours;
