@@ -27,10 +27,12 @@ public class PlanStartDatePersistenceTests(ApiFixture fixture) : IClassFixture<A
         fixture.FakeGemini.Calls.Clear();
     }
 
-    // ── 1 + 3: creacion desde TripContextDto persiste StartDate y el GET lo devuelve ──
+    // ── 1 + 3: creacion via /builder/chat (TripContextDto) persiste StartDate y el GET lo devuelve ──
+    // Estos golpean BuilderController (/builder/chat), no ChatController (/chat/generate): el nombre
+    // Builder_* refleja el path real que ejercitan (antes se llamaban Chat_*, enganoso).
 
     [Fact]
-    public async Task Chat_AuthenticatedWithStartDate_PersistsAndGetReturnsSameValue()
+    public async Task Builder_AuthenticatedWithStartDate_PersistsAndGetReturnsSameValue()
     {
         await SeedPublishedMiamiPlaces(3);
         StubGeminiPrefs();
@@ -69,10 +71,10 @@ public class PlanStartDatePersistenceTests(ApiFixture fixture) : IClassFixture<A
         Assert.Equal(startDate, persisted.StartDate);
     }
 
-    // ── 2: creacion sin fecha => StartDate null, sin regresion, GET devuelve null ──
+    // ── 2: creacion via /builder/chat sin fecha => StartDate null, sin regresion, GET devuelve null ──
 
     [Fact]
-    public async Task Chat_AuthenticatedWithoutStartDate_PersistsNull_GetOmitsStartDate()
+    public async Task Builder_AuthenticatedWithoutStartDate_PersistsNull_GetOmitsStartDate()
     {
         await SeedPublishedMiamiPlaces(3);
         StubGeminiPrefs();
@@ -97,6 +99,121 @@ public class PlanStartDatePersistenceTests(ApiFixture fixture) : IClassFixture<A
         Assert.Null(persisted.StartDate);
 
         // GET no debe romper. startDate ausente (WhenWritingNull) o explicitamente null.
+        var getResponse = await client.GetAsync($"/plans/{planId}");
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        var getBody = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
+        AssertStartDateAbsentOrNull(getBody);
+    }
+
+    // ── MAJOR (repro permanente): /chat/generate autenticado persiste StartDate en la ──
+    // ── columna dedicada Y coherente con el blob JSON TripContext, y el GET la devuelve. ──
+    // Antes del fix el path /chat/generate serializaba la fecha en el JSON TripContext pero
+    // dejaba plans.start_date en NULL (persistencia asimetrica vs BuilderController).
+
+    [Fact]
+    public async Task ChatGenerate_AuthenticatedWithStartDate_PersistsColumnCoherentWithTripContextJson()
+    {
+        await SeedPublishedMiamiPlaces(3);
+        StubGeminiPrefs();
+
+        var userId = Guid.NewGuid();
+        var email = $"chatsd-{userId:N}@test.com";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = email, FirebaseUid = $"app-{userId}" });
+        var session = new ChatSession
+        {
+            UserId = userId,
+            Status = "ready",
+            TurnCount = 3,
+            SlotsJson = JsonSerializer.Serialize(new
+            {
+                city = Miami, days = 1, groupType = "couple",
+                categories = new[] { "food" }, budget = "moderate"
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var startDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7);
+        var startIso = startDate.ToString("yyyy-MM-dd");
+
+        // Token de la APP (HS256/AppScheme): mismo helper que el resto de tests autenticados de
+        // /chat/generate; garantiza que la sesion se resuelve por propietario (userId del token).
+        var client = fixture.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", fixture.CreateAppToken(userId, email));
+
+        var createResponse = await client.PostAsJsonAsync("/chat/generate", new
+        {
+            sessionId = session.Id,
+            startDate = startIso,
+        });
+
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var createBody = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = createBody.GetProperty("plan").GetProperty("id").GetGuid();
+
+        // La columna dedicada plans.start_date quedo persistida (antes del fix: NULL).
+        var readDb = fixture.GetDbContext();
+        var persisted = await readDb.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+        Assert.Equal(startDate, persisted.StartDate);
+
+        // Coherencia total: el blob JSON TripContext lleva la MISMA fecha que la columna.
+        Assert.NotNull(persisted.TripContext);
+        Assert.Equal(startIso, GetStartDateFromTripContext(persisted.TripContext!));
+
+        // Round-trip por HTTP: el GET la relee de la fila persistida.
+        var getResponse = await client.GetAsync($"/plans/{planId}");
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        var getBody = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(startIso, getBody.GetProperty("startDate").GetString());
+    }
+
+    // ── /chat/generate sin fecha => StartDate null (compat), sin regresion ──
+
+    [Fact]
+    public async Task ChatGenerate_AuthenticatedWithoutStartDate_PersistsNull()
+    {
+        await SeedPublishedMiamiPlaces(3);
+        StubGeminiPrefs();
+
+        var userId = Guid.NewGuid();
+        var email = $"chatnosd-{userId:N}@test.com";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = email, FirebaseUid = $"app-{userId}" });
+        var session = new ChatSession
+        {
+            UserId = userId,
+            Status = "ready",
+            TurnCount = 3,
+            SlotsJson = JsonSerializer.Serialize(new
+            {
+                city = Miami, days = 1, groupType = "couple",
+                categories = new[] { "food" }, budget = "moderate"
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", fixture.CreateAppToken(userId, email));
+
+        var createResponse = await client.PostAsJsonAsync("/chat/generate", new
+        {
+            sessionId = session.Id, // sin startDate
+        });
+
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var createBody = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = createBody.GetProperty("plan").GetProperty("id").GetGuid();
+
+        var readDb = fixture.GetDbContext();
+        var persisted = await readDb.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+        Assert.Null(persisted.StartDate);
+
         var getResponse = await client.GetAsync($"/plans/{planId}");
         Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
         var getBody = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
@@ -163,6 +280,20 @@ public class PlanStartDatePersistenceTests(ApiFixture fixture) : IClassFixture<A
     {
         if (body.TryGetProperty("startDate", out var sd))
             Assert.Equal(JsonValueKind.Null, sd.ValueKind);
+    }
+
+    /// <summary>
+    /// Extrae la fecha (ISO yyyy-MM-dd) del blob JSON TripContext persistido en la fila. Busca la
+    /// propiedad StartDate sin depender del casing del serializador para no acoplarse a el.
+    /// </summary>
+    private static string? GetStartDateFromTripContext(JsonDocument tripContext)
+    {
+        foreach (var prop in tripContext.RootElement.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, "startDate", StringComparison.OrdinalIgnoreCase))
+                return prop.Value.ValueKind == JsonValueKind.Null ? null : prop.Value.GetString();
+        }
+        return null;
     }
 
     private void StubGeminiPrefs()

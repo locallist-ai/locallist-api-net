@@ -307,6 +307,11 @@ public class ChatController : ControllerBase
             Type = "ai",
             Description = result.PlanDescription,
             DurationDays = result.Prefs.Days,
+            // API-3 ronda 2: persiste la fecha ya validada (arriba, invalid_start_date via
+            // TripContextDto.IsStartDateWithinWindow). Es la misma que viaja en tripContext.StartDate
+            // (asignada mas arriba) y por tanto la misma que se serializa en el blob TripContext:
+            // columna dedicada y JSON quedan coherentes. null si el cliente no envia fecha (compat).
+            StartDate = request.StartDate,
             TripContext = JsonSerializer.SerializeToDocument(tripContext),
             IsPublic = false,
             CreatedById = userId,
