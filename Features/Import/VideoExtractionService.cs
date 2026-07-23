@@ -94,13 +94,33 @@ public sealed class VideoExtractionService
             uploadedName = uploaded.Name;
             var file = await _fileClient.WaitUntilActiveAsync(uploaded.Name, ct);
 
-            // 3. Duración autoritativa desde la metadata del File API.
-            if (file.DurationSec is { } duration && duration > _options.MaxDurationSeconds)
+            // 3. Duración autoritativa desde la metadata del File API. FAIL-CLOSED: si el File API
+            // no reporta duración, NO procesamos el vídeo entero a ciegas — eso sería coste +
+            // retención sin el límite legal verificado. Sin duración autoritativa → rechazo.
+            if (file.DurationSec is not { } duration)
+            {
+                PersistMetric(platform, mimeType, sizeBytes, durationSec: null, caption, result: null,
+                    diag: null, errorCode: "duration_unknown",
+                    errorMessage: "File API returned no authoritative duration");
+                throw new ExtractionUnavailableException("duration_unknown");
+            }
+            if (duration > _options.MaxDurationSeconds)
             {
                 PersistMetric(platform, mimeType, sizeBytes, duration, caption, result: null,
                     diag: null, errorCode: "video_too_long",
                     errorMessage: $"{duration:F0}s > {_options.MaxDurationSeconds}s");
                 throw new VideoTooLongException(duration, _options.MaxDurationSeconds);
+            }
+
+            // Tamaño AUTORITATIVO del File API: el caller pudo declarar un sizeBytes falso en el
+            // rechazo pre-subida. Preferimos el reportado en ACTIVE; fallback al del finalize.
+            var authoritativeSize = file.SizeBytes ?? uploaded.SizeBytes;
+            if (authoritativeSize is { } realSize && realSize > _options.MaxSizeBytes)
+            {
+                PersistMetric(platform, mimeType, realSize, duration, caption, result: null,
+                    diag: null, errorCode: "video_too_large",
+                    errorMessage: $"{realSize}B > {_options.MaxSizeBytes}B (authoritative)");
+                throw new VideoTooLargeException(realSize, _options.MaxSizeBytes);
             }
 
             // 4. Extracción multimodal.
@@ -332,15 +352,30 @@ Output schema:
 
     private async Task SafeDeleteAsync(string fileName)
     {
-        try
+        // Retención con ángulo legal: un delete 503 transitorio no debe dejar el vídeo residente.
+        // Retry corto con backoff; el resultado final se swallowea para no enmascarar la extracción.
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            await _fileClient.DeleteAsync(fileName, CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            // Un borrado fallido es un problema de retención, no de la extracción: lo dejamos
-            // en el log (visible para monitoreo) pero no propagamos para no enmascarar el resultado.
-            _logger.LogError(ex, "Video import: failed to delete uploaded file {File}", fileName);
+            try
+            {
+                await _fileClient.DeleteAsync(fileName, CancellationToken.None);
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempt == maxAttempts)
+                {
+                    _logger.LogError(ex,
+                        "Video import: failed to delete uploaded file {File} after {Attempts} attempts (retention risk)",
+                        fileName, maxAttempts);
+                    return;
+                }
+                _logger.LogWarning(ex,
+                    "Video import: delete attempt {Attempt}/{Max} failed for {File}, retrying",
+                    attempt, maxAttempts, fileName);
+                await Task.Delay(TimeSpan.FromMilliseconds(150 * attempt), CancellationToken.None);
+            }
         }
     }
 

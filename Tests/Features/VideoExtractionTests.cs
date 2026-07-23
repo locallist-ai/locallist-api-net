@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using LocalList.API.NET.Features.Import;
+using LocalList.API.NET.Shared.AI;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LocalList.API.Tests.Features;
@@ -244,6 +245,90 @@ public class VideoExtractionTests(ApiFixture fixture) : IClassFixture<ApiFixture
             Assert.Single(result.Places);
         }
 
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+    }
+
+    // ── M-1. Finalize 2xx pero cuerpo malformado → el fichero huérfano se borra ─
+    [Fact]
+    public async Task Upload_2xxButUnparseableBody_DeletesOrphanFile()
+    {
+        // El finalize devuelve 2xx (fichero YA creado en Gemini) pero el JSON está truncado:
+        // ParseFile lanza. El name aún es recuperable → borrado best-effort, no huérfano.
+        fixture.FakeVideoImport.FinalizeBodyOverride =
+            """{ "file": { "name": "files/test-video-abc", "uri": "x", "state": "PROCESS""";
+
+        using var scope = fixture.Services.CreateScope();
+        var client = scope.ServiceProvider.GetRequiredService<IGeminiFileClient>();
+
+        await Assert.ThrowsAsync<ExtractionUnavailableException>(() =>
+            client.UploadAsync(new MemoryStream(new byte[16]), "video/mp4", 16, "import-test", CancellationToken.None));
+
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+    }
+
+    // ── M-2. Duración ausente en metadata → FAIL-CLOSED (rechazo, no procesa) ───
+    [Fact]
+    public async Task Extraction_NoAuthoritativeDuration_FailsClosed_DeletesFile()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.OmitDurationOnActive = true; // ACTIVE sin videoDuration
+
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            await Assert.ThrowsAsync<ExtractionUnavailableException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "video/mp4", "tiktok", null, CancellationToken.None));
+        }
+
+        Assert.True(fixture.FakeVideoImport.UploadStarted);
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled); // NO se procesó el vídeo
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("duration_unknown", metric.ErrorCode);
+    }
+
+    // ── M-2. Tamaño autoritativo del File API > límite → rechazo aunque el ──────
+    //         caller declarase un sizeBytes pequeño en el pre-check.
+    [Fact]
+    public async Task Extraction_AuthoritativeSizeOverLimit_Rejected_DeletesFile()
+    {
+        await ClearMetricsAsync();
+        // Caller declara 1 KB (pasa el pre-check), pero el File API reporta > 150 MB.
+        fixture.FakeVideoImport.ActiveSizeBytes = MaxSize + 1;
+
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            await Assert.ThrowsAsync<VideoTooLargeException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "video/mp4", "tiktok", null, CancellationToken.None));
+        }
+
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled);
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("video_too_large", metric.ErrorCode);
+    }
+
+    // ── m-3. Delete 503 transitorio → se reintenta hasta borrar de verdad ──────
+    [Fact]
+    public async Task Extraction_DeleteTransientFailure_RetriedUntilDeleted()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.DeleteFailuresBeforeSuccess = 2; // 2×503 y luego OK
+
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            var result = await svc.ExtractAsync(Bytes(), 1024, "video/mp4", "tiktok", null, CancellationToken.None);
+            Assert.Single(result.Places);
+        }
+
+        // El retry insistió y el fichero acabó borrado (no quedó en retención).
+        Assert.True(fixture.FakeVideoImport.DeleteAttempts >= 3);
         Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
     }
 }

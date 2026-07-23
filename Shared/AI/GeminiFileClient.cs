@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using LocalList.API.NET.Features.Import;
 using Microsoft.Extensions.Options;
 
@@ -124,7 +125,71 @@ public sealed class GeminiFileClient : IGeminiFileClient
         }
 
         var body = await uploadResp.Content.ReadAsStringAsync(ct);
-        return ParseFile(body);
+
+        // El finalize devolvió 2xx: el fichero YA existe server-side en Gemini. Si el parseo del
+        // cuerpo falla (truncado/malformado), NO podemos dejarlo huérfano — sería retención de
+        // contenido de terceros. Extraemos el name de forma tolerante y lo borramos best-effort
+        // antes de propagar el fallo, de modo que un fichero creado SIEMPRE se pueda borrar.
+        GeminiFile file;
+        try
+        {
+            file = ParseFile(body);
+        }
+        catch (Exception ex)
+        {
+            var orphan = TryExtractFileName(body);
+            if (!string.IsNullOrEmpty(orphan))
+            {
+                _logger.LogError(ex,
+                    "File API: 2xx finalize but unparseable body; best-effort deleting orphan {File}", orphan);
+                await TryBestEffortDeleteAsync(orphan, apiKey);
+            }
+            else
+            {
+                _logger.LogError(ex,
+                    "File API: 2xx finalize but unparseable body and no recoverable file name (possible orphan)");
+            }
+            throw new ExtractionUnavailableException("upload_parse_failed");
+        }
+
+        // Defensa: un 2xx sin name deja un fichero que el servicio no podría borrar en su finally.
+        if (string.IsNullOrEmpty(file.Name))
+        {
+            _logger.LogError("File API: 2xx finalize but response carried no file name");
+            throw new ExtractionUnavailableException("upload_no_name");
+        }
+
+        return file;
+    }
+
+    // Nombre de fichero de la File API: "files/xyz". Tolerante a cuerpos NO-JSON (truncados).
+    private static readonly Regex FileNameRegex =
+        new(@"""name""\s*:\s*""(files/[^""\\]+)""", RegexOptions.Compiled);
+
+    /// <summary>Extrae "files/xyz" de un cuerpo aunque no sea JSON completo/parseable.</summary>
+    private static string? TryExtractFileName(string? body)
+    {
+        if (string.IsNullOrEmpty(body)) return null;
+        var m = FileNameRegex.Match(body);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>Borrado que nunca lanza: limpia huérfanos sin enmascarar el fallo real de subida.</summary>
+    private async Task TryBestEffortDeleteAsync(string fileName, string apiKey)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Delete, $"{BaseUrl}/v1beta/{fileName}");
+            req.Headers.Add("x-goog-api-key", apiKey);
+            using var resp = await _http.SendAsync(req, CancellationToken.None);
+            if (!resp.IsSuccessStatusCode)
+                _logger.LogError("File API: best-effort orphan delete returned {Status} for {File}",
+                    (int)resp.StatusCode, fileName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "File API: best-effort orphan delete threw for {File}", fileName);
+        }
     }
 
     public async Task<GeminiFile> WaitUntilActiveAsync(string fileName, CancellationToken ct = default)

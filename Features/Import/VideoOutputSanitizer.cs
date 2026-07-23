@@ -71,7 +71,9 @@ public static class VideoOutputSanitizer
             {
                 if (vibes.Count >= MaxVibes) break;
                 var clean = SanitizeField(v.ValueKind == JsonValueKind.String ? v.GetString() : null, MaxVibeLength);
-                if (!string.IsNullOrWhiteSpace(clean)) vibes.Add(clean);
+                // Un vibe es texto libre del modelo: pasa por HasDrift igual que name/short fields.
+                // Un "vibe" con el canary o una identity-probe filtraría el prompt vía este array.
+                if (!string.IsNullOrWhiteSpace(clean) && !OutputValidator.HasDrift(clean)) vibes.Add(clean);
             }
         }
 

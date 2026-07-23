@@ -677,9 +677,19 @@ public class FakeGeminiFileApi : HttpMessageHandler
     public bool FailProcessing { get; set; } = false;
     public Func<HttpRequestMessage, HttpResponseMessage>? GenerateContentResponder { get; set; }
 
+    /// <summary>Si !=null, el finalize devuelve 2xx con este cuerpo crudo (para probar el orphan de M-1).</summary>
+    public string? FinalizeBodyOverride { get; set; }
+    /// <summary>Si true, files.get en ACTIVE OMITE videoDuration (fail-closed de M-2).</summary>
+    public bool OmitDurationOnActive { get; set; } = false;
+    /// <summary>Si !=null, files.get en ACTIVE reporta este sizeBytes autoritativo (M-2 tamaño).</summary>
+    public long? ActiveSizeBytes { get; set; }
+    /// <summary>Nº de deletes que devuelven 503 antes del primer 2xx (retry de m-3).</summary>
+    public int DeleteFailuresBeforeSuccess { get; set; } = 0;
+
     public bool UploadStarted { get; private set; }
     public bool UploadFinalized { get; private set; }
     public bool GenerateContentCalled { get; private set; }
+    public int DeleteAttempts { get; private set; }
     public List<string> DeleteCalledFor { get; } = new();
 
     private int _pollCount;
@@ -719,9 +729,14 @@ public class FakeGeminiFileApi : HttpMessageHandler
         PollActiveAfter = 0;
         FailProcessing = false;
         GenerateContentResponder = null;
+        FinalizeBodyOverride = null;
+        OmitDurationOnActive = false;
+        ActiveSizeBytes = null;
+        DeleteFailuresBeforeSuccess = 0;
         UploadStarted = false;
         UploadFinalized = false;
         GenerateContentCalled = false;
+        DeleteAttempts = 0;
         DeleteCalledFor.Clear();
         _pollCount = 0;
     }
@@ -746,7 +761,7 @@ public class FakeGeminiFileApi : HttpMessageHandler
         if (request.Method == HttpMethod.Post && url.Contains("upload.internal/session"))
         {
             UploadFinalized = true;
-            var body = $$"""
+            var body = FinalizeBodyOverride ?? $$"""
                 { "file": { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "video/mp4", "sizeBytes": "1024", "state": "PROCESSING" } }
                 """;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
@@ -766,6 +781,16 @@ public class FakeGeminiFileApi : HttpMessageHandler
         // 4. files.delete — clave del invariante de NO retención.
         if (request.Method == HttpMethod.Delete && url.Contains("/v1beta/files/"))
         {
+            int attempt;
+            lock (DeleteCalledFor) { attempt = ++DeleteAttempts; }
+            // Simula 503 transitorios para ejercitar el retry corto de SafeDeleteAsync (m-3).
+            if (attempt <= DeleteFailuresBeforeSuccess)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                {
+                    Content = new StringContent("{\"error\":\"transient\"}", Encoding.UTF8, "application/json")
+                });
+            }
             lock (DeleteCalledFor) { DeleteCalledFor.Add(url.Split("/v1beta/")[^1]); }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -781,11 +806,14 @@ public class FakeGeminiFileApi : HttpMessageHandler
             if (FailProcessing) state = "FAILED";
             else state = _pollCount > PollActiveAfter ? "ACTIVE" : "PROCESSING";
 
-            var durationField = state == "ACTIVE"
+            var durationField = state == "ACTIVE" && !OmitDurationOnActive
                 ? $$""", "videoMetadata": { "videoDuration": "{{DurationSec.ToString(System.Globalization.CultureInfo.InvariantCulture)}}s" }"""
                 : "";
+            var sizeField = state == "ACTIVE" && ActiveSizeBytes is { } sz
+                ? ", \"sizeBytes\": \"" + sz.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\""
+                : "";
             var body = $$"""
-                { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "video/mp4", "state": "{{state}}"{{durationField}} }
+                { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "video/mp4", "state": "{{state}}"{{sizeField}}{{durationField}} }
                 """;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {

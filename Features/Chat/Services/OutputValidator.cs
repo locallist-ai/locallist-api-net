@@ -21,6 +21,7 @@ public static class OutputValidator
         Html,           // HTML tags or XSS-like content
         CodeFence,      // Markdown code block
         PromptEcho,     // Reflects system prompt fragment
+        ImperativeInjection, // Imperative jailbreak phrasing ("ignore previous instructions", "you are now…")
     }
 
     private static readonly (Regex Pattern, DriftKind Kind)[] Validators =
@@ -47,6 +48,16 @@ public static class OutputValidator
 
         // Code fences
         (new(@"```|\bcode\b.*?{|<code>|<pre>", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.CodeFence),
+
+        // Imperative injection — phrasings a legitimate place name/descriptor would never contain.
+        // Placed last so existing categories (canary/identity/url/html/echo) win their DriftKind.
+        // Conservative on false positives: each pattern needs an injection-specific collocation.
+        (new(@"\b(ignore|disregard|forget|override)\b.{0,30}\b(previous|prior|above|earlier|all)\b.{0,20}\b(instruction|instructions|prompt|prompts|rule|rules|command|commands|context)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        (new(@"\byou are now\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        (new(@"\bdisable\b.{0,20}\b(safety|guardrail|guardrails|filter|filters|moderation|restriction|restrictions)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        (new(@"\bsystem prompt\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        (new(@"\badmin\b.{0,15}\b(token|password|access|mode|credential|credentials)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        (new(@"\bnew instructions?\b\s*[:\-]", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
     };
 
     /// <summary>

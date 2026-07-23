@@ -33,9 +33,19 @@ public static class VideoCostEstimator
     /// <summary>Estima los tokens de media (vídeo + audio) para un vídeo de la duración dada.</summary>
     public static MediaTokenEstimate EstimateMediaTokens(double durationSec)
     {
-        var seconds = Math.Max(0, durationSec);
-        var video = (int)Math.Round(seconds * VideoTokensPerSecond, MidpointRounding.AwayFromZero);
-        var audio = (int)Math.Round(seconds * AudioTokensPerSecond, MidpointRounding.AwayFromZero);
-        return new MediaTokenEstimate(video, audio, video + audio);
+        var seconds = double.IsNaN(durationSec) ? 0 : Math.Max(0, durationSec);
+        // Clamp en el dominio double ANTES del cast: `(int)(seconds * 258)` con duración enorme
+        // hace wrap a negativo (overflow del cast). Saturamos a int.MaxValue en su lugar.
+        var video = ClampToInt(seconds * VideoTokensPerSecond);
+        var audio = ClampToInt(seconds * AudioTokensPerSecond);
+        var total = ClampToInt((double)video + audio);
+        return new MediaTokenEstimate(video, audio, total);
+    }
+
+    private static int ClampToInt(double value)
+    {
+        if (double.IsNaN(value) || value <= 0) return 0;
+        if (value >= int.MaxValue) return int.MaxValue;
+        return (int)Math.Round(value, MidpointRounding.AwayFromZero);
     }
 }
