@@ -5,6 +5,7 @@ using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.PostHog;
 
@@ -37,6 +38,23 @@ public class PlansController : ControllerBase
         if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
 
+        // Misma validacion de ventana que /builder/chat y /chat/generate (paridad total):
+        // null => OK (plan manual sin fecha). Fuera de [today-1, today+MaxTripHorizonDays] => 400.
+        // El builder manual no corre scheduler, asi que la fecha solo se persiste para display.
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!TripContextDto.IsStartDateWithinWindow(request.StartDate, today))
+        {
+            _logger.LogInformation(
+                "Plans: create rejected invalid_start_date startDate={StartDate}",
+                request.StartDate?.ToString("yyyy-MM-dd") ?? "(null)");
+            return BadRequest(new
+            {
+                error = "invalid_start_date",
+                message = $"Trip start date must be between today and {TripContextDto.MaxTripHorizonDays} days from now.",
+                startDate = request.StartDate?.ToString("yyyy-MM-dd"),
+            });
+        }
+
         var now = DateTimeOffset.UtcNow;
 
         var plan = new Plan
@@ -46,6 +64,7 @@ public class PlansController : ControllerBase
             City = request.City.Trim(),
             Type = request.Type?.Trim() ?? "custom",
             DurationDays = request.DurationDays,
+            StartDate = request.StartDate,
             IsPublic = false,
             IsShowcase = false,
             CreatedById = userId.Value,
