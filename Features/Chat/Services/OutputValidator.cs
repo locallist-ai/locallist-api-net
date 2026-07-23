@@ -69,7 +69,7 @@ public static class OutputValidator
         // system/your…) has to sit immediately before instructions|prompt|rules|guidelines. This
         // catches "ignore all previous instructions" / "forget your rules" but NOT marketing copy
         // like "forget all the rules of fine dining" (no qualifier before "rules").
-        (new(@"\b(ignore|disregard|forget|override|bypass)\b\s+(?:all\s+|any\s+|these\s+|those\s+|the\s+)*(?:previous|prior|above|earlier|initial|foregoing|preceding|original|system|your|my)\s+(?:instruction|instructions|prompt|prompts|rule|rules|command|commands|context|guideline|guidelines|directive|directives)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        (new(@"\b(ignore|disregard|forget|override|bypass)\b\s+(?:all\s+|any\s+|these\s+|those\s+|the\s+)*(?:(?:previous|prior|above|earlier|initial|foregoing|preceding|original|system|your|my)\s+)+(?:instruction|instructions|prompt|prompts|rule|rules|command|commands|context|guideline|guidelines|directive|directives)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
         (new(@"\byou are now\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
         (new(@"\bdisable\b.{0,20}\b(safety|guardrail|guardrails|filter|filters|moderation|restriction|restrictions)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
         (new(@"\bsystem prompt\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
