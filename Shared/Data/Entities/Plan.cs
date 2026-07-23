@@ -45,6 +45,16 @@ public class Plan
     [Column("duration_days")]
     public int DurationDays { get; set; } = 1;
 
+    /// <summary>
+    /// Fecha de inicio del viaje (fecha de calendario, sin zona horaria). Copiada desde
+    /// TripContextDto.StartDate en la creacion (API-3). null = plan legacy sin fecha (compat
+    /// total). Persistirla permite mostrar la fecha del viaje, derivar la fecha de cada dia
+    /// (dia N = StartDate + (N-1)) y re-seguir/editar el plan con contexto temporal. Mapea a
+    /// columna Postgres `date`. Se serializa como "yyyy-MM-dd", coherente con API-1.
+    /// </summary>
+    [Column("start_date")]
+    public DateOnly? StartDate { get; set; }
+
     [Column("trip_context", TypeName = "jsonb")]
     public JsonDocument? TripContext { get; set; }
 

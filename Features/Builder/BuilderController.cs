@@ -163,6 +163,10 @@ public class BuilderController : ControllerBase
                 Type = "ai",
                 Description = result.PlanDescription,
                 DurationDays = result.Prefs.Days,
+                // API-3: persiste la fecha del viaje enviada por el wizard. null si el cliente
+                // no la envia (flujo sin fecha / cliente viejo), sin romper. Ya validada arriba
+                // (invalid_start_date) via TripContextDto.IsStartDateWithinWindow.
+                StartDate = request.TripContext?.StartDate,
                 TripContext = request.TripContext != null
                     ? JsonSerializer.SerializeToDocument(request.TripContext)
                     : JsonSerializer.SerializeToDocument(new {}),

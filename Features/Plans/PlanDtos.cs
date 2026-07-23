@@ -13,6 +13,9 @@ public record PlanDto(
     string? Description,
     string? ImageUrl,
     int DurationDays,
+    // API-3: fecha de inicio persistida (yyyy-MM-dd). null = plan sin fecha. La app la usa
+    // para mostrar la fecha del viaje y derivar la fecha de cada dia (dia N = StartDate + N-1).
+    DateOnly? StartDate,
     JsonDocument? TripContext,
     bool IsPublic,
     bool IsShowcase,
@@ -29,7 +32,7 @@ public record PlanDto(
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
-            p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.IsPublic, p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt
         );
     }
@@ -65,6 +68,8 @@ public record PlanDetailDto(
     string? Description,
     string? ImageUrl,
     int DurationDays,
+    // API-3: fecha de inicio persistida (yyyy-MM-dd). null = plan sin fecha.
+    DateOnly? StartDate,
     JsonDocument? TripContext,
     bool IsPublic,
     bool IsShowcase,
@@ -116,7 +121,7 @@ public record PlanDetailDto(
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
-            p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.IsPublic, p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt, days,
             routeSegments?.Count > 0 ? routeSegments.ToList() : null
         );
