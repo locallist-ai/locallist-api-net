@@ -7,15 +7,22 @@ public class TripContextDto
     /// <summary>Max trip horizon: a start date further out than this is rejected (plan R2 default).</summary>
     public const int MaxTripHorizonDays = 365;
 
+    /// <summary>
+    /// Max trip length in days. The Plus wizard offers up to 14 days (maxDaysForTier).
+    /// Shared clamp ceiling used by the extraction chain (PreferenceExtractorService /
+    /// SlotExtractorService) so a Plus trip of 8–14 days is no longer silently recut to 7.
+    /// Raised from 7 to 14 by API-2 now that the day-aware scheduler walks the full range.
+    /// </summary>
+    public const int MaxTripDays = 14;
+
     [MaxLength(20)]
     public string? GroupType { get; set; }
 
-    // [Range(1,14)]: el wizard Plus ofrece hasta 14 días (maxDaysForTier). Antes
-    // estaba en [1,7] → un Plus con 8-14 días recibía un 400 de model-binding.
-    // NOTA: el clamp a [1,7] en PreferenceExtractorService/SlotExtractorService
-    // sigue vigente (fuera del scope de esta task de contrato) — soportar >7 días
-    // end-to-end es trabajo del slice del scheduler.
-    [Range(1, 14)]
+    // [Range(1, MaxTripDays)]: el wizard Plus ofrece hasta 14 días (maxDaysForTier). Antes
+    // estaba en [1,7] → un Plus con 8-14 días recibía un 400 de model-binding. El clamp a 14
+    // en PreferenceExtractorService/SlotExtractorService ya está alineado (API-2): el scheduler
+    // day-aware recorre todo el rango.
+    [Range(1, MaxTripDays)]
     public int? Days { get; set; }
 
     /// <summary>

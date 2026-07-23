@@ -54,13 +54,32 @@ public class SchedulingService
     // ── Day scheduling constants ──────────────────────────────────────────────
 
     private static readonly TimeSpan DayStart       = TimeSpan.FromHours(9.5);   // 09:30
-    private static readonly TimeSpan DaySoftCap     = TimeSpan.FromHours(22);    // 22:00
+    private static readonly TimeSpan DaySoftCap     = TimeSpan.FromHours(22);    // 22:00 → warning day_overpacked
     private static readonly TimeSpan LunchIdeal     = TimeSpan.FromHours(13);    // 13:00
     private static readonly TimeSpan LunchWinStart  = TimeSpan.FromHours(11.5);  // 11:30
     private static readonly TimeSpan LunchWinEnd    = TimeSpan.FromHours(14.5);  // 14:30
     private static readonly TimeSpan DinnerIdeal    = TimeSpan.FromHours(19.5);  // 19:30
     private static readonly TimeSpan DinnerWinStart = TimeSpan.FromHours(18);    // 18:00
     private static readonly TimeSpan DinnerWinEnd   = TimeSpan.FromHours(21.5);  // 21:30
+
+    // ── Viability gate constants (API-2) ───────────────────────────────────────
+    // Tunables: single edit here, no refactor. Kept as named constants so Pablo can
+    // adjust the viability envelope (dead-gap tolerance, hard day cap, per-leg travel
+    // ceiling) without touching the walk logic. Promote to IOptions if per-city/per-tier
+    // tuning is ever needed.
+
+    /// <summary>M4: max time the clock may jump forward waiting for a place to open before
+    /// the gap is judged "dead" and the candidate is skipped instead of waited out.</summary>
+    private static readonly TimeSpan MaxWaitForOpen  = TimeSpan.FromMinutes(90);
+
+    /// <summary>M3: hard end-of-day cap. Any arrival past this truncates the day (break).
+    /// Applies to every stop except nightlife, which gets the later <see cref="NightlifeHardCap"/>.</summary>
+    private static readonly TimeSpan DayHardCap      = new(23, 0, 0);   // 23:00
+    private static readonly TimeSpan NightlifeHardCap = new(23, 59, 0); // 23:59 — nightlife exception
+
+    /// <summary>m8: per-leg travel ceiling. A single travel leg longer than this marks the
+    /// candidate as geographically implausible (Roamy 8h/220mi class bug) and it is skipped.</summary>
+    private const int MaxLegTravelMin = 60;
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -83,7 +102,11 @@ public class SchedulingService
         for (int day = 1; day <= prefs.Days; day++)
         {
             if (!dayPlaces.TryGetValue(day, out var places) || places.Count == 0) continue;
-            await ScheduleDayAsync(places, result, day, rng, ct);
+
+            // Map each ordinal day to its real weekday: day 1 = StartDate, day 2 = StartDate+1, …
+            // null when the client sent no trip date → day-agnostic legacy gate downstream.
+            DayOfWeek? weekday = prefs.StartDate?.AddDays(day - 1).DayOfWeek;
+            await ScheduleDayAsync(places, result, day, weekday, rng, ct);
         }
 
         return result;
@@ -194,7 +217,7 @@ public class SchedulingService
 
     // ── Step 3: schedule one day ──────────────────────────────────────────────
 
-    private async Task ScheduleDayAsync(List<Place> places, ScheduleResult result, int day, Random rng, CancellationToken ct)
+    private async Task ScheduleDayAsync(List<Place> places, ScheduleResult result, int day, DayOfWeek? weekday, Random rng, CancellationToken ct)
     {
         var ordered = OrderByGeography(places, rng);
         AnchorMeals(ordered);       // position food near meal windows first
@@ -204,7 +227,7 @@ public class SchedulingService
         // Avoids up to N-1 sequential Mapbox calls on cold cache; DB cache writes are idempotent
         // (ON CONFLICT DO NOTHING), so concurrent pre-fetches across requests are safe.
         var prefetched = await PrefetchDaySegmentsAsync(ordered, ct);
-        await WalkDayClockAsync(ordered, result, day, prefetched, ct);
+        await WalkDayClockAsync(ordered, result, day, weekday, prefetched, ct);
     }
 
     // Pre-fetches route segments for all consecutive place pairs in parallel (concurrency cap 4,
@@ -344,12 +367,17 @@ public class SchedulingService
 
     // ── Clock walk ────────────────────────────────────────────────────────────
 
+    // Walks the day clock over the geographically-ordered candidates, gating each by
+    // opening hours (day-aware when <paramref name="weekday"/> is known), a hard day cap,
+    // a dead-gap tolerance and a per-leg travel ceiling. This is the viability core:
+    // it must never emit a stop at a place that is closed on this weekday, nor a visit
+    // that runs past its closing time.
     private async Task WalkDayClockAsync(
-        List<Place> places, ScheduleResult result, int day,
+        List<Place> places, ScheduleResult result, int day, DayOfWeek? weekday,
         Dictionary<(Guid, Guid), TravelInfoDto> prefetched,
         CancellationToken ct)
     {
-        var clock      = DayStart;
+        var clock       = DayStart;
         bool overpacked = false;
         int orderIndex  = 0;
 
@@ -358,12 +386,13 @@ public class SchedulingService
             var place    = places[i];
             int duration = VisitDurationFor(place);
 
-            // Accumulate travel from previous emitted stop BEFORE checking opening hours
+            // Travel from the LAST EMITTED stop (never from a skipped candidate). Computed
+            // before the gate but NOT committed to the clock until the stop is actually emitted,
+            // so a skip leaves the clock in place for the next candidate.
             TravelInfoDto? travelInfo = null;
             if (orderIndex > 0)
             {
-                // Find the last emitted stop to compute travel from
-                var prevStop = result.Stops.LastOrDefault(s => s.DayNumber == day);
+                var prevStop  = result.Stops.LastOrDefault(s => s.DayNumber == day);
                 var prevPlace = prevStop is not null
                     ? places.FirstOrDefault(p => p.Id == prevStop.PlaceId)
                     : null;
@@ -376,67 +405,142 @@ public class SchedulingService
                         (double)place.Latitude.Value, (double)place.Longitude.Value);
                     string mode = dist < 2 ? "walk" : "drive";
 
-                    // Use pre-fetched result for consecutive pairs (the common case).
-                    // Falls back to a live resolver call only when a prior stop was skipped
-                    // (opening-hours check), producing a non-consecutive pair not in the dict.
+                    // Use pre-fetched result for consecutive pairs (the common case). Falls back
+                    // to a live resolver call only when a prior stop was skipped, producing a
+                    // non-consecutive (last-emitted → current) pair not present in the dict.
                     if (!prefetched.TryGetValue((prevPlace.Id, place.Id), out travelInfo))
                         travelInfo = await ResolveTravelAsync(prevPlace, place, dist, mode, ct);
-
-                    clock += TimeSpan.FromMinutes(travelInfo.duration_min);
                 }
             }
 
-            // Opening hours check — shift clock forward if needed, skip if no window fits
-            var openingHours = OpeningHoursData.FromJsonDocument(place.OpeningHours);
-            if (openingHours is not null)
+            // m8: per-leg travel ceiling. A single leg longer than MaxLegTravelMin means the
+            // candidate is geographically implausible — skip WITHOUT advancing the clock. The
+            // next candidate re-resolves travel from the same last-emitted stop.
+            if (travelInfo is not null && travelInfo.duration_min > MaxLegTravelMin)
             {
-                if (!openingHours.IsOpenAt(clock))
+                AddWarningOnce(result.Warnings, "leg_too_far");
+                _logger.LogInformation(
+                    "Builder: schedule day={Day} place={Place} skipped (leg_too_far {Min}min > {Cap}min)",
+                    day, place.Name, travelInfo.duration_min, MaxLegTravelMin);
+                continue;
+            }
+
+            // Tentative arrival = current clock + travel. Only committed on emit.
+            var arrival = clock + TimeSpan.FromMinutes(travelInfo?.duration_min ?? 0);
+
+            // ── Opening-hours gate ────────────────────────────────────────────────
+            var openingHours = OpeningHoursData.FromJsonDocument(place.OpeningHours);
+            if (openingHours is null)
+            {
+                // m6: absent/malformed hours are NOT treated as closed (missing data ≠ closed),
+                // so no gate is applied — but the plan flags that some stops were scheduled
+                // without hour validation.
+                AddWarningOnce(result.Warnings, "no_hours_data");
+            }
+            else if (weekday is DayOfWeek wd)
+            {
+                // Day-aware gate (C1 + M2 + M4). NextFitAt only sees the given weekday's own
+                // windows and requires the full visit to fit before close (M2). IsOpenAt is
+                // tail-aware ("open right now", including a previous day's cross-midnight tail
+                // that NextFitAt cannot see) — hence the two are combined for the open-now case.
+                var fit      = openingHours.NextFitAt(wd, arrival, duration);
+                bool openNow = openingHours.IsOpenAt(wd, arrival);
+
+                if (openNow && fit == arrival)
                 {
-                    var next = openingHours.NextOpenAt(clock);
+                    // Open now and the full visit fits before this window closes → schedule as-is.
+                }
+                else if (fit is null)
+                {
+                    // Closed this weekday, no window at all, or the visit runs past close (M2).
+                    AddWarningOnce(result.Warnings, "place_closed_skipped");
+                    _logger.LogInformation(
+                        "Builder: schedule day={Day} weekday={Wd} place={Place} skipped (closed or does-not-fit)",
+                        day, wd, place.Name);
+                    continue;
+                }
+                else if (fit.Value - arrival > MaxWaitForOpen)
+                {
+                    // A fitting window exists but the wait exceeds the dead-gap tolerance (M4).
+                    // Skip WITHOUT advancing the clock — no huge empty gaps in the itinerary.
+                    AddWarningOnce(result.Warnings, "dead_gap_skipped");
+                    _logger.LogInformation(
+                        "Builder: schedule day={Day} weekday={Wd} place={Place} skipped (dead gap {Gap}min > {Cap}min)",
+                        day, wd, place.Name, (int)(fit.Value - arrival).TotalMinutes, (int)MaxWaitForOpen.TotalMinutes);
+                    continue;
+                }
+                else
+                {
+                    // Wait until the next fitting window (within tolerance). Real travel still
+                    // happened, so travelInfo is kept.
+                    arrival = fit.Value;
+                }
+            }
+            else
+            {
+                // Legacy day-agnostic fallback (StartDate == null / old clients): accept a window
+                // on ANY weekday. No duration-fit or dead-gap check — preserves prior behavior.
+                if (!openingHours.IsOpenAt(arrival))
+                {
+                    var next = openingHours.NextOpenAt(arrival);
                     if (next is null)
                     {
-                        // No window left in the day — skip this place
                         AddWarningOnce(result.Warnings, "place_closed_skipped");
                         _logger.LogInformation(
                             "Builder: schedule day={Day} place={Place} skipped (closed, no later window)",
                             day, place.Name);
                         continue;
                     }
-                    // Advance clock to next opening — travel info absorbed into the shift
-                    clock = next.Value;
-                    travelInfo = null; // gap absorbed by opening wait
+                    arrival    = next.Value;
+                    travelInfo = null; // gap absorbed by the opening wait (legacy semantics)
                 }
             }
 
-            if (!overpacked && clock > DaySoftCap)
+            // ── M3: hard day cap ──────────────────────────────────────────────────
+            // Any arrival past the cap truncates the day (break — the remaining candidates,
+            // being later on the monotonic clock, cannot fit either). Nightlife gets a later
+            // cap since it is anchored last. Replaces the old "clamp any ≥23h to 23:59".
+            var hardCap = IsNightlife(place) ? NightlifeHardCap : DayHardCap;
+            if (arrival > hardCap)
+            {
+                AddWarningOnce(result.Warnings, "day_truncated");
+                _logger.LogInformation(
+                    "Builder: schedule day={Day} truncated at {Arrival} (hard cap {Cap}) — {Remaining} candidate(s) dropped",
+                    day, arrival, hardCap, places.Count - i);
+                break;
+            }
+
+            if (!overpacked && arrival > DaySoftCap)
             {
                 AddWarningOnce(result.Warnings, "day_overpacked");
                 overpacked = true;
             }
 
-            int h       = Math.Min((int)Math.Floor(clock.TotalHours), 23);
-            int m       = h < 23 ? clock.Minutes : 59;
-            string arrival = $"{h:D2}:{m:D2}";
+            // arrival ≤ hardCap ≤ 23:59 < 24h, so "hh" is safe (no day component).
+            string arrivalStr = arrival.ToString(@"hh\:mm");
 
             _logger.LogInformation(
                 "Builder: schedule day={Day} stop={I} place={Place} arrival={Arrival} block={Block} dur={Dur}",
-                day, orderIndex, place.Name, arrival, DeriveTimeBlock(clock), duration);
+                day, orderIndex, place.Name, arrivalStr, DeriveTimeBlock(arrival), duration);
 
             result.Stops.Add(new ScheduledStopDto
             {
                 PlaceId              = place.Id,
                 DayNumber            = day,
                 OrderIndex           = orderIndex,
-                TimeBlock            = DeriveTimeBlock(clock),
-                SuggestedArrival     = arrival,
+                TimeBlock            = DeriveTimeBlock(arrival),
+                SuggestedArrival     = arrivalStr,
                 SuggestedDurationMin = duration,
                 TravelFromPrevious   = travelInfo
             });
 
-            clock += TimeSpan.FromMinutes(duration);
+            clock = arrival + TimeSpan.FromMinutes(duration);
             orderIndex++;
         }
     }
+
+    private static bool IsNightlife(Place p) =>
+        p.Category.Equals("nightlife", StringComparison.OrdinalIgnoreCase);
 
     private async Task<TravelInfoDto> ResolveTravelAsync(Place from, Place to, double dist, string mode, CancellationToken ct)
     {
@@ -486,6 +590,10 @@ public class SchedulingService
     private static int VisitDurationFor(Place p) =>
         p.VisitDurationMin ?? CategoryDurationMin.GetValueOrDefault(p.Category, DefaultDurationMin);
 
+    // NOTE (API-2 scope): meal anchoring simulates arrivals with Haversine estimates and does
+    // NOT consult opening hours — m5 (nightlife may land mid-afternoon on short days) and m7
+    // (Haversine vs the Mapbox clock used by the real walk) are deliberately out of scope here.
+    // The real viability gate runs later in WalkDayClockAsync against the actual clock.
     private static TimeSpan[] SimulateArrivals(List<Place> places)
     {
         var arrivals = new TimeSpan[places.Count];
