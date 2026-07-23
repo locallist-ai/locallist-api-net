@@ -153,9 +153,25 @@ public sealed class GeminiFileClient : IGeminiFileClient
         }
 
         // Defensa: un 2xx sin name deja un fichero que el servicio no podría borrar en su finally.
+        // Simetría con el catch de arriba: aunque el JSON fuese válido, si carga un name vacío
+        // intentamos rescatar un "files/…" del cuerpo (por si el recurso viaja anidado en otra
+        // clave que ParseFile no leyó) y lo borramos best-effort antes de propagar el fallo.
+        // En la práctica es inalcanzable rescatar nada: la File API SIEMPRE devuelve
+        // {"name":"files/…"} en un 2xx, así que un name vacío implica cuerpo sin ese campo y el
+        // regex tampoco lo encontrará. La rama existe por simetría/defensa, no porque sea normal.
         if (string.IsNullOrEmpty(file.Name))
         {
-            _logger.LogError("File API: 2xx finalize but response carried no file name");
+            var orphan = TryExtractFileName(body);
+            if (!string.IsNullOrEmpty(orphan))
+            {
+                _logger.LogError(
+                    "File API: 2xx finalize parsed no file name; best-effort deleting recovered orphan {File}", orphan);
+                await TryBestEffortDeleteAsync(orphan, apiKey);
+            }
+            else
+            {
+                _logger.LogError("File API: 2xx finalize but response carried no file name");
+            }
             throw new ExtractionUnavailableException("upload_no_name");
         }
 

@@ -32,9 +32,22 @@ public static class OutputValidator
         (new(@"system integrity token", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.PromptEcho),
         (new(@"i was instructed|my instructions (are|say|state)", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.PromptEcho),
 
-        // Identity probes
-        (new(@"\b(anthropic|openai|chatgpt|gpt[\-\s]?[34]5?|claude|bard|llama|mistral|copilot)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.IdentityProbe),
+        // Identity probes.
+        // Tier 1: provider/product tokens that are NEVER legitimate travel place names.
+        // These fire on the bare token — a video that mentions "OpenAI" or "ChatGPT" is drift.
+        (new(@"\b(anthropic|openai|chatgpt|gpt[\-\s]?[34]5?)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.IdentityProbe),
+        // Generic self-reference phrasing — never a place name.
         (new(@"\b(as an ai|i am an ai|i'm an ai|large language model|language model)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.IdentityProbe),
+        // Tier 2: tokens that ALSO name real venues (Llama Inn, Chez Claude, The Bard, Le Mistral,
+        // Copilot Coffee). A bare token would nuke ~1 in 3 real names, so these fire ONLY inside an
+        // LLM self-reference collocation. A real identity leak ("I am Claude, a language model",
+        // "Llama, an AI model", "Google's Bard") is caught; a place name survives untouched.
+        //   (a) self-introduction directly onto the token: "I am Claude", "you are now Llama".
+        (new(@"\b(?:i\s*am|i'?m|my name is|this is|call me|you are|you'?re)\s+(?:(?:a|an|the|now|actually|really|called|named|model)\s+){0,2}(?:claude|bard|llama|mistral|copilot)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.IdentityProbe),
+        //   (b) token immediately qualified as an AI/model/assistant: "Claude, a language model".
+        (new(@"\b(?:claude|bard|llama|mistral|copilot)\b[\s,:]+(?:\w+\s+){0,3}(?:a\.?i\.?|artificial intelligence|large language model|language model|llm|assistant|chatbot|neural network|foundation model)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.IdentityProbe),
+        //   (c) provider paired with the product/"AI"/"model": "Google's Bard", "OpenAI's model".
+        (new(@"\b(?:anthropic|openai|open ai|google|deepmind|microsoft|meta|mistral ai)['']?s?\s+(?:claude|bard|llama|mistral|copilot|model|assistant|ai)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.IdentityProbe),
 
         // URL / markdown link / image (exfil vectors)
         (new(@"https?://|www\.", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.UrlOrMarkdown),
@@ -52,7 +65,11 @@ public static class OutputValidator
         // Imperative injection — phrasings a legitimate place name/descriptor would never contain.
         // Placed last so existing categories (canary/identity/url/html/echo) win their DriftKind.
         // Conservative on false positives: each pattern needs an injection-specific collocation.
-        (new(@"\b(ignore|disregard|forget|override)\b.{0,30}\b(previous|prior|above|earlier|all)\b.{0,20}\b(instruction|instructions|prompt|prompts|rule|rules|command|commands|context)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
+        // Object must be scoped to the model/system: a system-directed qualifier (previous/above/
+        // system/your…) has to sit immediately before instructions|prompt|rules|guidelines. This
+        // catches "ignore all previous instructions" / "forget your rules" but NOT marketing copy
+        // like "forget all the rules of fine dining" (no qualifier before "rules").
+        (new(@"\b(ignore|disregard|forget|override|bypass)\b\s+(?:all\s+|any\s+|these\s+|those\s+|the\s+)*(?:previous|prior|above|earlier|initial|foregoing|preceding|original|system|your|my)\s+(?:instruction|instructions|prompt|prompts|rule|rules|command|commands|context|guideline|guidelines|directive|directives)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
         (new(@"\byou are now\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
         (new(@"\bdisable\b.{0,20}\b(safety|guardrail|guardrails|filter|filters|moderation|restriction|restrictions)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
         (new(@"\bsystem prompt\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), DriftKind.ImperativeInjection),
