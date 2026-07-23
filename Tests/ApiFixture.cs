@@ -24,6 +24,8 @@ using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Import;
+using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Shared.Routing;
@@ -87,6 +89,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// </summary>
     public FakeOpenAiHandler FakeOpenAi { get; } = new();
 
+    /// <summary>
+    /// Handler que simula la Gemini File API + generateContent multimodal del import de vídeo
+    /// (F2). Cablea tanto el <c>GeminiFileClient</c> real (subida resumable / poll / delete) como
+    /// el HttpClient de <c>VideoExtractionService</c> (generateContent), así que los tests
+    /// ejercitan el código real de retención sin tocar Gemini. Ver <see cref="FakeGeminiFileApi"/>.
+    /// </summary>
+    public FakeGeminiFileApi FakeVideoImport { get; } = new();
+
     private bool _dbCreated;
 
     /// <summary>
@@ -112,6 +122,9 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("Mapbox__AccessToken", "test-mapbox-token");
         // PostHog key — no vacío para que PostHogService no cortocircuite con el guard de API key.
         Environment.SetEnvironmentVariable("PostHog__ApiKey", "test-posthog-key");
+        // Import de vídeo: sin espera entre polls de files.get para que los tests del loop
+        // PROCESSING→ACTIVE no bloqueen (en prod el default es 1000ms).
+        Environment.SetEnvironmentVariable("Import__FilePollDelayMs", "0");
     }
 
     public async ValueTask InitializeAsync()
@@ -227,6 +240,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
             services.AddHttpClient<EmbeddingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeEmbeddings);
+
+            // Import de vídeo: el GeminiFileClient real y el HttpClient de VideoExtractionService
+            // apuntan al mismo fake, que simula todo el ciclo File API + generateContent.
+            services.AddHttpClient<IGeminiFileClient, GeminiFileClient>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeVideoImport);
+            services.AddHttpClient<VideoExtractionService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakeVideoImport);
 
             services.AddHttpClient<IRoutingService, MapboxRoutingService>()
                 .ConfigurePrimaryHttpMessageHandler(_ => FakeMapbox);
@@ -630,5 +650,152 @@ public class FakeOpenAiHandler : HttpMessageHandler
             });
         }
         return Task.FromResult(responder(request));
+    }
+}
+
+/// <summary>
+/// Simula la Gemini File API (subida resumable, files.get, files.delete) y generateContent
+/// multimodal para el import de vídeo. Enruta por método + URL + cabecera de comando de subida.
+///
+/// Knobs por test:
+///  - <see cref="DurationSec"/>: duración que devuelve files.get (para probar VideoTooLong).
+///  - <see cref="PollActiveAfter"/>: nº de polls en PROCESSING antes de pasar a ACTIVE (loop de poll).
+///  - <see cref="FailProcessing"/>: si true, files.get devuelve state=FAILED.
+///  - <see cref="GenerateContentResponder"/>: cuerpo de generateContent (por defecto un sitio válido).
+///
+/// Observabilidad para asserts:
+///  - <see cref="UploadStarted"/> / <see cref="UploadFinalized"/> / <see cref="GenerateContentCalled"/>.
+///  - <see cref="DeleteCalledFor"/>: nombres de fichero borrados (clave del test de NO retención).
+/// </summary>
+public class FakeGeminiFileApi : HttpMessageHandler
+{
+    private const string FileName = "files/test-video-abc";
+    private const string FileUri = "https://generativelanguage.googleapis.com/v1beta/files/test-video-abc";
+
+    public double DurationSec { get; set; } = 12.0;
+    public int PollActiveAfter { get; set; } = 0;
+    public bool FailProcessing { get; set; } = false;
+    public Func<HttpRequestMessage, HttpResponseMessage>? GenerateContentResponder { get; set; }
+
+    public bool UploadStarted { get; private set; }
+    public bool UploadFinalized { get; private set; }
+    public bool GenerateContentCalled { get; private set; }
+    public List<string> DeleteCalledFor { get; } = new();
+
+    private int _pollCount;
+
+    /// <summary>Cuerpo de generateContent por defecto: un único sitio limpio y válido.</summary>
+    public static string DefaultPlacesJson => """
+        {
+          "city": "Miami",
+          "country": "USA",
+          "language": "en",
+          "places": [
+            { "name": "Sunny Rooftop", "descriptor": "rooftop bar en Wynwood", "category": "nightlife", "evidence": "ocr", "timestampSec": 12 }
+          ],
+          "vibes": ["sunset", "cocktails"],
+          "confidence": 0.82
+        }
+        """;
+
+    public HttpResponseMessage GenerateContentOk(string placesJson, int inputTokens = 17400, int outputTokens = 240, int thinkingTokens = 0)
+    {
+        var escaped = JsonSerializer.Serialize(placesJson); // JSON-encode the model text
+        var body = $$"""
+            {
+              "candidates": [ { "content": { "parts": [ { "text": {{escaped}} } ] }, "finishReason": "STOP" } ],
+              "usageMetadata": { "promptTokenCount": {{inputTokens}}, "candidatesTokenCount": {{outputTokens}}, "thoughtsTokenCount": {{thinkingTokens}} }
+            }
+            """;
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+    }
+
+    public void Reset()
+    {
+        DurationSec = 12.0;
+        PollActiveAfter = 0;
+        FailProcessing = false;
+        GenerateContentResponder = null;
+        UploadStarted = false;
+        UploadFinalized = false;
+        GenerateContentCalled = false;
+        DeleteCalledFor.Clear();
+        _pollCount = 0;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var url = request.RequestUri!.ToString();
+
+        // 1. Inicio de la subida resumable → devuelve la URL de sesión en la cabecera.
+        if (request.Method == HttpMethod.Post && url.Contains("/upload/v1beta/files"))
+        {
+            UploadStarted = true;
+            var resp = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("", Encoding.UTF8, "text/plain")
+            };
+            resp.Headers.Add("X-Goog-Upload-URL", "https://upload.internal/session/test-upload-1");
+            return Task.FromResult(resp);
+        }
+
+        // 2. Subida + finalize a la URL de sesión → devuelve el recurso file (PROCESSING).
+        if (request.Method == HttpMethod.Post && url.Contains("upload.internal/session"))
+        {
+            UploadFinalized = true;
+            var body = $$"""
+                { "file": { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "video/mp4", "sizeBytes": "1024", "state": "PROCESSING" } }
+                """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        }
+
+        // 3. generateContent multimodal.
+        if (request.Method == HttpMethod.Post && url.Contains(":generateContent"))
+        {
+            GenerateContentCalled = true;
+            var responder = GenerateContentResponder;
+            return Task.FromResult(responder is not null ? responder(request) : GenerateContentOk(DefaultPlacesJson));
+        }
+
+        // 4. files.delete — clave del invariante de NO retención.
+        if (request.Method == HttpMethod.Delete && url.Contains("/v1beta/files/"))
+        {
+            lock (DeleteCalledFor) { DeleteCalledFor.Add(url.Split("/v1beta/")[^1]); }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            });
+        }
+
+        // 5. files.get (poll de estado).
+        if (request.Method == HttpMethod.Get && url.Contains("/v1beta/files/"))
+        {
+            _pollCount++;
+            string state;
+            if (FailProcessing) state = "FAILED";
+            else state = _pollCount > PollActiveAfter ? "ACTIVE" : "PROCESSING";
+
+            var durationField = state == "ACTIVE"
+                ? $$""", "videoMetadata": { "videoDuration": "{{DurationSec.ToString(System.Globalization.CultureInfo.InvariantCulture)}}s" }"""
+                : "";
+            var body = $$"""
+                { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "video/mp4", "state": "{{state}}"{{durationField}} }
+                """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        }
+
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("{\"error\":\"fake file api: unrouted request\"}", Encoding.UTF8, "application/json")
+        });
     }
 }

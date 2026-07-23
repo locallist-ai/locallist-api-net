@@ -2,8 +2,10 @@ using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Cities;
+using LocalList.API.NET.Features.Import;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
+using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Coverage;
@@ -85,6 +87,14 @@ public static class DomainServiceExtensions
         }
         services.AddScoped<ILlmClient>(LlmClientFactory.BuildChain);
         services.AddScoped<PreferenceExtractorService>();
+
+        // Import de vídeo (F2). Servicio autocontenido: sube el vídeo a la Gemini File API,
+        // extrae sitios con gemini-3.1-flash y borra el fichero tras extraer. NO participa en
+        // la cadena de fallback (solo Gemini tiene el fichero). Timeouts holgados: subir 150MB
+        // + transcodificado + generateContent multimodal tarda mucho más que un turno de chat.
+        services.Configure<ImportOptions>(configuration.GetSection(ImportOptions.SectionName));
+        services.AddHttpClient<IGeminiFileClient, GeminiFileClient>(c => c.Timeout = TimeSpan.FromSeconds(120));
+        services.AddHttpClient<VideoExtractionService>(c => c.Timeout = TimeSpan.FromSeconds(120));
 
         // Chat — slot-filling agent
         services.AddScoped<SlotExtractorService>();

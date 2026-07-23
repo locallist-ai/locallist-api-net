@@ -21,6 +21,7 @@ public class LocalListDbContext : DbContext
     public DbSet<ChatTurn> ChatTurns { get; set; } = null!;
     public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
     public DbSet<Subcategory> Subcategories { get; set; } = null!;
+    public DbSet<VideoImportMetric> VideoImportMetrics { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -219,5 +220,12 @@ public class LocalListDbContext : DbContext
             .HasIndex(s => new { s.CategoryKey, s.Key })
             .IsUnique()
             .HasFilter("deleted_at IS NULL");
+
+        // VideoImportMetric — diagnóstico standalone del import de vídeo (sin FK).
+        modelBuilder.Entity<VideoImportMetric>()
+            .HasIndex(v => v.CreatedAt);
+
+        modelBuilder.Entity<VideoImportMetric>()
+            .HasIndex(v => new { v.Platform, v.CreatedAt });
     }
 }
