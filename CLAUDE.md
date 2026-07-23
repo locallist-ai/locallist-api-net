@@ -34,7 +34,7 @@ Required User Secrets / Environment Variables:
 
 **LLM fallback chain (camino crítico: chat slot-filling + builder preferences)**
 - Cadena ordenada en `appsettings.json` → `Llm:Providers` (gemini → openai → mistral → anthropic). Abstracción en `Shared/AI/Llm/` (`ILlmClient`, `FallbackLlmClient`, circuit breaker `LlmProviderHealthRegistry`: 3 fallos seguidos → skip 60s).
-- `OpenAI__ApiKey` — opcional. Activa GPT-5 Nano como backup.
+- `OpenAI__ApiKey` — opcional. Activa GPT-5.4 Nano como backup.
 - `Mistral__ApiKey` — opcional. Activa Mistral Small como backup.
 - `Anthropic__ApiKey` — opcional. Activa Claude Haiku 4.5 como backup (último por coste).
 - Un provider sin key se omite de la cadena (log en boot). Solo con `Gemini__ApiKey` el comportamiento es el clásico. `chat_turns.ai_provider/model` registran quién respondió realmente.

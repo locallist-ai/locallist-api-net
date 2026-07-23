@@ -61,7 +61,7 @@ public class ChatLlmFallbackTests(ApiFixture fixture) : IClassFixture<ApiFixture
         Assert.NotNull(turn);
         Assert.Null(turn.ErrorCode);
         Assert.Equal("openai", turn.AiProvider);
-        Assert.Equal("gpt-5-nano", turn.Model);
+        Assert.Equal("gpt-5.4-nano", turn.Model);
         Assert.Equal(200, turn.GeminiStatus); // status del provider que respondió
     }
 
