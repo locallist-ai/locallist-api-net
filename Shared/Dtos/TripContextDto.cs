@@ -4,10 +4,36 @@ namespace LocalList.API.NET.Shared.Dtos;
 
 public class TripContextDto
 {
+    /// <summary>Max trip horizon: a start date further out than this is rejected (plan R2 default).</summary>
+    public const int MaxTripHorizonDays = 365;
+
+    /// <summary>
+    /// Max trip length in days. The Plus wizard offers up to 14 days (maxDaysForTier).
+    /// Shared clamp ceiling used by the extraction chain (PreferenceExtractorService /
+    /// SlotExtractorService) so a Plus trip of 8–14 days is no longer silently recut to 7.
+    /// Raised from 7 to 14 by API-2 now that the day-aware scheduler walks the full range.
+    /// </summary>
+    public const int MaxTripDays = 14;
+
     [MaxLength(20)]
     public string? GroupType { get; set; }
-    [Range(1, 7)]
+
+    // [Range(1, MaxTripDays)]: el wizard Plus ofrece hasta 14 días (maxDaysForTier). Antes
+    // estaba en [1,7] → un Plus con 8-14 días recibía un 400 de model-binding. El clamp a 14
+    // en PreferenceExtractorService/SlotExtractorService ya está alineado (API-2): el scheduler
+    // day-aware recorre todo el rango.
+    [Range(1, MaxTripDays)]
     public int? Days { get; set; }
+
+    /// <summary>
+    /// Fecha de inicio del viaje (fecha de calendario, sin zona horaria — el scheduler
+    /// opera en reloj local abstracto). Serializa como "yyyy-MM-dd". Nullable = compat con
+    /// clientes viejos que no la envían (fallback day-agnostic en el gate de horarios).
+    /// Cimiento de la viabilidad temporal (día-de-semana correcto) y de la monetización
+    /// futura por reservas/comisiones. Validada en el controller: 400 invalid_start_date.
+    /// </summary>
+    public DateOnly? StartDate { get; set; }
+
     [MaxLength(100)]
     public string? City { get; set; }
     [MaxLength(20)]
@@ -66,4 +92,17 @@ public class TripContextDto
     /// <summary>Primary vibe from chat slot-filling (e.g. "hidden_gems", "romantic").</summary>
     [MaxLength(30)]
     public string? VibesPrimary { get; set; }
+
+    /// <summary>
+    /// True cuando <paramref name="startDate"/> es null (compat) o cae dentro de la ventana
+    /// permitida respecto a <paramref name="today"/>: no antes de ayer (margen de 1 día que
+    /// absorbe el desfase de zona horaria cliente/servidor) y a lo sumo
+    /// <see cref="MaxTripHorizonDays"/> días en el futuro.
+    /// </summary>
+    public static bool IsStartDateWithinWindow(DateOnly? startDate, DateOnly today)
+    {
+        if (startDate is null) return true; // nullable = compat clientes viejos
+        var d = startDate.Value;
+        return d >= today.AddDays(-1) && d <= today.AddDays(MaxTripHorizonDays);
+    }
 }

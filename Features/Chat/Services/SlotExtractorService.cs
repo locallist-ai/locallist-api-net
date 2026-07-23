@@ -209,7 +209,7 @@ Rules:
             s.City = Sanitize(cityEl.GetString());
 
         if (el.TryGetProperty("days", out var daysEl) && daysEl.ValueKind == JsonValueKind.Number)
-            s.Days = Math.Clamp(daysEl.GetInt32(), 1, 7);
+            s.Days = Math.Clamp(daysEl.GetInt32(), 1, LocalList.API.NET.Shared.Dtos.TripContextDto.MaxTripDays);
 
         if (el.TryGetProperty("groupType", out var gtEl) && gtEl.ValueKind == JsonValueKind.String)
         {

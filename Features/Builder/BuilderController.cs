@@ -83,6 +83,20 @@ public class BuilderController : ControllerBase
             });
         }
 
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!TripContextDto.IsStartDateWithinWindow(request.TripContext?.StartDate, today))
+        {
+            _logger.LogInformation(
+                "Builder: rejected invalid_start_date startDate={StartDate}",
+                request.TripContext?.StartDate?.ToString("yyyy-MM-dd") ?? "(null)");
+            return BadRequest(new
+            {
+                error = "invalid_start_date",
+                message = $"Trip start date must be between today and {TripContextDto.MaxTripHorizonDays} days from now.",
+                startDate = request.TripContext?.StartDate?.ToString("yyyy-MM-dd"),
+            });
+        }
+
         using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         llmBudget.CancelAfter(GenerateLlmBudget);
 

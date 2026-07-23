@@ -180,9 +180,26 @@ public class ChatController : ControllerBase
             }
         }
 
+        // Trip start date travels in the generate request (chat derives TripContext
+        // from slots server-side, so the date can't come from slots).
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!TripContextDto.IsStartDateWithinWindow(request.StartDate, today))
+        {
+            _logger.LogInformation(
+                "Chat: generate rejected invalid_start_date sessionId={Session} startDate={StartDate}",
+                session.Id, request.StartDate?.ToString("yyyy-MM-dd") ?? "(null)");
+            return BadRequest(new
+            {
+                error = "invalid_start_date",
+                message = $"Trip start date must be between today and {TripContextDto.MaxTripHorizonDays} days from now.",
+                startDate = request.StartDate?.ToString("yyyy-MM-dd"),
+            });
+        }
+
         // Build TripContextDto + summary message from slots
         var slots = ChatAgentService.GetSlots(session);
         var tripContext = ChatAgentService.SlotsToTripContext(slots);
+        tripContext.StartDate = request.StartDate;
         var summaryMessage = ChatAgentService.BuildSummaryMessage(slots);
         var lang = LanguageAccessor.ResolveRequestLanguage(Request);
 
