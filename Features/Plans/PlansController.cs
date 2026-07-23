@@ -7,6 +7,7 @@ using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.PostHog;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -36,6 +37,34 @@ public class PlansController : ControllerBase
         var userId = await User.GetUserIdAsync(_db, ct);
         if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
+
+        // Cupo de planes guardados (catálogo Plus, decisión Pablo 2026-07-22): límite de
+        // ALMACENAMIENTO aplicado AQUÍ, independiente del contador mensual de generación IA.
+        // Un free con FreeSavedPlansLimit planes activos no puede crear/guardar más (DELETE
+        // /plans/:id libera hueco); Plus ilimitado. Tier SIEMPRE fresco de DB (el claim del
+        // JWT es rancio/falsificable). Carrera residual aceptada: count-then-insert sin
+        // serialización por usuario puede dejar 5+N-1 bajo N POSTs simultáneos; es un hueco de
+        // almacenamiento, no un bypass de los gates de dinero.
+        var tier = await _db.Users
+            .Where(u => u.Id == userId.Value)
+            .Select(u => u.Tier)
+            .FirstOrDefaultAsync(ct);
+        var isPro = string.Equals(tier, PlanGenerationGateService.TierPro, StringComparison.Ordinal);
+        if (!isPro)
+        {
+            var saved = await _db.Plans.CountAsync(p => p.CreatedById == userId.Value, ct);
+            if (saved >= PlanGenerationGateService.FreeSavedPlansLimit)
+            {
+                _logger.LogInformation(
+                    "Plans: saved-plans limit denied userId={UserId} saved={Saved}", userId, saved);
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    error = "saved_plans_limit_reached",
+                    used = saved,
+                    limit = PlanGenerationGateService.FreeSavedPlansLimit
+                });
+            }
+        }
 
         var now = DateTimeOffset.UtcNow;
 

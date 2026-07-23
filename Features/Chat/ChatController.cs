@@ -14,6 +14,7 @@ using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Chat;
 
@@ -39,6 +40,7 @@ public class ChatController : ControllerBase
     private readonly ILogger<ChatController> _logger;
     private readonly PostHogService _posthog;
     private readonly ICityCoverageService _coverage;
+    private readonly IPlanGenerationGateService _planGate;
 
     public ChatController(
         ChatAgentService agent,
@@ -46,7 +48,8 @@ public class ChatController : ControllerBase
         IPlanGenerationService planGen,
         ILogger<ChatController> logger,
         PostHogService posthog,
-        ICityCoverageService coverage)
+        ICityCoverageService coverage,
+        IPlanGenerationGateService planGate)
     {
         _agent = agent;
         _db = db;
@@ -54,6 +57,7 @@ public class ChatController : ControllerBase
         _logger = logger;
         _posthog = posthog;
         _coverage = coverage;
+        _planGate = planGate;
     }
 
     /// <summary>
@@ -120,14 +124,20 @@ public class ChatController : ControllerBase
     /// Generates a plan from a ready chat session. Idempotent: calling again returns the same plan.
     /// Requires the session to be in "ready" status (all Tier 1 slots filled) or at turn cap.
     /// Rate-limited alongside /builder/chat (BuilderLimit).
+    /// F4: auth requerida — sin identidad no hay contador mensual posible. El funnel anónimo
+    /// sigue vivo en /chat/turn (la sesión se crea sin cuenta); generar exige registrarse, y
+    /// FindSessionForGenerationAsync permite reclamar una sesión anónima desde la misma IP.
+    /// El gate del catálogo Plus corre tras coverage y ANTES del pipeline; consumido el
+    /// contador, el permiso no se devuelve aunque el LLM falle (ver README de Billing).
     /// </summary>
     [HttpPost("generate")]
-    [AllowAnonymous]
+    [Authorize]
     [EnableRateLimiting("BuilderLimit")]
     public async Task<IActionResult> Generate([FromBody] ChatGenerateRequest request, CancellationToken ct)
     {
-        var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
-        Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
+        Guid? userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
+            return Unauthorized(new { error = "Invalid token claims." });
         var rawIp = HttpContext.Connection.RemoteIpAddress?.ToString();
 
         var (session, error) = await _agent.FindSessionForGenerationAsync(request.SessionId, userId, rawIp, ct);
@@ -202,6 +212,14 @@ public class ChatController : ControllerBase
             });
         }
 
+        // Gate del catálogo Plus — último check antes de arrancar (y pagar) el pipeline.
+        // Va DESPUÉS de idempotencia (releer un plan generado no consume) y de coverage
+        // (una ciudad no cubierta no consume): el contador solo se gasta si la generación
+        // arranca de verdad.
+        var gate = await _planGate.CheckAndConsumeAsync(userId.Value, slots.Days, ct);
+        if (!gate.Allowed)
+            return StatusCode(gate.Rejection!.StatusCode, gate.Rejection.Body);
+
         _logger.LogInformation(
             "Chat: generate sessionId={Session} city={City} days={Days} summary='{Summary}'",
             session.Id, tripContext.City ?? "(null)", tripContext.Days, summaryMessage);
@@ -212,7 +230,7 @@ public class ChatController : ControllerBase
         PlanGenerationResult? result;
         try
         {
-            result = await _planGen.GenerateAsync(summaryMessage, tripContext, lang, llmBudget.Token);
+            result = await _planGen.GenerateAsync(summaryMessage, tripContext, lang, gate.MaxDays, llmBudget.Token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -223,66 +241,7 @@ public class ChatController : ControllerBase
         if (result == null)
             return NotFound(new { error = "no_places_available", message = "No places found for this city yet." });
 
-        // Anonymous → ephemeral plan, still mark session generated
-        if (isAnonymous)
-        {
-            if (result.LlmDiagnostics != null)
-            {
-                _db.ChatTurns.Add(new ChatTurn
-                {
-                    SessionId = session.Id,
-                    TurnIndex = session.TurnCount,
-                    AiProvider = result.LlmDiagnostics.Provider,
-                    Model = result.LlmDiagnostics.Model,
-                    PromptVersion = "slot-v1",
-                    ContextSignalsJson = session.SlotsJson,
-                    PromptChars = result.LlmDiagnostics.Prompt.Length,
-                    PromptExcerpt = PiiRedactor.Redact(
-                        result.LlmDiagnostics.Prompt.Length > 500
-                            ? result.LlmDiagnostics.Prompt[..500]
-                            : result.LlmDiagnostics.Prompt),
-                    ResponseRaw = result.LlmDiagnostics.ResponseRaw != null
-                        ? PiiRedactor.Redact(result.LlmDiagnostics.ResponseRaw) : null,
-                    FinishReason = result.LlmDiagnostics.FinishReason,
-                    LatencyMs = result.LlmDiagnostics.LatencyMs,
-                    InputTokens = result.LlmDiagnostics.InputTokens,
-                    OutputTokens = result.LlmDiagnostics.OutputTokens,
-                    ThinkingTokens = result.LlmDiagnostics.ThinkingTokens,
-                    TotalTokens = result.LlmDiagnostics.TotalTokens,
-                    CostUsd = result.LlmDiagnostics.CostUsd,
-                    GeminiStatus = result.LlmDiagnostics.HttpStatus,
-                    ErrorCode = result.LlmDiagnostics.ErrorCode,
-                    ErrorMessage = result.LlmDiagnostics.ErrorMessage,
-                });
-            }
-
-            session.Status = "generated";
-            _db.Update(session);
-            await _db.SaveChangesAsync(ct);
-
-            var ephemeralPlan = new
-            {
-                Id = Guid.NewGuid(),
-                Name = result.PlanName,
-                City = result.City,
-                Type = "ai",
-                Description = result.PlanDescription,
-                DurationDays = result.Prefs.Days,
-                IsPublic = false,
-                IsEphemeral = true
-            };
-
-            return Ok(new
-            {
-                plan = ephemeralPlan,
-                stops = _planGen.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
-                message = $"Created a {result.Prefs.Days}-day plan with {result.Schedule.Stops.Count} stops!",
-                warnings = result.Schedule.Warnings,
-                appliedRefinements = result.Schedule.AppliedRefinements
-            });
-        }
-
-        // Authenticated → persist plan + update session
+        // Auth requerida (F4) → el plan se persiste siempre
         var plan = new Plan
         {
             Name = result.PlanName,
@@ -389,7 +348,8 @@ public class ChatController : ControllerBase
             stops = _planGen.ResolveStopPlaces(result.Schedule.Stops, result.FilteredPlaces),
             message = $"Created a {result.Prefs.Days}-day plan with {result.Schedule.Stops.Count} stops!",
             warnings = result.Schedule.Warnings,
-            appliedRefinements = result.Schedule.AppliedRefinements
+            appliedRefinements = result.Schedule.AppliedRefinements,
+            clamped = DaysClampInfo.ToHint(result.DaysClamp, gate.MaxDays),
         });
     }
 

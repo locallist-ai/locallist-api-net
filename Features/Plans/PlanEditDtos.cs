@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using LocalList.API.NET.Shared.Constants;
 
 namespace LocalList.API.NET.Features.Plans;
 
@@ -15,7 +16,7 @@ public class StopInput
     public Guid PlaceId { get; set; }
 
     [Required]
-    [Range(1, 7)]
+    [Range(1, PlanLimits.MaxPlanDurationDays)]
     public int DayNumber { get; set; }
 
     [Required]
@@ -40,6 +41,6 @@ public class CreateUserPlanRequest
     [StringLength(20)]
     public string? Type { get; set; }
 
-    [Range(1, 7)]
+    [Range(1, PlanLimits.MaxPlanDurationDays)]
     public int DurationDays { get; set; } = 1;
 }

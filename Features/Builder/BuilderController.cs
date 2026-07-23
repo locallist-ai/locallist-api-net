@@ -4,12 +4,14 @@ using Microsoft.AspNetCore.RateLimiting;
 using System.Text.Json;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Observability;
 using LocalList.API.NET.Shared.PostHog;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Builder;
 
@@ -31,32 +33,46 @@ public class BuilderController : ControllerBase
     private readonly SchedulingService _scheduler;
     private readonly ILogger<BuilderController> _logger;
     private readonly PostHogService _posthog;
+    private readonly IPlanGenerationGateService _planGate;
+    private readonly ICityCoverageService _coverage;
 
     public BuilderController(
         LocalListDbContext db,
         PlanGenerationService planGen,
         SchedulingService scheduler,
         ILogger<BuilderController> logger,
-        PostHogService posthog)
+        PostHogService posthog,
+        IPlanGenerationGateService planGate,
+        ICityCoverageService coverage)
     {
         _db = db;
         _planGen = planGen;
         _scheduler = scheduler;
         _logger = logger;
         _posthog = posthog;
+        _planGate = planGate;
+        _coverage = coverage;
     }
 
+    /// <summary>
+    /// F4: auth requerida — sin identidad no hay contador mensual posible. El gate del
+    /// catálogo Plus (PlanGenerationGateService) corre tras la validación de input y
+    /// ANTES de arrancar el pipeline: valida tier fresco de DB, duración y cupo de
+    /// guardados, y consume el contador (3/mes free · 50/día Plus). Una vez consumido,
+    /// el permiso no se devuelve aunque el LLM falle (ver README de Billing).
+    /// </summary>
     [HttpPost("chat")]
-    [AllowAnonymous]
+    [Authorize]
     [EnableRateLimiting("BuilderLimit")]
     public async Task<IActionResult> GeneratePlan([FromBody] BuilderChatRequest request, CancellationToken ct)
     {
-        var isAnonymous = !User.Identity?.IsAuthenticated ?? true;
-        Guid? userId = isAnonymous ? null : await User.GetUserIdAsync(_db, ct);
+        Guid? userId = await User.GetUserIdAsync(_db, ct);
+        if (userId == null)
+            return Unauthorized(new { error = "Invalid token claims." });
 
         _logger.LogInformation(
-            "Builder: request anonymous={IsAnon} city={City} days={Days} groupType={GroupType} categories={Categories} budget={Budget} msgLen={MsgLen}",
-            isAnonymous,
+            "Builder: request userId={UserId} city={City} days={Days} groupType={GroupType} categories={Categories} budget={Budget} msgLen={MsgLen}",
+            userId,
             request.TripContext?.City ?? "(unset)",
             request.TripContext?.Days?.ToString() ?? "(unset)",
             request.TripContext?.GroupType ?? "(unset)",
@@ -83,18 +99,40 @@ public class BuilderController : ControllerBase
             });
         }
 
+        // Defensa de cobertura ANTES del gate (m1/F4): espeja /chat/generate. Sin este check
+        // una ciudad no cubierta (retrieval 0 places → soft-fallback 200) consumía un permiso
+        // del contador mensual sin producir un plan real. El contador solo debe gastarse si la
+        // generación puede arrancar de verdad, así que rechazamos aquí sin consumir.
+        var city = request.TripContext?.City;
+        if (!_coverage.IsLive(city))
+        {
+            _logger.LogInformation("Builder: blocked, city not covered city={City}", city ?? "(null)");
+            return BadRequest(new
+            {
+                error = "city_unsupported",
+                city,
+                liveCities = _coverage.LiveCities,
+            });
+        }
+
+        // Gate del catálogo Plus — último check antes de arrancar (y pagar) el pipeline.
+        var gate = await _planGate.CheckAndConsumeAsync(userId.Value, request.TripContext?.Days, ct);
+        if (!gate.Allowed)
+            return StatusCode(gate.Rejection!.StatusCode, gate.Rejection.Body);
+
         using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         llmBudget.CancelAfter(GenerateLlmBudget);
 
         try
         {
             var lang = LanguageAccessor.ResolveRequestLanguage(Request);
-            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, llmBudget.Token);
+            var result = await _planGen.GenerateAsync(request.Message, request.TripContext, lang, gate.MaxDays, llmBudget.Token);
 
             if (result == null)
             {
-                // Soft fallback: no places found — return empty ephemeral plan rather than 404
-                // so the wizard doesn't surface an error to the user.
+                // Soft fallback: no places found — return an empty plan rather than 404 so the
+                // wizard doesn't surface an error to the user. (No IsEphemeral: los planes
+                // efímeros ya no existen en el contrato — era un resto muerto.)
                 var fallbackCity = request.TripContext?.City ?? "Miami";
                 return Ok(new
                 {
@@ -107,8 +145,7 @@ public class BuilderController : ControllerBase
                         Description = "No places found matching your preferences in this city yet.",
                         DurationDays = request.TripContext?.Days ?? 1,
                         TripContext = request.TripContext,
-                        IsPublic = false,
-                        IsEphemeral = true
+                        IsPublic = false
                     },
                     stops = Array.Empty<object>(),
                     message = "No places found for this city yet.",
@@ -118,29 +155,6 @@ public class BuilderController : ControllerBase
             }
 
             var planStopsData = result.Schedule.Stops;
-
-            if (isAnonymous)
-            {
-                return Ok(new
-                {
-                    plan = new
-                    {
-                        Id = Guid.NewGuid(),
-                        Name = result.PlanName,
-                        City = result.City,
-                        Type = "ai",
-                        Description = result.PlanDescription,
-                        DurationDays = result.Prefs.Days,
-                        TripContext = request.TripContext,
-                        IsPublic = false,
-                        IsEphemeral = true
-                    },
-                    stops = _scheduler.ResolveStopPlaces(planStopsData, result.FilteredPlaces),
-                    message = $"Created a {result.Prefs.Days}-day plan with {planStopsData.Count} stops!",
-                    warnings = result.Schedule.Warnings,
-                    appliedRefinements = result.Schedule.AppliedRefinements
-                });
-            }
 
             var plan = new Plan
             {
@@ -214,7 +228,8 @@ public class BuilderController : ControllerBase
                 stops = _scheduler.ResolveStopPlaces(planStopsData, result.FilteredPlaces),
                 message = $"Created a {result.Prefs.Days}-day plan with {planStopsData.Count} stops!",
                 warnings = result.Schedule.Warnings,
-                appliedRefinements = result.Schedule.AppliedRefinements
+                appliedRefinements = result.Schedule.AppliedRefinements,
+                clamped = DaysClampInfo.ToHint(result.DaysClamp, gate.MaxDays),
             });
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

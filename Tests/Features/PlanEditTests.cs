@@ -295,6 +295,98 @@ public class PlanEditTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Null(await after.FollowSessions.FindAsync(session.Id));
     }
 
+    [Fact]
+    public async Task UpdateStops_Day14_Succeeds_Regression_7to14DayRange()
+    {
+        // Repro permanente F1: un Plus genera un plan de hasta 14 días, pero editar sus stops
+        // reventaba en 400 porque StopInput.DayNumber tenía [Range(1,7)] (el 7→14 no llegó al
+        // path de edición). Ahora el rango es el hard cap compartido (PlanLimits.MaxPlanDurationDays).
+        var (ownerId, ownerFbUid) = await CreateUser("planedit-14days");
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Day14 Place {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "Seeded 14-day",
+            Status = "published"
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Plan de 14 días",
+            City = "Miami",
+            Type = "ai",
+            IsPublic = false,
+            CreatedById = ownerId,
+            DurationDays = 14
+        };
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
+        var payload = new
+        {
+            stops = new[]
+            {
+                new { placeId = place.Id, dayNumber = 8, orderIndex = 0, timeBlock = "morning", suggestedDurationMin = 60 },
+                new { placeId = place.Id, dayNumber = 14, orderIndex = 0, timeBlock = "evening", suggestedDurationMin = 90 },
+            }
+        };
+
+        var response = await client.PutAsJsonAsync($"/plans/{plan.Id}/stops", payload);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var after = fixture.GetDbContext();
+        var maxDay = await after.PlanStops.Where(s => s.PlanId == plan.Id).MaxAsync(s => (int?)s.DayNumber);
+        Assert.Equal(14, maxDay);
+    }
+
+    [Fact]
+    public async Task UpdateStops_Day15_Returns400_HardCap()
+    {
+        // El hard cap sigue siendo 14 para TODOS: un stop en el día 15 lo rechaza la validación
+        // del DTO ([Range(1,14)]) con 400.
+        var (ownerId, ownerFbUid) = await CreateUser("planedit-15days");
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Day15 Place {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "Seeded 15-day",
+            Status = "published"
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Plan demasiado largo",
+            City = "Miami",
+            Type = "ai",
+            IsPublic = false,
+            CreatedById = ownerId,
+            DurationDays = 14
+        };
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(ownerId, ownerFbUid);
+        var payload = new
+        {
+            stops = new[]
+            {
+                new { placeId = place.Id, dayNumber = 15, orderIndex = 0, timeBlock = "morning", suggestedDurationMin = 60 }
+            }
+        };
+
+        var response = await client.PutAsJsonAsync($"/plans/{plan.Id}/stops", payload);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private async Task<(Guid userId, string firebaseUid)> CreateUser(string prefix)

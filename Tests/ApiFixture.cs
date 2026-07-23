@@ -21,14 +21,18 @@ using Testcontainers.PostgreSql;
 using System.Collections.Concurrent;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Auth.Services;
+using LocalList.API.NET.Features.Billing;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
+using Microsoft.Extensions.Configuration;
 
 namespace LocalList.API.Tests;
 
@@ -63,6 +67,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// By default all methods return null (simulates missing API key).
     /// </summary>
     public FakeGooglePlacesService FakeGooglePlaces { get; } = new();
+
+    /// <summary>
+    /// In-process fake for <see cref="IRevenueCatClient"/> — the billing webhook's authoritative
+    /// entitlement check. Defaults to <see cref="RevenueCatEntitlementStatus.Active"/>; tests set
+    /// <see cref="FakeRevenueCatClient.ByAppUserId"/> per app_user_id to simulate inactive /
+    /// unavailable RevenueCat state without hitting the real REST API.
+    /// </summary>
+    public FakeRevenueCatClient FakeRevenueCat { get; } = new();
 
     /// <summary>
     /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
@@ -112,7 +124,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("Mapbox__AccessToken", "test-mapbox-token");
         // PostHog key — no vacío para que PostHogService no cortocircuite con el guard de API key.
         Environment.SetEnvironmentVariable("PostHog__ApiKey", "test-posthog-key");
+        // RevenueCat webhook auth — valor conocido para firmar las peticiones de test.
+        Environment.SetEnvironmentVariable("REVENUECAT_WEBHOOK_AUTH", TestRevenueCatWebhookSecret);
     }
+
+    /// <summary>Shared secret the Billing webhook tests send in the Authorization header.</summary>
+    public const string TestRevenueCatWebhookSecret = "test-rc-webhook-secret";
 
     public async ValueTask InitializeAsync()
     {
@@ -240,6 +257,22 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             foreach (var d in googlePlacesDesc) services.Remove(d);
             services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
 
+            // Replace IRevenueCatClient with the in-process fake so the billing webhook's
+            // authoritative check is controlled by the test (no real RevenueCat REST call).
+            var rcDesc = services.Where(d => d.ServiceType == typeof(IRevenueCatClient)).ToList();
+            foreach (var d in rcDesc) services.Remove(d);
+            services.AddSingleton<IRevenueCatClient>(FakeRevenueCat);
+
+            // Coverage: envolvemos el CityCoverageService REAL (config Miami-only por defecto,
+            // normalización real) con un decorador que permite a los tests marcar ciudades
+            // aisladas como LIVE en runtime vía MarkCityLive. Necesario desde m1/F4: /builder/chat
+            // ahora rechaza ciudades no cubiertas ANTES del gate, y los tests de generación usan
+            // ciudades GUID aleatorias que no están en la allowlist de boot. Los tests que NO
+            // marcan nada (CoverageGateTests, CitiesTests) ven exactamente el servicio real.
+            services.RemoveAll<ICityCoverageService>();
+            services.AddSingleton<ICityCoverageService>(sp =>
+                new TestCityCoverageService(new CityCoverageService(sp.GetRequiredService<IConfiguration>())));
+
             // Disable rate limiting in tests (default). Las suites que testean el propio
             // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
             // reales registradas por AddRateLimitingPolicies.
@@ -267,6 +300,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 options.AddPolicy("CityCreateLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("ChatTurnLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("RevenueCatWebhookLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
@@ -331,7 +366,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// Convenience overload: seeds a user with the given ID and firebase_uid, returns an authenticated client.
     /// </summary>
     public async Task<HttpClient> CreateAuthenticatedClientWithUser(
-        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user")
+        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user",
+        string tier = "free")
     {
         var db = GetDbContext();
         var existing = await db.Users.FindAsync(userId);
@@ -342,11 +378,24 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 Id = userId,
                 Email = email,
                 FirebaseUid = firebaseUid,
-                Role = role
+                Role = role,
+                Tier = tier
             });
             await db.SaveChangesAsync();
         }
         return CreateAuthenticatedClient(userId, firebaseUid, email);
+    }
+
+    /// <summary>
+    /// F4: /builder/chat y /chat/generate exigen auth. Atajo para tests de generación que
+    /// no testean el gate: user App-auth NUEVO por llamada. Tier por defecto "pro" para no
+    /// chocar con el límite free de 3 planes/mes ni el cap de duración (el gate en sí se
+    /// testea aparte en PlanGateTests con users free explícitos).
+    /// </summary>
+    public Task<HttpClient> CreateGenerationClientAsync(string tier = "pro")
+    {
+        var uid = Guid.NewGuid();
+        return CreateAppAuthenticatedClientWithUser(uid, $"gen-{uid}@test.com", tier);
     }
 
     /// <summary>
@@ -356,7 +405,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// los tests de ese bucket deben usar este helper.
     /// </summary>
     public async Task<HttpClient> CreateAppAuthenticatedClientWithUser(
-        Guid userId, string email)
+        Guid userId, string email, string tier = "free")
     {
         var db = GetDbContext();
         var existing = await db.Users.FindAsync(userId);
@@ -367,13 +416,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 Id = userId,
                 Email = email,
                 FirebaseUid = "app-" + userId,
-                Role = "user"
+                Role = "user",
+                Tier = tier
             });
             await db.SaveChangesAsync();
         }
         var client = CreateClient();
+        // OJO: el claim tier del token NO decide nada server-side (los gates releen DB);
+        // se emite con el tier del user solo por realismo.
         client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email));
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email, tier));
         return client;
     }
 
@@ -383,6 +435,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         var scope = Services.CreateScope();
         return scope.ServiceProvider.GetRequiredService<LocalListDbContext>();
     }
+
+    /// <summary>
+    /// Marca una ciudad como cubierta (LIVE) para este fixture, además de la allowlist real
+    /// (Miami). Necesario para los tests de generación que usan ciudades aisladas: desde m1/F4
+    /// tanto /builder/chat como /chat/generate rechazan ciudades no cubiertas antes del gate.
+    /// </summary>
+    public void MarkCityLive(string city) =>
+        ((TestCityCoverageService)Services.GetRequiredService<ICityCoverageService>()).AddLive(city);
 
     /// <summary>
     /// Creates an HS256 JWT signed with the test JWT_SECRET — mirrors what
@@ -409,6 +469,35 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     }
 }
 
+/// <summary>
+/// Decorador de test sobre <see cref="CityCoverageService"/> real. Delega IsLive/LiveCities al
+/// servicio real (allowlist de boot + normalización real) y añade un set mutable de ciudades
+/// marcadas LIVE en runtime por los tests (<see cref="ApiFixture.MarkCityLive"/>). No altera
+/// <see cref="LiveCities"/> (lo que expone /cities/live) — solo amplía IsLive.
+/// </summary>
+public sealed class TestCityCoverageService : ICityCoverageService
+{
+    private readonly ICityCoverageService _inner;
+    private readonly HashSet<string> _extra = new(StringComparer.Ordinal);
+
+    public TestCityCoverageService(ICityCoverageService inner) => _inner = inner;
+
+    public IReadOnlyList<string> LiveCities => _inner.LiveCities;
+
+    public bool IsLive(string? cityName)
+    {
+        if (_inner.IsLive(cityName)) return true;
+        if (string.IsNullOrWhiteSpace(cityName)) return false;
+        lock (_extra) return _extra.Contains(CityNameNormalizer.Normalize(cityName));
+    }
+
+    public void AddLive(string city)
+    {
+        if (string.IsNullOrWhiteSpace(city)) return;
+        lock (_extra) _extra.Add(CityNameNormalizer.Normalize(city));
+    }
+}
+
 public class FakeAppleIdTokenValidator : IAppleIdTokenValidator
 {
     public Dictionary<string, OAuthClaims> Tokens { get; } = new();
@@ -423,6 +512,41 @@ public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
 
     public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
         Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
+}
+
+/// <summary>
+/// In-process fake for <see cref="IRevenueCatClient"/>. Returns <see cref="Default"/> unless a
+/// per-app_user_id override is set in <see cref="ByAppUserId"/>. Lets billing tests simulate the
+/// authoritative RevenueCat REST state (active / inactive / unavailable) deterministically.
+/// </summary>
+public class FakeRevenueCatClient : IRevenueCatClient
+{
+    /// <summary>
+    /// Fallback status for any app_user_id without an explicit override. Defaults to Inactive so
+    /// tests must opt IN to "active" for a specific id — an unmapped id is never silently entitled
+    /// (which previously masked the decoupled-identity vector).
+    /// </summary>
+    public RevenueCatEntitlementStatus Default { get; set; } = RevenueCatEntitlementStatus.Inactive;
+
+    public Dictionary<string, RevenueCatEntitlementStatus> ByAppUserId { get; } =
+        new(StringComparer.Ordinal);
+
+    public List<string> Calls { get; } = new();
+
+    public Task<RevenueCatEntitlementStatus> GetEntitlementStatusAsync(
+        string appUserId, string entitlementId, CancellationToken ct)
+    {
+        Calls.Add(appUserId);
+        return Task.FromResult(
+            ByAppUserId.TryGetValue(appUserId, out var status) ? status : Default);
+    }
+
+    public void Reset()
+    {
+        ByAppUserId.Clear();
+        Calls.Clear();
+        Default = RevenueCatEntitlementStatus.Inactive;
+    }
 }
 
 /// <summary>

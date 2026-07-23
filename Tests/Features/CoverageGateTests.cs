@@ -176,7 +176,7 @@ public class CoverageGateTests(ApiFixture fixture) : IClassFixture<ApiFixture>, 
 
         fixture.FakeGemini.Calls.Clear();
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
@@ -219,7 +219,7 @@ public class CoverageGateTests(ApiFixture fixture) : IClassFixture<ApiFixture>, 
             maxStopsPerDay = 3
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);

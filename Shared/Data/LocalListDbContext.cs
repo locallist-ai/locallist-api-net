@@ -21,6 +21,8 @@ public class LocalListDbContext : DbContext
     public DbSet<ChatTurn> ChatTurns { get; set; } = null!;
     public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
     public DbSet<Subcategory> Subcategories { get; set; } = null!;
+    public DbSet<BillingEvent> BillingEvents { get; set; } = null!;
+    public DbSet<UsageCounter> UsageCounters { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -219,5 +221,28 @@ public class LocalListDbContext : DbContext
             .HasIndex(s => new { s.CategoryKey, s.Key })
             .IsUnique()
             .HasFilter("deleted_at IS NULL");
+
+        // Billing — RevenueCat webhook idempotency ledger. Unique rc_event_id is the
+        // dedup arbiter (a concurrent duplicate delivery loses on INSERT). The
+        // (user_id, event_timestamp_ms) index backs the reorder guard lookup.
+        modelBuilder.Entity<BillingEvent>()
+            .HasIndex(be => be.RcEventId)
+            .IsUnique();
+
+        modelBuilder.Entity<BillingEvent>()
+            .HasIndex(be => new { be.UserId, be.EventTimestampMs });
+
+        // Usage counters (F4 — gates Plus). PK compuesta = target del ON CONFLICT del
+        // upsert atómico de UsageCounterService. FK con cascade: DELETE /account
+        // arrastra los contadores (GDPR); el reset-por-reregistro que eso permite
+        // queda acotado por el techo horario por IP de los endpoints medidos.
+        modelBuilder.Entity<UsageCounter>()
+            .HasKey(uc => new { uc.UserId, uc.Feature, uc.PeriodStart });
+
+        modelBuilder.Entity<UsageCounter>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(uc => uc.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
