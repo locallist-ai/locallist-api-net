@@ -93,7 +93,7 @@ public class SchedulingViabilityTests
         Assert.All(result.Stops, s =>
             Assert.True(TimeSpan.ParseExact(s.SuggestedArrival!, @"hh\:mm", null) <= new TimeSpan(23, 0, 0),
                 $"arrival {s.SuggestedArrival} exceeds the 23:00 hard cap"));
-        Assert.Empty(result.Stops.Where(s => s.SuggestedArrival == "23:59"));
+        Assert.DoesNotContain(result.Stops, s => s.SuggestedArrival == "23:59");
         Assert.True(result.Stops.Count < places.Count,
             $"expected truncation to drop candidates, but emitted {result.Stops.Count}/{places.Count}");
         AssertViable(result, places, startDate: null);
@@ -114,7 +114,7 @@ public class SchedulingViabilityTests
         Assert.DoesNotContain(result.Stops, s => s.PlaceId == placeA.Id);
         Assert.Contains("dead_gap_skipped", result.Warnings);
 
-        var bStop = Assert.Single(result.Stops.Where(s => s.PlaceId == placeB.Id));
+        var bStop = Assert.Single(result.Stops, s => s.PlaceId == placeB.Id);
         Assert.True(TimeSpan.ParseExact(bStop.SuggestedArrival!, @"hh\:mm", null) < new TimeSpan(12, 0, 0),
             "clock must not have jumped forward to A's late opening");
     }
