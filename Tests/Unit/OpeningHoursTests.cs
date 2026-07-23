@@ -271,19 +271,36 @@ public class OpeningHoursTests
     }
 
     [Fact]
-    public void Scheduler_PlaceClosedAtClock_ShiftsForward()
+    public void Scheduler_Legacy_OpensWithinTolerance_ShiftsForward()
     {
         var svc    = Svc();
-        // Only opens at 14:00; planner clock starts at 09:30 → must shift forward
-        var hours  = SimpleHours(14, 22);
+        // Opens 10:00; planner clock starts at 09:30 → a 30-min wait, within the dead-gap
+        // tolerance, so the legacy day-agnostic gate shifts the arrival forward and schedules.
+        var hours  = SimpleHours(10, 22);
         var places = new List<Place> { MakePlace("Nightlife", openingHours: hours) };
         var result = svc.BuildPlanSchedule(places, DefaultPrefs(days: 1), seed: 1);
 
         Assert.NotEmpty(result.Stops);
         var arrival = TimeSpan.Parse(result.Stops.First().SuggestedArrival!);
-        Assert.True(arrival >= TimeSpan.FromHours(14),
-            $"Expected arrival >= 14:00 but was {result.Stops.First().SuggestedArrival}");
+        Assert.True(arrival >= TimeSpan.FromHours(10),
+            $"Expected arrival >= 10:00 but was {result.Stops.First().SuggestedArrival}");
         Assert.DoesNotContain("place_closed_skipped", result.Warnings);
+        Assert.DoesNotContain("dead_gap_skipped", result.Warnings);
+    }
+
+    [Fact]
+    public void Scheduler_Legacy_OpensPastDeadGapTolerance_Skipped()
+    {
+        var svc    = Svc();
+        // Opens only at 14:00; from the 09:30 start that is a 4.5h wait, past the 90-min
+        // dead-gap tolerance. The legacy day-agnostic gate now applies the SAME dead-gap
+        // semantics as the day-aware one (no trip date needed) → skipped, clock not advanced.
+        var hours  = SimpleHours(14, 22);
+        var places = new List<Place> { MakePlace("Nightlife", openingHours: hours) };
+        var result = svc.BuildPlanSchedule(places, DefaultPrefs(days: 1), seed: 1);
+
+        Assert.Empty(result.Stops);
+        Assert.Contains("dead_gap_skipped", result.Warnings);
     }
 
     [Fact]
