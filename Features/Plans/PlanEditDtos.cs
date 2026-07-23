@@ -42,4 +42,13 @@ public class CreateUserPlanRequest
 
     [Range(1, 7)]
     public int DurationDays { get; set; } = 1;
+
+    /// <summary>
+    /// Fecha de inicio del viaje (calendario, sin zona horaria). Serializa como "yyyy-MM-dd",
+    /// coherente con TripContextDto.StartDate de los paths /builder/chat y /chat/generate.
+    /// Nullable = compat: un plan manual sin fecha es valido. Validada en el controller con
+    /// el mismo TripContextDto.IsStartDateWithinWindow (fuera de ventana => 400 invalid_start_date).
+    /// El builder manual no corre scheduler, asi que la fecha es solo persistencia/display.
+    /// </summary>
+    public DateOnly? StartDate { get; set; }
 }
