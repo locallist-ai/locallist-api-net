@@ -48,7 +48,7 @@ Required User Secrets / Environment Variables:
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
 - `GooglePlaces__PhotoApiKey` — opcional. Key SEPARADA para el proxy de fotos (`GET /places/:id/photos/:index`). Si falta, cae en fallback a `GooglePlaces__ApiKey`; si NINGUNA está, el endpoint degrada a 404. `GooglePlaces__PhotoDailyBudgetCap` (default 10000) = techo diario in-process de llamadas `/media` de pago.
-- `Api__PublicBaseUrl`: opcional (default `""`). Base URL pública de esta API (p.ej. la de Railway) usada para sintetizar en `PlaceDto`/`ResolvedPlaceDto.Photos` la URL absoluta del proxy de fotos `GET /places/:id/photos/0`. Vacía en dev: se sirve una ruta relativa y la app la resuelve contra su propio `EXPO_PUBLIC_API_URL`. Ver `Shared/Dtos/PlacePhotoUrls.cs`.
+- `Api__PublicBaseUrl`: opcional (default `""`). Base URL pública de esta API (p.ej. la de Railway) usada para sintetizar en `PlaceDto`/`ResolvedPlaceDto.Photos` la URL absoluta del proxy de fotos `GET /places/:id/photos/0`, y también la URL del preview admin `GET /admin/places/photo-preview` (`AdminPlacePhotoPreviewUrls`). Vacía en dev: se sirve una ruta relativa y el caller la resuelve contra su propia base. Ver `Shared/Dtos/PlacePhotoUrls.cs`.
 
 **Routing (Mapbox)**
 - `Mapbox__AccessToken` — opcional. Si no está, routing se deshabilita gracefully (stops sin `travelFromPrevious`).
@@ -80,9 +80,10 @@ LocalList.API.NET/
 │   │   ├── Cities/
 │   │   │   └── AdminCitiesController.cs       # DELETE /admin/cities/:id
 │   │   ├── Places/
-│   │   │   ├── AdminPlacesController.cs       # CRUD + backfill + translate (ver Endpoints)
-│   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration
-│   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller
+│   │   │   ├── AdminPlacesController.cs       # CRUD + backfill + translate + photo-preview (ver Endpoints)
+│   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration. NUNCA construye URLs con key: ResolvePhotos sintetiza referencias a AdminPlacePhotoPreviewUrls
+│   │   │   ├── AdminPlacePhotoPreviewUrls.cs  # Síntesis de GET /admin/places/photo-preview?googlePlaceId=X&index=I (preview pre-guardado, sin Place.Id aún)
+│   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller. Google-sourced: Photos siempre null (runtime-only, GooglePlaceId basta)
 │   │   │   └── AdminDtos.cs
 │   │   ├── Plans/
 │   │   │   ├── AdminPlansController.cs        # CRUD + translate curated plans
@@ -140,7 +141,8 @@ LocalList.API.NET/
 │   │   └── Photos/                     # Proxy de fotos de Google (runtime-only, ToS-compliant)
 │   │       ├── PlacePhotosController.cs  # GET /places/:id/photos/:index (302 al photoUri, key server-side)
 │   │       ├── PlacePhotoService.cs      # Place Details (FieldMask=photos, gratis) + /media (key en header) → photoUri
-│   │       └── PhotoBudgetCounter.cs     # Circuit breaker de presupuesto diario (in-process, reset UTC)
+│   │       ├── PhotoBudgetCounter.cs     # Circuit breaker de presupuesto diario (in-process, reset UTC)
+│   │       └── GooglePhotoHostValidator.cs  # Allowlist de host (*.googleusercontent.com) compartida por este proxy y el preview admin de AdminPlacesController
 │   ├── Plans/
 │   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
 │   │   ├── PlanDtos.cs
@@ -216,7 +218,7 @@ LocalList.API.NET/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
     ├── Dtos/
     │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Places + Plans). Photos sintetiza el proxy de fotos (nunca reemite URL de Google con key) + campo photoSource
-    │   ├── PlacePhotoUrls.cs            # Punto único de síntesis Photos/photoSource para un Place, compartido por PlaceDto y ResolvedPlaceDto
+    │   ├── PlacePhotoUrls.cs            # Punto único de síntesis Photos/photoSource para un Place, compartido por PlaceDto y ResolvedPlaceDto. SanitizeForStorage() limpia URLs de Google/preview-admin antes de persistir en cualquier ruta de escritura de Place.Photos
     │   ├── OpeningHours.cs              # OpeningHoursData, OpeningPeriod, OpeningTime
     │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
     │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
@@ -272,7 +274,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Profile | `GET /me/profile`, `DELETE /me/profile` |
 | Taxonomy | `GET /taxonomy` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
-| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
+| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places/photo-preview` (preview de foto de Google pre-guardado por googlePlaceId+index, 302 con key server-side vía `IPlacePhotoService` de T1, nunca la expone al admin), `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
 | Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
 | Admin — Analytics | `GET /admin/analytics/chat-turns`, `GET /admin/analytics/chat-turns/stats`, `GET /admin/analytics/plan-metrics`, `GET /admin/analytics/plan-metrics/stats` |
 | Admin — Cities | `DELETE /admin/cities/:id` |
