@@ -56,11 +56,12 @@ public partial class AdminPlacesController
                    .ThenByDescending(p => p.CreatedAt)
             : query.OrderByDescending(p => p.CreatedAt);
 
-        var places = await ordered
+        var publicBaseUrl = _config["Api:PublicBaseUrl"];
+        var entities = await ordered
             .Skip(offset)
             .Take(limit)
-            .Select(p => AdminPlaceDto.FromEntity(p))
             .ToListAsync(ct);
+        var places = entities.Select(p => AdminPlaceDto.FromEntity(p, publicBaseUrl)).ToList();
 
         return Ok(new { places, total });
     }
@@ -74,6 +75,6 @@ public partial class AdminPlacesController
         if (place == null)
             return NotFound(new { error = "Place not found" });
 
-        return Ok(AdminPlaceDto.FromEntity(place));
+        return Ok(AdminPlaceDto.FromEntity(place, _config["Api:PublicBaseUrl"]));
     }
 }
