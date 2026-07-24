@@ -48,6 +48,7 @@ Required User Secrets / Environment Variables:
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
 - `GooglePlaces__PhotoApiKey` — opcional. Key SEPARADA para el proxy de fotos (`GET /places/:id/photos/:index`). Si falta, cae en fallback a `GooglePlaces__ApiKey`; si NINGUNA está, el endpoint degrada a 404. `GooglePlaces__PhotoDailyBudgetCap` (default 10000) = techo diario in-process de llamadas `/media` de pago.
+- `Api__PublicBaseUrl`: opcional (default `""`). Base URL pública de esta API (p.ej. la de Railway) usada para sintetizar en `PlaceDto`/`ResolvedPlaceDto.Photos` la URL absoluta del proxy de fotos `GET /places/:id/photos/0`. Vacía en dev: se sirve una ruta relativa y la app la resuelve contra su propio `EXPO_PUBLIC_API_URL`. Ver `Shared/Dtos/PlacePhotoUrls.cs`.
 
 **Routing (Mapbox)**
 - `Mapbox__AccessToken` — opcional. Si no está, routing se deshabilita gracefully (stops sin `travelFromPrevious`).
@@ -214,12 +215,13 @@ LocalList.API.NET/
     ├── PostHog/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
     ├── Dtos/
-    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Plans + Admin)
+    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Places + Plans). Photos sintetiza el proxy de fotos (nunca reemite URL de Google con key) + campo photoSource
+    │   ├── PlacePhotoUrls.cs            # Punto único de síntesis Photos/photoSource para un Place, compartido por PlaceDto y ResolvedPlaceDto
     │   ├── OpeningHours.cs              # OpeningHoursData, OpeningPeriod, OpeningTime
     │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
     │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
     │   ├── ScheduledStopDto.cs          # ScheduledStopDto, TravelInfoDto, ScheduleResult
-    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
+    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (Photos vía PlacePhotoUrls, mismo fix que PlaceDto)
     │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
     │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
     ├── Routing/                        # Contratos cross-slice (impl en Features/Routing/)
