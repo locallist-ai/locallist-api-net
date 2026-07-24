@@ -31,6 +31,9 @@ public sealed class PlacePhotoService : IPlacePhotoService
 
     // Place Details con FieldMask SOLO `photos` → SKU gratis ("Place Details Essentials
     // IDs-Only"). NO añadir campos de pago aquí: encarecería cada request de foto.
+    // Verificado contra la doc primaria de Google (2026-07-24): en la tabla data-fields de
+    // Place Details, `photos` pertenece al tier "IDs Only" (junto a `id`/`name`/`attributions`),
+    // que NO factura. El único SKU de pago del proxy es `/media` ($0.007/foto).
     private const string PhotoFieldMask = "photos";
 
     // Ancho servido para la hero. El coste de /media es plano por llamada (no por tamaño),
@@ -62,6 +65,17 @@ public sealed class PlacePhotoService : IPlacePhotoService
 
         if (index < 0)
             return null;
+
+        // 0. Peek NO consumidor del presupuesto: si el cap del día ya está agotado, cortamos
+        //    AQUÍ (404) sin siquiera emitir la llamada gratis de Place Details, que se
+        //    desperdiciaría porque el /media de pago que vendría después no se autorizaría. NO
+        //    consume slot: el conteo real (= coste) lo sigue haciendo el TryAcquire de abajo,
+        //    justo antes del /media, así el contador cuenta solo llamadas /media reales.
+        if (_budget.IsExhausted)
+        {
+            _logger.LogWarning("Photo daily budget cap reached: degrading photo request to 404 (pre-Details)");
+            return null;
+        }
 
         // 1. Place Details (FieldMask=photos, GRATIS): resuelve el photo name fresco. El name
         //    CADUCA y no se puede cachear (ToS) → siempre al vuelo.

@@ -262,6 +262,86 @@ public class PhotoProxyDegradationTests : IClassFixture<PhotoProxyFixture>
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    [Fact]
+    public async Task NotFound_SetsNoStore_SoTransient404IsNotCached()
+    {
+        // Un 404 transitorio (aquí place inexistente, pero aplica a budget/errores de Google)
+        // NO debe quedar cacheado en CDN/navegador y seguir suprimiendo la foto tras el reset.
+        var client = _fixture.CreateNonRedirectingClient();
+
+        var response = await client.GetAsync($"/places/{Guid.NewGuid()}/photos/0");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("no-store", response.Headers.CacheControl?.ToString() ?? "");
+    }
+}
+
+// ── Allowlist de host del photoUri (defensa en profundidad) ───────────────────────────
+
+public class PhotoProxyHostAllowlistTests : IClassFixture<PhotoProxyFixture>
+{
+    private readonly PhotoProxyFixture _fixture;
+    public PhotoProxyHostAllowlistTests(PhotoProxyFixture fixture)
+    {
+        _fixture = fixture;
+        _fixture.FakePhotos.Reset();
+    }
+
+    [Fact]
+    public async Task PhotoUriOnGoogleSubdomain_Redirects302()
+    {
+        // Host por defecto = lh3.googleusercontent.com (subdominio) → permitido.
+        var placeId = await PhotoProxyTestData.SeedPlaceWithGoogleId(_fixture, "ChIJ_allow_sub");
+        var client = _fixture.CreateNonRedirectingClient();
+
+        var response = await client.GetAsync($"/places/{placeId}/photos/0");
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PhotoUriOnGoogleApex_Redirects302()
+    {
+        _fixture.FakePhotos.PhotoUri = "https://googleusercontent.com/apex-hero.jpg";
+        var placeId = await PhotoProxyTestData.SeedPlaceWithGoogleId(_fixture, "ChIJ_allow_apex");
+        var client = _fixture.CreateNonRedirectingClient();
+
+        var response = await client.GetAsync($"/places/{placeId}/photos/0");
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal("https://googleusercontent.com/apex-hero.jpg",
+            response.Headers.Location?.ToString());
+    }
+
+    [Fact]
+    public async Task PhotoUriOnArbitraryHost_Returns404_DoesNotRedirect()
+    {
+        _fixture.FakePhotos.PhotoUri = "https://evil.example/x.jpg";
+        var placeId = await PhotoProxyTestData.SeedPlaceWithGoogleId(_fixture, "ChIJ_deny_evil");
+        var client = _fixture.CreateNonRedirectingClient();
+
+        var response = await client.GetAsync($"/places/{placeId}/photos/0");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Null(response.Headers.Location);
+    }
+
+    [Fact]
+    public async Task PhotoUriWithGoogleHostAsPrefix_DoesNotEvadeAllowlist_Returns404()
+    {
+        // El host EMPIEZA por "googleusercontent.com" pero es un dominio del atacante. Un
+        // check por substring lo dejaría pasar; el check por Host (termina en
+        // ".googleusercontent.com" o es exacto) lo rechaza.
+        _fixture.FakePhotos.PhotoUri = "https://googleusercontent.com.attacker.example/x.jpg";
+        var placeId = await PhotoProxyTestData.SeedPlaceWithGoogleId(_fixture, "ChIJ_deny_prefix");
+        var client = _fixture.CreateNonRedirectingClient();
+
+        var response = await client.GetAsync($"/places/{placeId}/photos/0");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Null(response.Headers.Location);
+    }
 }
 
 // ── Fallback de key ───────────────────────────────────────────────────────────────────
@@ -334,21 +414,27 @@ public class PhotoProxyBudgetBreakerTests : IClassFixture<PhotoBudgetFixture>
         var placeId = await PhotoProxyTestData.SeedPlaceWithGoogleId(_fixture, "ChIJ_budget");
         var client = _fixture.CreateNonRedirectingClient();
 
-        // Cap = 1: la primera request consume el presupuesto del día → 302 (1 llamada /media).
+        // Cap = 1: la primera request consume el presupuesto del día → 302 (1 llamada /media
+        // + 1 llamada Details gratis).
         var first = await client.GetAsync($"/places/{placeId}/photos/0");
         Assert.Equal(HttpStatusCode.Redirect, first.StatusCode);
         Assert.Equal(1, _fixture.FakePhotos.MediaCallCount);
+        Assert.Equal(1, _fixture.FakePhotos.DetailsCallCount);
 
-        // La segunda, mismo día UTC: cap alcanzado → 404 y NO se emite otra llamada /media.
+        // La segunda, mismo día UTC: cap alcanzado → 404. El peek no-consumidor corta ANTES
+        // de Details, así que NO se emite ni Details ni /media (ambos contadores se quedan).
         var second = await client.GetAsync($"/places/{placeId}/photos/0");
         Assert.Equal(HttpStatusCode.NotFound, second.StatusCode);
         Assert.Equal(1, _fixture.FakePhotos.MediaCallCount);
+        Assert.Equal(1, _fixture.FakePhotos.DetailsCallCount);
 
-        // Avanzamos al día UTC siguiente → el contador se reinicia y vuelve a servir.
+        // Avanzamos al día UTC siguiente → el contador se reinicia y vuelve a servir. El
+        // conteo de /media sigue siendo exacto al coste (una por 302 real, ninguna por el 404).
         _fixture.FakeTime.Advance(TimeSpan.FromDays(1));
         var third = await client.GetAsync($"/places/{placeId}/photos/0");
         Assert.Equal(HttpStatusCode.Redirect, third.StatusCode);
         Assert.Equal(2, _fixture.FakePhotos.MediaCallCount);
+        Assert.Equal(2, _fixture.FakePhotos.DetailsCallCount);
     }
 }
 

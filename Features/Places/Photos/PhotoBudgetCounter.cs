@@ -34,6 +34,28 @@ public sealed class PhotoBudgetCounter
     }
 
     /// <summary>
+    /// Lectura NO consumidora del estado del presupuesto: <c>true</c> si el cap del día UTC en
+    /// curso ya se alcanzó. NO incrementa ni reinicia el contador (el reset real es perezoso en
+    /// <see cref="TryAcquire"/>); un día UTC nuevo se considera fresco → <c>false</c>. Sirve para
+    /// cortar temprano (404) ANTES de emitir la llamada gratis de Place Details cuando ya no hay
+    /// presupuesto para el <c>/media</c> de pago que vendría después, sin sobre-contar el coste.
+    /// Thread-safe (mismo lock que <see cref="TryAcquire"/>).
+    /// </summary>
+    public bool IsExhausted
+    {
+        get
+        {
+            var today = DateOnly.FromDateTime(_clock.GetUtcNow().UtcDateTime);
+            lock (_gate)
+            {
+                if (today != _day)
+                    return false;
+                return _count >= _dailyCap;
+            }
+        }
+    }
+
+    /// <summary>
     /// Intenta reservar una llamada <c>/media</c> del presupuesto de hoy. Devuelve
     /// <c>true</c> si queda presupuesto (e incrementa el contador), <c>false</c> si el cap
     /// del día ya se alcanzó. Reinicia el contador al cambiar el día UTC. Thread-safe.
