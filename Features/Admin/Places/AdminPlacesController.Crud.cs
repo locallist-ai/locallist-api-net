@@ -61,7 +61,7 @@ public partial class AdminPlacesController
 
         _logger.LogInformation("Admin created place {PlaceId} ({Name})", place.Id, place.Name);
 
-        return CreatedAtAction(nameof(GetPlace), new { id = place.Id }, AdminPlaceDto.FromEntity(place));
+        return CreatedAtAction(nameof(GetPlace), new { id = place.Id }, AdminPlaceDto.FromEntity(place, _config["Api:PublicBaseUrl"]));
     }
 
     [HttpPost("bulk")]
@@ -156,7 +156,7 @@ public partial class AdminPlacesController
 
         _logger.LogInformation("Admin updated place {PlaceId}", place.Id);
 
-        return Ok(AdminPlaceDto.FromEntity(place));
+        return Ok(AdminPlaceDto.FromEntity(place, _config["Api:PublicBaseUrl"]));
     }
 
     [HttpPatch("{id}/review")]
@@ -178,7 +178,7 @@ public partial class AdminPlacesController
 
         _logger.LogInformation("Admin {Action} place {PlaceId}", request.Status, place.Id);
 
-        return Ok(AdminPlaceDto.FromEntity(place));
+        return Ok(AdminPlaceDto.FromEntity(place, _config["Api:PublicBaseUrl"]));
     }
 
     [HttpPatch("{id}/postpone")]
@@ -193,7 +193,7 @@ public partial class AdminPlacesController
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Admin postponed place {PlaceId}", place.Id);
-        return Ok(AdminPlaceDto.FromEntity(place));
+        return Ok(AdminPlaceDto.FromEntity(place, _config["Api:PublicBaseUrl"]));
     }
 
     [HttpDelete("{id}")]

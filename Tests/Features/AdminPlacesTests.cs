@@ -1280,6 +1280,102 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         };
     }
 
+    // ── Fix admin Google photos: AdminPlaceDto sintetiza la foto del proxy ────────────────
+    //
+    // Tras el proxy runtime de fotos (PR #114) los sitios Google guardan Photos=null y la URL se
+    // sintetiza en serialización. AdminPlaceDto.FromEntity debe pasar por PlacePhotoUrls.Resolve
+    // igual que PlaceDto; si pasara p.Photos crudo, el admin no vería imagen de esos sitios.
+    // Sin Api:PublicBaseUrl (default de ApiFixture) el proxy sale como ruta relativa.
+
+    [Fact]
+    public async Task AdminGetPlace_GooglePlaceWithNullPhotos_SynthesizesProxyPhotoUrl()
+    {
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Admin Google Spot {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "curated",
+            Status = "in_review",
+            GooglePlaceId = "ChIJ_admin_google",
+            Photos = null, // runtime-only: los sitios Google guardan Photos=null tras PR #114
+        };
+        db.Places.Add(place);
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.GetAsync($"/admin/places/{place.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var photos = body.GetProperty("photos").EnumerateArray().Select(p => p.GetString()).ToList();
+        Assert.Equal(new[] { $"/places/{place.Id}/photos/0" }, photos);
+    }
+
+    [Fact]
+    public async Task AdminGetPlace_NoGooglePlaceId_ExternalPhotos_PreservedVerbatim()
+    {
+        var external = new List<string>
+        {
+            "https://images.example-yelp.com/admin-clean-1.jpg",
+            "https://cdn.creator-upload.example/admin-clean-2.jpg",
+        };
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Admin External Spot {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "curated",
+            Status = "in_review",
+            GooglePlaceId = null,
+            Photos = external,
+        };
+        db.Places.Add(place);
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.GetAsync($"/admin/places/{place.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var photos = body.GetProperty("photos").EnumerateArray().Select(p => p.GetString()!).ToList();
+        Assert.Equal(external, photos);
+    }
+
+    [Fact]
+    public async Task AdminListPlaces_GooglePlaceWithNullPhotos_SynthesizesProxyPhotoUrl()
+    {
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Admin List Google Spot {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "curated",
+            Status = "in_review",
+            GooglePlaceId = "ChIJ_admin_list_google",
+            Photos = null,
+        };
+        db.Places.Add(place);
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.GetAsync($"/admin/places?status=in_review&search={Uri.EscapeDataString(place.Name)}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var match = body.GetProperty("places").EnumerateArray()
+            .First(p => p.GetProperty("id").GetGuid() == place.Id);
+        Assert.Equal(
+            $"/places/{place.Id}/photos/0",
+            match.GetProperty("photos")[0].GetString());
+    }
+
     private HttpClient CreateAdminClient()
     {
         var adminEmail = $"admin-{Guid.NewGuid():N}@locallist.ai";
