@@ -118,8 +118,6 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             Flags = ["INTERNAL-FLAG-SENTINEL"],
             AiVibeScore = 42,
             RejectionReason = "REJECT-REASON-SENTINEL",
-            SubmittedById = Guid.NewGuid(),
-            ReviewedById = Guid.NewGuid(),
         };
         db.Places.Add(place);
         db.PlanStops.Add(new PlanStop { Id = Guid.NewGuid(), PlanId = planId, PlaceId = place.Id, DayNumber = 1, OrderIndex = 0 });
