@@ -110,7 +110,7 @@ LocalList.API.NET/
 │   │   │   ├── PlaceRankingService.cs          # Reranking determinista ponderado
 │   │   │   ├── PlanGenerationService.cs        # Orquesta RAG + prefs + scheduler
 │   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan
-│   │   │   └── SchedulingService.cs            # Scheduler determinista por semilla
+│   │   │   └── SchedulingService.*.cs          # Scheduler determinista por semilla (partial: .cs API, .Constants, .Selection, .Ordering, .DayWalk, .Refinements, .Helpers)
 │   │   └── Shared/
 │   │       └── GroupTypePolicy.cs       # Reglas de capacidad por tipo de grupo
 │   ├── Chat/
