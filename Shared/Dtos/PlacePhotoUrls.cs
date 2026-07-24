@@ -53,4 +53,35 @@ public static class PlacePhotoUrls
     /// </summary>
     private static bool IsGoogleHostedUrl(string url) =>
         url.Contains("googleapis.com", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True si la URL es el preview admin-authed de T3 (<c>/admin/places/photo-preview</c>).
+    /// Nunca debe acabar en <c>Place.Photos</c>: requiere auth de admin, así que un cliente
+    /// normal de la app recibiría 401/403 al intentar cargarla.
+    /// </summary>
+    private static bool IsAdminPreviewUrl(string url) =>
+        url.Contains("/admin/places/photo-preview", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Higiene de escritura (T3, defensa en profundidad): elimina de <paramref name="photos"/>
+    /// cualquier entrada que no sea una URL directamente servible por un cliente público:
+    /// ni URLs de Google con key, ni referencias al preview admin-authed. Se aplica en TODAS
+    /// las rutas de escritura de <c>Place.Photos</c> (creación directa, bulk, update): aunque
+    /// un caller intente colar una de esas URLs (p. ej. copy-paste desde una respuesta de
+    /// import), nunca llega a persistirse en Postgres. Devuelve null si no queda nada servible
+    /// (nunca una lista vacía), para no romper la semántica "sin fotos" = null del resto del
+    /// código.
+    /// </summary>
+    public static List<string>? SanitizeForStorage(List<string>? photos)
+    {
+        if (photos is null) return null;
+
+        var clean = photos
+            .Where(url => !string.IsNullOrWhiteSpace(url))
+            .Where(url => !IsGoogleHostedUrl(url))
+            .Where(url => !IsAdminPreviewUrl(url))
+            .ToList();
+
+        return clean.Count > 0 ? clean : null;
+    }
 }

@@ -126,7 +126,7 @@ public class GooglePlacesService : IGooglePlacesService
                     Rating: p.Rating,
                     ReviewCount: p.UserRatingCount,
                     PriceLevel: MapPriceLevel(p.PriceLevel),
-                    Photos: ResolvePhotos(p.Photos, apiKey),
+                    Photos: ResolvePhotos(p.Photos, p.Id ?? string.Empty),
                     Types: p.Types ?? [],
                     Website: p.WebsiteUri,
                     Phone: p.InternationalPhoneNumber,
@@ -198,7 +198,7 @@ public class GooglePlacesService : IGooglePlacesService
                 PrimaryType: p.PrimaryType,
                 Types: p.Types ?? [],
                 PriceLevel: MapPriceLevel(p.PriceLevel),
-                Photos: ResolvePhotos(p.Photos, apiKey),
+                Photos: ResolvePhotos(p.Photos, p.Id ?? placeId),
                 Rating: p.Rating,
                 ReviewCount: p.UserRatingCount,
                 Website: p.WebsiteUri,
@@ -334,12 +334,21 @@ public class GooglePlacesService : IGooglePlacesService
         _ => null
     };
 
-    private static List<string> ResolvePhotos(List<GooglePhotoRef>? photos, string apiKey) =>
-        photos?
-            .Where(p => !string.IsNullOrEmpty(p.Name))
-            .Take(3)
-            .Select(p => $"https://places.googleapis.com/v1/{p.Name}/media?maxWidthPx=1600&key={apiKey}")
-            .ToList() ?? [];
+    /// <summary>
+    /// NUNCA construye una URL <c>places.googleapis.com</c> con la key en el query string
+    /// (ese leak es justo lo que T1+T3 cierran). Devuelve en su lugar hasta 3 referencias al
+    /// preview admin-authed (<see cref="AdminPlacePhotoPreviewUrls"/>), que resuelve la key
+    /// server-side vía <c>IPlacePhotoService</c> y responde con un 302. Único punto de síntesis
+    /// de fotos de este servicio: no dupliques esta lógica en otro caller.
+    /// </summary>
+    private List<string> ResolvePhotos(List<GooglePhotoRef>? photos, string googlePlaceId)
+    {
+        var count = photos?.Count(p => !string.IsNullOrEmpty(p.Name)) ?? 0;
+        if (count == 0) return [];
+
+        return AdminPlacePhotoPreviewUrls.ForGooglePlace(
+            googlePlaceId, Math.Min(count, 3), _config["Api:PublicBaseUrl"]);
+    }
 
     // --- private response models ---
     private sealed class GoogleApiResponse

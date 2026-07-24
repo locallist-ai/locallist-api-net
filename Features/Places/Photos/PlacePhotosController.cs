@@ -57,30 +57,12 @@ public sealed class PlacePhotosController : ControllerBase
         // Defensa en profundidad: solo redirigimos a hosts del CDN de Google. El photoUri
         // viene de Google sobre TLS, pero validamos el host antes de emitir el 302 para no
         // convertirnos en un redirector abierto si esa fuente cambiara. Si no matchea → 404.
-        if (!IsAllowedGooglePhotoHost(photoUri))
+        // Validación compartida con el preview admin-authed (T3): ver GooglePhotoHostValidator.
+        if (!GooglePhotoHostValidator.IsAllowedGooglePhotoHost(photoUri))
             return NotFound();
 
         // 302 Location: {photoUri}. La app sigue el redirect y baja los bytes del CDN de
         // Google directamente (no tocan Railway → sin egress). No se streamean bytes aquí.
         return Redirect(photoUri);
-    }
-
-    /// <summary>
-    /// True solo si <paramref name="photoUri"/> es una URL https absoluta cuyo host es
-    /// exactamente <c>googleusercontent.com</c> o un subdominio (<c>*.googleusercontent.com</c>).
-    /// Compara el <see cref="Uri.Host"/> parseado, no substrings: un host como
-    /// <c>googleusercontent.com.attacker.example</c> NO termina en <c>.googleusercontent.com</c>
-    /// y por tanto se rechaza (no evade la allowlist).
-    /// </summary>
-    private static bool IsAllowedGooglePhotoHost(string photoUri)
-    {
-        if (!Uri.TryCreate(photoUri, UriKind.Absolute, out var uri))
-            return false;
-        if (uri.Scheme != Uri.UriSchemeHttps)
-            return false;
-
-        var host = uri.Host;
-        return host.Equals("googleusercontent.com", StringComparison.OrdinalIgnoreCase)
-            || host.EndsWith(".googleusercontent.com", StringComparison.OrdinalIgnoreCase);
     }
 }
