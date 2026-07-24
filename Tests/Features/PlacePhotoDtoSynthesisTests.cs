@@ -220,7 +220,7 @@ public class PlaceDtoPhotoSynthesis_DefaultFixtureTests(ApiFixture fixture) : IC
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        var photos = body.GetProperty("photos").EnumerateArray().Select(p => p.GetString()).ToList();
+        var photos = body.GetProperty("photos").EnumerateArray().Select(p => p.GetString()!).ToList();
         Assert.Equal(external, photos);
         Assert.Equal("external", body.GetProperty("photoSource").GetString());
     }
