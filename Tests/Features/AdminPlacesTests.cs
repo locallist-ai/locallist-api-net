@@ -236,6 +236,72 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task FirebaseLocallistEmail_WithEmailVerifiedClaimAbsent_GetsForbiddenOnAdminEndpoint()
+    {
+        // Blinda el caso limite que el test de "WithoutEmailVerified" (claim presente en "false")
+        // no cubre: un token @locallist.ai donde la claim email_verified directamente no viene
+        // en el JWT (token legado/malformado). IsAdminCaller debe fallar cerrado (403), no abierto.
+        // Una futura regresion a una comprobacion tipo `!= "false"` (en vez de exigir "true")
+        // pasaria este caso por alto y NO seria detectada sin este test.
+        var email = $"absent-claim-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-absent-claim-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: null);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FirebaseLocallistEmail_WithEmailVerifiedAsJsonBoolean_AccessesAdminEndpoint()
+    {
+        // Firebase emite email_verified como boolean JSON real (true/false), no como string
+        // "true"/"false" -- CreateToken normalmente usa ClaimValueTypes.String por comodidad de
+        // los demas tests. Este test fuerza ClaimValueTypes.Boolean para que el payload del JWT
+        // lleve el valor sin comillas, tal y como lo hace Firebase en produccion, y verifica que
+        // bool.TryParse en HasVerifiedEmail lo seguiria aceptando.
+        var email = $"json-bool-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-json-bool-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: true, emailVerifiedAsJsonBoolean: true);
+
+        // Confirma que el payload realmente lleva el valor como JSON boolean (sin comillas) y no
+        // como string -- si esto fallara, el test de arriba no estaria probando lo que dice probar.
+        var payloadJson = System.Text.Encoding.UTF8.GetString(
+            Base64UrlDecode(token.Split('.')[1]));
+        Assert.Contains("\"email_verified\":true", payloadJson);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static byte[] Base64UrlDecode(string input)
+    {
+        var padded = input.Replace('-', '+').Replace('_', '/');
+        switch (padded.Length % 4)
+        {
+            case 2: padded += "=="; break;
+            case 3: padded += "="; break;
+        }
+        return Convert.FromBase64String(padded);
+    }
+
+    [Fact]
     public async Task TranslateBatch_LimitSmallerThanPending_Returns_RemainingGreaterThanZero()
     {
         var db = fixture.GetDbContext();
