@@ -192,6 +192,50 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task FirebaseLocallistEmail_WithoutEmailVerified_GetsForbiddenOnAdminEndpoint()
+    {
+        // Audit 2026-07-24: IsAdminCaller no exigia email_verified. Un atacante que hace
+        // self-signup email/password de x@locallist.ai (buzon que NO controla, asi que nunca
+        // podra verificarlo) obtenia un token Firebase con esa claim y escalaba a admin.
+        // Un token @locallist.ai SIN email verificado debe ser rechazado (403).
+        var email = $"unverified-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-unverified-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: false);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FirebaseLocallistEmail_WithEmailVerified_AccessesAdminEndpoint()
+    {
+        // Contraparte del test anterior: el flujo admin legitimo (Google SSO trae
+        // email_verified=true) sigue funcionando.
+        var email = $"verified-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-verified-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: true);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
     public async Task TranslateBatch_LimitSmallerThanPending_Returns_RemainingGreaterThanZero()
     {
         var db = fixture.GetDbContext();

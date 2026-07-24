@@ -320,7 +320,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// <summary>
     /// Creates a Firebase-style RS256 JWT for testing.
     /// </summary>
-    public string CreateToken(string firebaseUid, string email = "test@test.com")
+    public string CreateToken(string firebaseUid, string email = "test@test.com", bool emailVerified = true)
     {
         var key = new RsaSecurityKey(_testRsa);
         var credentials = new SigningCredentials(key, SecurityAlgorithms.RsaSha256);
@@ -329,7 +329,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         {
             new Claim(JwtRegisteredClaimNames.Sub, firebaseUid),
             new Claim(JwtRegisteredClaimNames.Email, email),
-            new Claim("email_verified", "true"),
+            new Claim("email_verified", emailVerified ? "true" : "false"),
             new Claim("user_id", firebaseUid)
         };
 

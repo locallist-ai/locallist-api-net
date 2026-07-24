@@ -38,6 +38,21 @@ public class FollowController : ControllerBase
         var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
+        // IDOR guard: only public (curated) plans or the caller's own plans may be followed.
+        // Without this, a user with the GUID of someone else's private plan could start a
+        // session and read its itinerary via GetActiveSession. Same 404 pattern as
+        // PlansController.GetPlan so existence of private plans is not leaked.
+        var plan = await _db.Plans.AsNoTracking()
+            .Where(p => p.Id == request.PlanId)
+            .Select(p => new { p.IsPublic, p.CreatedById })
+            .FirstOrDefaultAsync(ct);
+
+        if (plan == null || (!plan.IsPublic && plan.CreatedById != userId))
+        {
+            _logger.LogWarning("User {UserId} attempted to follow inaccessible plan {PlanId}", userId, request.PlanId);
+            return NotFound(new { error = "Plan not found" });
+        }
+
         var existing = await _db.FollowSessions.AsNoTracking()
             .Where(fs => fs.UserId == userId.Value && fs.Status == "active")
             .FirstOrDefaultAsync(ct);
