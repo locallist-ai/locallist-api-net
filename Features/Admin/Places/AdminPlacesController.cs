@@ -32,6 +32,7 @@ public partial class AdminPlacesController : ControllerBase
     private readonly ITaxonomySvc _taxonomy;
     private readonly PlaceImportService _importSvc;
     private readonly IPlacePhotoService _photos;
+    private readonly IConfiguration _config;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -48,7 +49,8 @@ public partial class AdminPlacesController : ControllerBase
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,
         PlaceImportService importSvc,
-        IPlacePhotoService photos)
+        IPlacePhotoService photos,
+        IConfiguration config)
     {
         _db = db;
         _logger = logger;
@@ -60,5 +62,6 @@ public partial class AdminPlacesController : ControllerBase
         _taxonomy = taxonomy;
         _importSvc = importSvc;
         _photos = photos;
+        _config = config;
     }
 }
