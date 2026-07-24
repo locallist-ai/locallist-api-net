@@ -119,7 +119,7 @@ LocalList.API.NET/
 │   │   ├── I18n/
 │   │   │   └── ChatStrings.cs
 │   │   └── Services/
-│   │       ├── ChatAgentService.cs         # Orquesta slot-filling + sesión + generación
+│   │       ├── ChatAgentService.*.cs        # Orquesta slot-filling + sesión + generación (partial: .cs orquestación ProcessTurnAsync, .Constants, .Responses, .Session, .Slots, .Generation, .Helpers)
 │   │       ├── SlotExtractorService.cs     # Gemini → extrae slots de texto libre
 │   │       ├── InputNormalizer.cs          # Normaliza input antes de slot extraction
 │   │       ├── OutputSanitizer.cs          # Sanitiza respuesta AI
