@@ -192,6 +192,116 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task FirebaseLocallistEmail_WithoutEmailVerified_GetsForbiddenOnAdminEndpoint()
+    {
+        // Audit 2026-07-24: IsAdminCaller no exigia email_verified. Un atacante que hace
+        // self-signup email/password de x@locallist.ai (buzon que NO controla, asi que nunca
+        // podra verificarlo) obtenia un token Firebase con esa claim y escalaba a admin.
+        // Un token @locallist.ai SIN email verificado debe ser rechazado (403).
+        var email = $"unverified-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-unverified-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: false);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FirebaseLocallistEmail_WithEmailVerified_AccessesAdminEndpoint()
+    {
+        // Contraparte del test anterior: el flujo admin legitimo (Google SSO trae
+        // email_verified=true) sigue funcionando.
+        var email = $"verified-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-verified-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: true);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FirebaseLocallistEmail_WithEmailVerifiedClaimAbsent_GetsForbiddenOnAdminEndpoint()
+    {
+        // Blinda el caso limite que el test de "WithoutEmailVerified" (claim presente en "false")
+        // no cubre: un token @locallist.ai donde la claim email_verified directamente no viene
+        // en el JWT (token legado/malformado). IsAdminCaller debe fallar cerrado (403), no abierto.
+        // Una futura regresion a una comprobacion tipo `!= "false"` (en vez de exigir "true")
+        // pasaria este caso por alto y NO seria detectada sin este test.
+        var email = $"absent-claim-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-absent-claim-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: null);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FirebaseLocallistEmail_WithEmailVerifiedAsJsonBoolean_AccessesAdminEndpoint()
+    {
+        // Firebase emite email_verified como boolean JSON real (true/false), no como string
+        // "true"/"false" -- CreateToken normalmente usa ClaimValueTypes.String por comodidad de
+        // los demas tests. Este test fuerza ClaimValueTypes.Boolean para que el payload del JWT
+        // lleve el valor sin comillas, tal y como lo hace Firebase en produccion, y verifica que
+        // bool.TryParse en HasVerifiedEmail lo seguiria aceptando.
+        var email = $"json-bool-admin-{Guid.NewGuid():N}@locallist.ai";
+        var firebaseUid = $"fb-json-bool-{Guid.NewGuid():N}";
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = Guid.NewGuid(), Email = email, FirebaseUid = firebaseUid, Role = "admin" });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateToken(firebaseUid, email, emailVerified: true, emailVerifiedAsJsonBoolean: true);
+
+        // Confirma que el payload realmente lleva el valor como JSON boolean (sin comillas) y no
+        // como string -- si esto fallara, el test de arriba no estaria probando lo que dice probar.
+        var payloadJson = System.Text.Encoding.UTF8.GetString(
+            Base64UrlDecode(token.Split('.')[1]));
+        Assert.Contains("\"email_verified\":true", payloadJson);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await client.GetAsync("/admin/places");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static byte[] Base64UrlDecode(string input)
+    {
+        var padded = input.Replace('-', '+').Replace('_', '/');
+        switch (padded.Length % 4)
+        {
+            case 2: padded += "=="; break;
+            case 3: padded += "="; break;
+        }
+        return Convert.FromBase64String(padded);
+    }
+
+    [Fact]
     public async Task TranslateBatch_LimitSmallerThanPending_Returns_RemainingGreaterThanZero()
     {
         var db = fixture.GetDbContext();
@@ -356,7 +466,9 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             Lat: 25.77m, Lng: -80.19m,
             PrimaryType: "italian_restaurant", Types: ["italian_restaurant", "restaurant"],
             PriceLevel: "$",
-            Photos: ["https://photos.example.com/photo1.jpg"],
+            // T3: aunque GetDetailsAsync devolviera (incorrectamente) una URL de Google con
+            // key, la ingesta NUNCA debe persistirla: este es justo el escenario que T3 cierra.
+            Photos: ["https://places.googleapis.com/v1/places/xyz/media?maxWidthPx=1600&key=SECRET_KEY"],
             Rating: 4.5m, ReviewCount: 200,
             Website: null, Phone: null,
             EditorialSummary: "A great test place");
@@ -372,7 +484,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(0, body.GetProperty("failed").GetInt32());
         Assert.Equal("created", body.GetProperty("rows")[0].GetProperty("status").GetString());
 
-        // Verify full taxonomy × price × rating × photo pipeline in DB
+        // Verify full taxonomy × price × rating pipeline in DB
         var freshDb = fixture.GetDbContext();
         var saved = await freshDb.Places.FirstOrDefaultAsync(p => p.GooglePlaceId == placeId);
         Assert.NotNull(saved);
@@ -381,11 +493,23 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Contains("Italian", saved.Subcategories ?? []);
         Assert.Equal("$", saved.PriceRange);
         Assert.Equal(4.5m, saved.GoogleRating);
-        Assert.NotNull(saved.Photos);
-        Assert.Equal(1, saved.Photos!.Count);
         Assert.Equal(25.77m, saved.Latitude);
         Assert.Equal(-80.19m, saved.Longitude);
         Assert.NotNull(saved.Embedding);
+
+        // T3: Place.Photos runtime-only. Un sitio de Google jamás persiste una URL de
+        // Google (ni la key, ni siquiera el preview admin-authed). GooglePlaceId basta.
+        Assert.Null(saved.Photos);
+        Assert.Equal(placeId, saved.GooglePlaceId);
+
+        // Regresión de T2: el PlaceDto público sigue sintetizando la foto del proxy runtime a
+        // partir de GooglePlaceId, con Place.Photos vacío en DB.
+        var placeDtoResponse = await client.GetAsync($"/places/{saved.Id}");
+        Assert.Equal(HttpStatusCode.OK, placeDtoResponse.StatusCode);
+        var placeDto = await placeDtoResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("google", placeDto.GetProperty("photoSource").GetString());
+        var dtoPhotos = placeDto.GetProperty("photos").EnumerateArray().Select(p => p.GetString()).ToList();
+        Assert.Equal(new[] { $"/places/{saved.Id}/photos/0" }, dtoPhotos);
     }
 
     [Fact]
@@ -1154,6 +1278,102 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         {
             Content = new StringContent(envelope, System.Text.Encoding.UTF8, "application/json")
         };
+    }
+
+    // ── Fix admin Google photos: AdminPlaceDto sintetiza la foto del proxy ────────────────
+    //
+    // Tras el proxy runtime de fotos (PR #114) los sitios Google guardan Photos=null y la URL se
+    // sintetiza en serialización. AdminPlaceDto.FromEntity debe pasar por PlacePhotoUrls.Resolve
+    // igual que PlaceDto; si pasara p.Photos crudo, el admin no vería imagen de esos sitios.
+    // Sin Api:PublicBaseUrl (default de ApiFixture) el proxy sale como ruta relativa.
+
+    [Fact]
+    public async Task AdminGetPlace_GooglePlaceWithNullPhotos_SynthesizesProxyPhotoUrl()
+    {
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Admin Google Spot {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "curated",
+            Status = "in_review",
+            GooglePlaceId = "ChIJ_admin_google",
+            Photos = null, // runtime-only: los sitios Google guardan Photos=null tras PR #114
+        };
+        db.Places.Add(place);
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.GetAsync($"/admin/places/{place.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var photos = body.GetProperty("photos").EnumerateArray().Select(p => p.GetString()).ToList();
+        Assert.Equal(new[] { $"/places/{place.Id}/photos/0" }, photos);
+    }
+
+    [Fact]
+    public async Task AdminGetPlace_NoGooglePlaceId_ExternalPhotos_PreservedVerbatim()
+    {
+        var external = new List<string>
+        {
+            "https://images.example-yelp.com/admin-clean-1.jpg",
+            "https://cdn.creator-upload.example/admin-clean-2.jpg",
+        };
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Admin External Spot {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "curated",
+            Status = "in_review",
+            GooglePlaceId = null,
+            Photos = external,
+        };
+        db.Places.Add(place);
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.GetAsync($"/admin/places/{place.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var photos = body.GetProperty("photos").EnumerateArray().Select(p => p.GetString()!).ToList();
+        Assert.Equal(external, photos);
+    }
+
+    [Fact]
+    public async Task AdminListPlaces_GooglePlaceWithNullPhotos_SynthesizesProxyPhotoUrl()
+    {
+        var db = fixture.GetDbContext();
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Admin List Google Spot {Guid.NewGuid():N}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "curated",
+            Status = "in_review",
+            GooglePlaceId = "ChIJ_admin_list_google",
+            Photos = null,
+        };
+        db.Places.Add(place);
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.GetAsync($"/admin/places?status=in_review&search={Uri.EscapeDataString(place.Name)}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var match = body.GetProperty("places").EnumerateArray()
+            .First(p => p.GetProperty("id").GetGuid() == place.Id);
+        Assert.Equal(
+            $"/places/{place.Id}/photos/0",
+            match.GetProperty("photos")[0].GetString());
     }
 
     private HttpClient CreateAdminClient()

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Taxonomy;
 using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
 
@@ -190,7 +191,11 @@ public class PlaceImportService
                 GoogleRating = details.Rating,
                 GoogleReviewCount = details.ReviewCount,
                 PriceRange = details.PriceLevel,
-                Photos = details.Photos.Count > 0 ? details.Photos : null,
+                // T3: runtime-only. details.Photos son referencias al preview admin-authed
+                // (GooglePlacesService.ResolvePhotos), NUNCA servibles por un cliente público:
+                // nunca se persisten. GooglePlaceId (seteado arriba) basta, PlaceDto sintetiza
+                // el proxy (T1+T2). Place.Photos solo guarda URLs externas no-Google.
+                Photos = null,
                 Source = request.Source,
                 Status = request.DefaultStatus,
                 OpeningHours = details.OpeningHours,
@@ -347,7 +352,10 @@ public class PlaceImportService
                 SuitableFor = req.SuitableFor,
                 BestTimes = req.BestTimes,
                 PriceRange = req.PriceRange?.Trim(),
-                Photos = req.Photos,
+                // T3: barrido, nunca persistir una URL de Google (key) ni el preview
+                // admin-authed, venga de donde venga la request (p.ej. bulk import pegado a
+                // mano por un curador desde una respuesta de otro endpoint).
+                Photos = PlacePhotoUrls.SanitizeForStorage(req.Photos),
                 GooglePlaceId = req.GooglePlaceId?.Trim(),
                 GoogleRating = req.GoogleRating,
                 GoogleReviewCount = req.GoogleReviewCount,

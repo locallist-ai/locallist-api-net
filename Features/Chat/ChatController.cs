@@ -8,6 +8,7 @@ using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Plans;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -41,6 +42,7 @@ public class ChatController : ControllerBase
     private readonly PostHogService _posthog;
     private readonly ICityCoverageService _coverage;
     private readonly IPlanGenerationGateService _planGate;
+    private readonly IConfiguration _config;
 
     public ChatController(
         ChatAgentService agent,
@@ -49,7 +51,8 @@ public class ChatController : ControllerBase
         ILogger<ChatController> logger,
         PostHogService posthog,
         ICityCoverageService coverage,
-        IPlanGenerationGateService planGate)
+        IPlanGenerationGateService planGate,
+        IConfiguration config)
     {
         _agent = agent;
         _db = db;
@@ -58,6 +61,7 @@ public class ChatController : ControllerBase
         _posthog = posthog;
         _coverage = coverage;
         _planGate = planGate;
+        _config = config;
     }
 
     /// <summary>
@@ -178,9 +182,13 @@ public class ChatController : ControllerBase
                         SuggestedDurationMin = s.SuggestedDurationMin ?? 0
                     }).ToList();
                 var existingPlaces = existing.Stops.Select(s => s.Place).OfType<Place>().ToList();
+                // No serializar la entidad Plan cruda: sus Stops[].Place emitirian la key de
+                // Google en Photos. Se serializa via el MISMO DTO que GET /plans/:id, que
+                // sintetiza las fotos por el proxy y excluye los campos internos de curacion.
+                var replayLang = LanguageAccessor.ResolveRequestLanguage(Request);
                 return Ok(new
                 {
-                    plan = existing,
+                    plan = PlanDetailDto.FromEntity(existing, replayLang, publicBaseUrl: _config["Api:PublicBaseUrl"]),
                     stops = _planGen.ResolveStopPlaces(existingStopDtos, existingPlaces),
                     message = "Your plan is ready!",
                     warnings = Array.Empty<string>(),
@@ -190,9 +198,26 @@ public class ChatController : ControllerBase
             }
         }
 
+        // Trip start date travels in the generate request (chat derives TripContext
+        // from slots server-side, so the date can't come from slots).
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!TripContextDto.IsStartDateWithinWindow(request.StartDate, today))
+        {
+            _logger.LogInformation(
+                "Chat: generate rejected invalid_start_date sessionId={Session} startDate={StartDate}",
+                session.Id, request.StartDate?.ToString("yyyy-MM-dd") ?? "(null)");
+            return BadRequest(new
+            {
+                error = "invalid_start_date",
+                message = $"Trip start date must be between today and {TripContextDto.MaxTripHorizonDays} days from now.",
+                startDate = request.StartDate?.ToString("yyyy-MM-dd"),
+            });
+        }
+
         // Build TripContextDto + summary message from slots
         var slots = ChatAgentService.GetSlots(session);
         var tripContext = ChatAgentService.SlotsToTripContext(slots);
+        tripContext.StartDate = request.StartDate;
         var summaryMessage = ChatAgentService.BuildSummaryMessage(slots);
         var lang = LanguageAccessor.ResolveRequestLanguage(Request);
 
@@ -249,6 +274,11 @@ public class ChatController : ControllerBase
             Type = "ai",
             Description = result.PlanDescription,
             DurationDays = result.Prefs.Days,
+            // API-3 ronda 2: persiste la fecha ya validada (arriba, invalid_start_date via
+            // TripContextDto.IsStartDateWithinWindow). Es la misma que viaja en tripContext.StartDate
+            // (asignada mas arriba) y por tanto la misma que se serializa en el blob TripContext:
+            // columna dedicada y JSON quedan coherentes. null si el cliente no envia fecha (compat).
+            StartDate = request.StartDate,
             TripContext = JsonSerializer.SerializeToDocument(tripContext),
             IsPublic = false,
             CreatedById = userId,

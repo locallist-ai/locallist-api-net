@@ -77,6 +77,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     public FakeRevenueCatClient FakeRevenueCat { get; } = new();
 
     /// <summary>
+    /// Handler que intercepta las llamadas salientes de <see cref="LocalList.API.NET.Features.Places.Photos.PlacePhotoService"/>
+    /// a Google (Place Details con FieldMask=photos y <c>/media</c>). Por defecto sirve un
+    /// flujo válido (una foto → un photoUri de CDN falso). Los tests ajustan responders o
+    /// flags para forzar degradaciones y verificar que la API key nunca sale al cliente.
+    /// </summary>
+    public FakePhotoHandler FakePhotos { get; } = new();
+
+    /// <summary>
     /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
     /// Tests del routing configuran <see cref="FakeMapboxHandler.Responder"/> para definir
     /// la respuesta (OK con polyline, 502, vacío, etc.). Por defecto devuelve una respuesta
@@ -273,6 +281,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             services.AddSingleton<ICityCoverageService>(sp =>
                 new TestCityCoverageService(new CityCoverageService(sp.GetRequiredService<IConfiguration>())));
 
+            // Photo proxy: mantenemos la impl REAL de IPlacePhotoService (para ejercitar key +
+            // fallback + budget breaker) y solo sustituimos el HttpMessageHandler por FakePhotos,
+            // que finge Place Details y /media. El cliente Google se mockea; la DB es real.
+            services.AddHttpClient<LocalList.API.NET.Features.Places.Photos.IPlacePhotoService,
+                                   LocalList.API.NET.Features.Places.Photos.PlacePhotoService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakePhotos);
+
             // Disable rate limiting in tests (default). Las suites que testean el propio
             // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
             // reales registradas por AddRateLimitingPolicies.
@@ -303,6 +318,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("RevenueCatWebhookLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("PhotoLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
     }
@@ -324,20 +341,56 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     }
 
     /// <summary>
+    /// Cliente que NO sigue redirects automáticamente — imprescindible para inspeccionar el
+    /// 302 del proxy de fotos (con auto-redirect, HttpClient intentaría bajar el photoUri del
+    /// CDN falso y fallaría). El resto de la config del pipeline es idéntica.
+    /// </summary>
+    public HttpClient CreateNonRedirectingClient()
+    {
+        var client = base.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        EnsureDb();
+        return client;
+    }
+
+    /// <summary>
     /// Creates a Firebase-style RS256 JWT for testing.
     /// </summary>
-    public string CreateToken(string firebaseUid, string email = "test@test.com")
+    /// <param name="emailVerified">
+    /// <c>true</c>/<c>false</c> emits the <c>email_verified</c> claim with that value (default
+    /// <c>true</c>, matching prior behavior). <c>null</c> OMITS the claim entirely, mirroring a
+    /// malformed/legacy Firebase token that never sets it -- used to prove
+    /// <see cref="LocalList.API.NET.Shared.Auth.AdminClaimsExtensions.IsAdminCaller"/> fails closed
+    /// (not open) when the claim is simply absent.
+    /// </param>
+    /// <param name="emailVerifiedAsJsonBoolean">
+    /// When true and <paramref name="emailVerified"/> has a value, emits the claim with
+    /// <see cref="ClaimValueTypes.Boolean"/> so the JWT payload carries a real JSON boolean
+    /// (<c>true</c>/<c>false</c>) instead of a quoted string -- matching the actual wire format
+    /// Firebase ID tokens use.
+    /// </param>
+    public string CreateToken(
+        string firebaseUid,
+        string email = "test@test.com",
+        bool? emailVerified = true,
+        bool emailVerifiedAsJsonBoolean = false)
     {
         var key = new RsaSecurityKey(_testRsa);
         var credentials = new SigningCredentials(key, SecurityAlgorithms.RsaSha256);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(JwtRegisteredClaimNames.Sub, firebaseUid),
             new Claim(JwtRegisteredClaimNames.Email, email),
-            new Claim("email_verified", "true"),
-            new Claim("user_id", firebaseUid)
         };
+
+        if (emailVerified.HasValue)
+        {
+            var value = emailVerified.Value ? "true" : "false";
+            var valueType = emailVerifiedAsJsonBoolean ? ClaimValueTypes.Boolean : ClaimValueTypes.String;
+            claims.Add(new Claim("email_verified", value, valueType));
+        }
+
+        claims.Add(new Claim("user_id", firebaseUid));
 
         var tokenDescriptor = new SecurityTokenDescriptor
         {
@@ -655,6 +708,80 @@ public class FakeGooglePlacesService : IGooglePlacesService
         DetailsByPlaceId.Clear();
         ResolvedByUrl.Clear();
     }
+}
+
+/// <summary>
+/// Handler HTTP fake del proxy de fotos. Distingue por URL: Place Details (path
+/// <c>/v1/places/{id}</c>) vs <c>/media</c>. Por defecto sirve un flujo válido — una foto y
+/// un <c>photoUri</c> de CDN falso — para el camino feliz. Los tests ajustan
+/// <see cref="DetailsResponder"/> / <see cref="MediaResponder"/> o los flags para forzar
+/// degradaciones (sin fotos, 5xx, etc.). Registra cada request en <see cref="Calls"/> y
+/// cuenta las llamadas <c>/media</c> en <see cref="MediaCallCount"/> (para el test del breaker).
+/// </summary>
+public class FakePhotoHandler : HttpMessageHandler
+{
+    public const string DefaultPhotoName = "places/PLACE_ABC/photos/PHOTO_REF_XYZ";
+    public const string DefaultPhotoUri = "https://lh3.googleusercontent.com/fake-cdn/hero-1600.jpg";
+
+    public Func<HttpRequestMessage, HttpResponseMessage>? DetailsResponder { get; set; }
+    public Func<HttpRequestMessage, HttpResponseMessage>? MediaResponder { get; set; }
+
+    /// <summary>Nombre de foto devuelto por Place Details por defecto.</summary>
+    public string PhotoName { get; set; } = DefaultPhotoName;
+    /// <summary>photoUri devuelto por /media por defecto.</summary>
+    public string PhotoUri { get; set; } = DefaultPhotoUri;
+    /// <summary>Si true, Place Details devuelve <c>photos: []</c> (place sin fotos → 404).</summary>
+    public bool ReturnNoPhotos { get; set; }
+
+    public List<HttpRequestMessage> Calls { get; } = new();
+    public int MediaCallCount { get; private set; }
+    public int DetailsCallCount { get; private set; }
+
+    /// <summary>true si algún request saliente llevó el header X-Goog-Api-Key con este valor.</summary>
+    public bool KeyHeaderSentWith(string expected) =>
+        Calls.Any(r => r.Headers.TryGetValues("X-Goog-Api-Key", out var v)
+                       && v.Contains(expected));
+
+    public HttpRequestMessage? LastMediaCall =>
+        Calls.LastOrDefault(r => r.RequestUri!.AbsolutePath.EndsWith("/media", StringComparison.Ordinal));
+
+    /// <summary>Restablece estado mutable — llamar al inicio de cada test que comparte fixture.</summary>
+    public void Reset()
+    {
+        lock (Calls) { Calls.Clear(); }
+        MediaCallCount = 0;
+        DetailsCallCount = 0;
+        DetailsResponder = null;
+        MediaResponder = null;
+        PhotoName = DefaultPhotoName;
+        PhotoUri = DefaultPhotoUri;
+        ReturnNoPhotos = false;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        lock (Calls) { Calls.Add(request); }
+
+        var isMedia = request.RequestUri!.AbsolutePath.EndsWith("/media", StringComparison.Ordinal);
+        if (isMedia)
+        {
+            MediaCallCount++;
+            if (MediaResponder is { } mr) return Task.FromResult(mr(request));
+            return Task.FromResult(Json($"{{\"name\":\"{PhotoName}\",\"photoUri\":\"{PhotoUri}\"}}"));
+        }
+
+        DetailsCallCount++;
+        if (DetailsResponder is { } dr) return Task.FromResult(dr(request));
+        var photos = ReturnNoPhotos ? "[]" : $"[{{\"name\":\"{PhotoName}\"}}]";
+        return Task.FromResult(Json($"{{\"photos\":{photos}}}"));
+    }
+
+    public static HttpResponseMessage Json(string body, HttpStatusCode status = HttpStatusCode.OK) =>
+        new(status)
+        {
+            Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+        };
 }
 
 /// <summary>

@@ -15,8 +15,8 @@ using Pgvector;
 namespace LocalList.API.NET.Migrations
 {
     [DbContext(typeof(LocalListDbContext))]
-    [Migration("20260722190828_AddUsageCounters")]
-    partial class AddUsageCounters
+    [Migration("20260724214513_AddBillingEventsAndUsageCounters")]
+    partial class AddBillingEventsAndUsageCounters
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -26,8 +26,325 @@ namespace LocalList.API.NET.Migrations
                 .HasAnnotation("ProductVersion", "10.0.3")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
+            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "citext");
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "vector");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ActivityEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("ActorId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("actor_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("ObjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("object_id");
+
+                    b.Property<string>("ObjectType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("object_type");
+
+                    b.Property<string>("Verb")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("verb");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt")
+                        .IsDescending();
+
+                    b.HasIndex("ActorId", "CreatedAt")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("ActorId", "Verb", "ObjectId")
+                        .IsUnique();
+
+                    b.ToTable("activity_events");
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ContentReport", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Details")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("details");
+
+                    b.Property<Guid>("ObjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("object_id");
+
+                    b.Property<string>("ObjectType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("object_type");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("reason");
+
+                    b.Property<Guid?>("ReporterId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("reporter_id");
+
+                    b.Property<DateTimeOffset?>("ResolvedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("resolved_at");
+
+                    b.Property<Guid?>("ResolvedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resolved_by");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("status");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ReporterId");
+
+                    b.HasIndex("Status", "CreatedAt");
+
+                    b.ToTable("content_reports");
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanCollaborator", b =>
+                {
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("plan_id");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("InvitedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("invited_by");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("role");
+
+                    b.HasKey("PlanId", "UserId");
+
+                    b.HasIndex("InvitedBy");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("plan_collaborators");
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanInvite", b =>
+                {
+                    b.Property<string>("Token")
+                        .HasMaxLength(22)
+                        .HasColumnType("character varying(22)")
+                        .HasColumnName("token");
+
+                    b.Property<Guid>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<int?>("MaxUses")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_uses");
+
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("plan_id");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("role");
+
+                    b.Property<int>("Uses")
+                        .HasColumnType("integer")
+                        .HasColumnName("uses");
+
+                    b.HasKey("Token");
+
+                    b.HasIndex("CreatedBy");
+
+                    b.HasIndex("PlanId");
+
+                    b.ToTable("plan_invites");
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanLike", b =>
+                {
+                    b.Property<Guid>("PlanId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("plan_id");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.HasKey("PlanId", "UserId");
+
+                    b.HasIndex("UserId", "CreatedAt")
+                        .IsDescending(false, true);
+
+                    b.ToTable("plan_likes");
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserBlock", b =>
+                {
+                    b.Property<Guid>("BlockerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("blocker_id");
+
+                    b.Property<Guid>("BlockedId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("blocked_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.HasKey("BlockerId", "BlockedId");
+
+                    b.HasIndex("BlockedId");
+
+                    b.ToTable("user_blocks");
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserFollow", b =>
+                {
+                    b.Property<Guid>("FollowerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("follower_id");
+
+                    b.Property<Guid>("FolloweeId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("followee_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.HasKey("FollowerId", "FolloweeId");
+
+                    b.HasIndex("FolloweeId", "CreatedAt")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("FollowerId", "CreatedAt")
+                        .IsDescending(false, true);
+
+                    b.ToTable("user_follows", t =>
+                        {
+                            t.HasCheckConstraint("ck_user_follows_no_self", "follower_id <> followee_id");
+                        });
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserPublicProfile", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("AvatarUrl")
+                        .HasColumnType("text")
+                        .HasColumnName("avatar_url");
+
+                    b.Property<string>("Bio")
+                        .HasMaxLength(280)
+                        .HasColumnType("character varying(280)")
+                        .HasColumnName("bio");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("display_name");
+
+                    b.Property<int>("FollowersCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("followers_count");
+
+                    b.Property<int>("FollowingCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("following_count");
+
+                    b.Property<string>("Handle")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("citext")
+                        .HasColumnName("handle");
+
+                    b.Property<bool>("IsDiscoverable")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_discoverable");
+
+                    b.Property<int>("PublicPlansCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("public_plans_count");
+
+                    b.Property<bool>("ShowFavorites")
+                        .HasColumnType("boolean")
+                        .HasColumnName("show_favorites");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("UserId");
+
+                    b.HasIndex("Handle")
+                        .IsUnique();
+
+                    b.ToTable("user_public_profiles");
+                });
 
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.BillingEvent", b =>
                 {
@@ -573,6 +890,10 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(100)")
                         .HasColumnName("city");
 
+                    b.Property<Guid?>("ClonedFrom")
+                        .HasColumnType("uuid")
+                        .HasColumnName("cloned_from");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -605,6 +926,14 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("is_showcase");
 
+                    b.Property<int>("LikesCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("likes_count");
+
+                    b.Property<bool>("ModerationLocked")
+                        .HasColumnType("boolean")
+                        .HasColumnName("moderation_locked");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -615,11 +944,28 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("jsonb")
                         .HasColumnName("name_i18n");
 
+                    b.Property<DateTimeOffset?>("PublishedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("published_at");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.Property<string>("ShareToken")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("share_token");
+
                     b.Property<string>("Source")
                         .IsRequired()
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("source");
+
+                    b.Property<DateOnly?>("StartDate")
+                        .HasColumnType("date")
+                        .HasColumnName("start_date");
 
                     b.Property<JsonDocument>("TranslationStatus")
                         .HasColumnType("jsonb")
@@ -639,11 +985,27 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
 
+                    b.Property<string>("Visibility")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasDefaultValue("private")
+                        .HasColumnName("visibility");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("ClonedFrom");
 
                     b.HasIndex("CreatedById");
 
-                    b.HasIndex("City", "IsPublic");
+                    b.HasIndex("ShareToken")
+                        .IsUnique();
+
+                    b.HasIndex("City", "Visibility");
+
+                    b.HasIndex("Visibility", "PublishedAt")
+                        .IsDescending(false, true);
 
                     b.ToTable("plans");
                 });
@@ -1216,6 +1578,114 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("waitlist_entries");
                 });
 
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ActivityEvent", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("ActorId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ContentReport", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("ReporterId")
+                        .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanCollaborator", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("InvitedBy")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.Plan", null)
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanInvite", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("CreatedBy")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.Plan", null)
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanLike", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.Plan", null)
+                        .WithMany()
+                        .HasForeignKey("PlanId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserBlock", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("BlockedId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("BlockerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserFollow", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("FolloweeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("FollowerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserPublicProfile", b =>
+                {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", "User")
+                        .WithOne()
+                        .HasForeignKey("LocalList.API.NET.Features.Social.Entities.UserPublicProfile", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.ChatSession", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", "User")
@@ -1281,6 +1751,11 @@ namespace LocalList.API.NET.Migrations
 
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.Plan", b =>
                 {
+                    b.HasOne("LocalList.API.NET.Shared.Data.Entities.Plan", null)
+                        .WithMany()
+                        .HasForeignKey("ClonedFrom")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", "CreatedBy")
                         .WithMany("CreatedPlans")
                         .HasForeignKey("CreatedById")

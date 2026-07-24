@@ -54,4 +54,13 @@ public class ExtractedPreferences
     public string? Pace { get; set; }
     public List<string>? Dietary { get; set; }
     public List<string>? Exclusions { get; set; }
+
+    /// <summary>
+    /// Fecha de inicio del viaje (calendario, sin tz). JsonIgnore: solo la asigna
+    /// MergeContextIntoPrefs desde TripContextDto — el JSON del LLM no puede inyectarla.
+    /// La consume el scheduler day-aware (API-2) para mapear cada jornada a su día de
+    /// semana; null = fallback day-agnostic (cliente sin fecha).
+    /// </summary>
+    [JsonIgnore]
+    public DateOnly? StartDate { get; set; }
 }

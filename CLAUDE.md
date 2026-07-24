@@ -11,7 +11,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Cadena de extracción (chat slot-filling + builder preferences) en `gemini-3.1-flash-lite` (primer provider de `Llm:Providers`). Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. Traducciones/descripciones/embeddings siguen su path Gemini propio (fuera de la cadena). |
-| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** (desde F4 exigen `[Authorize]`: el bucket anon solo acota spam pre-401, nunca llega a Gemini) techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. `UseRateLimiter` va después de `UseAuthentication`. |
+| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** (desde F4 exigen `[Authorize]`: el bucket anon solo acota spam pre-401, nunca llega a Gemini) techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. Photos 60/min por IP (`PhotoLimit`, `GooglePlaces__PhotoRateLimitPerMinute`). `UseRateLimiter` va después de `UseAuthentication`. |
 
 ## Running Locally
 
@@ -34,7 +34,7 @@ Required User Secrets / Environment Variables:
 
 **LLM fallback chain (camino crítico: chat slot-filling + builder preferences)**
 - Cadena ordenada en `appsettings.json` → `Llm:Providers` (gemini → openai → mistral → anthropic). Abstracción en `Shared/AI/Llm/` (`ILlmClient`, `FallbackLlmClient`, circuit breaker `LlmProviderHealthRegistry`: 3 fallos seguidos → skip 60s).
-- `OpenAI__ApiKey` — opcional. Activa GPT-5 Nano como backup.
+- `OpenAI__ApiKey` — opcional. Activa GPT-5.4 Nano como backup.
 - `Mistral__ApiKey` — opcional. Activa Mistral Small como backup.
 - `Anthropic__ApiKey` — opcional. Activa Claude Haiku 4.5 como backup (último por coste).
 - Un provider sin key se omite de la cadena (log en boot). Solo con `Gemini__ApiKey` el comportamiento es el clásico. `chat_turns.ai_provider/model` registran quién respondió realmente.
@@ -47,6 +47,8 @@ Required User Secrets / Environment Variables:
 
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
+- `GooglePlaces__PhotoApiKey` — opcional. Key SEPARADA para el proxy de fotos (`GET /places/:id/photos/:index`). Si falta, cae en fallback a `GooglePlaces__ApiKey`; si NINGUNA está, el endpoint degrada a 404. `GooglePlaces__PhotoDailyBudgetCap` (default 10000) = techo diario in-process de llamadas `/media` de pago.
+- `Api__PublicBaseUrl`: opcional (default `""`). Base URL pública de esta API (p.ej. la de Railway) usada para sintetizar en `PlaceDto`/`ResolvedPlaceDto.Photos` la URL absoluta del proxy de fotos `GET /places/:id/photos/0`, y también la URL del preview admin `GET /admin/places/photo-preview` (`AdminPlacePhotoPreviewUrls`). Vacía en dev: se sirve una ruta relativa y el caller la resuelve contra su propia base. Ver `Shared/Dtos/PlacePhotoUrls.cs`.
 
 **Routing (Mapbox)**
 - `Mapbox__AccessToken` — opcional. Si no está, routing se deshabilita gracefully (stops sin `travelFromPrevious`).
@@ -89,12 +91,13 @@ LocalList.API.NET/
 │   │   ├── Cities/
 │   │   │   └── AdminCitiesController.cs       # DELETE /admin/cities/:id
 │   │   ├── Places/
-│   │   │   ├── AdminPlacesController.cs       # CRUD + backfill + translate (ver Endpoints)
-│   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration
-│   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller
+│   │   │   ├── AdminPlacesController.*.cs     # CRUD + backfill + translate + photo-preview (ver Endpoints; partial: .cs ctor, .Reads, .Google, .Crud, .Backfill, .Translation)
+│   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration. NUNCA construye URLs con key: ResolvePhotos sintetiza referencias a AdminPlacePhotoPreviewUrls
+│   │   │   ├── AdminPlacePhotoPreviewUrls.cs  # Síntesis de GET /admin/places/photo-preview?googlePlaceId=X&index=I (preview pre-guardado, sin Place.Id aún)
+│   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller. Google-sourced: Photos siempre null (runtime-only, GooglePlaceId basta)
 │   │   │   └── AdminDtos.cs
 │   │   ├── Plans/
-│   │   │   ├── AdminPlansController.cs        # CRUD + translate curated plans
+│   │   │   ├── AdminPlansController.*.cs      # CRUD + translate curated plans (partial: .cs ctor/reads/delete, .Create, .Update, .Translation)
 │   │   │   └── AdminPlanDtos.cs
 │   │   └── Subcategories/
 │   │       ├── AdminSubcategoriesController.cs  # CRUD /admin/subcategories
@@ -125,7 +128,7 @@ LocalList.API.NET/
 │   │   │   ├── PlaceRankingService.cs          # Reranking determinista ponderado
 │   │   │   ├── PlanGenerationService.cs        # Orquesta RAG + prefs + scheduler
 │   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan
-│   │   │   └── SchedulingService.cs            # Scheduler determinista por semilla
+│   │   │   └── SchedulingService.*.cs          # Scheduler determinista por semilla (partial: .cs API, .Constants, .Selection, .Ordering, .DayWalk, .Refinements, .Helpers)
 │   │   └── Shared/
 │   │       └── GroupTypePolicy.cs       # Reglas de capacidad por tipo de grupo
 │   ├── Chat/
@@ -134,7 +137,7 @@ LocalList.API.NET/
 │   │   ├── I18n/
 │   │   │   └── ChatStrings.cs
 │   │   └── Services/
-│   │       ├── ChatAgentService.cs         # Orquesta slot-filling + sesión + generación
+│   │       ├── ChatAgentService.*.cs        # Orquesta slot-filling + sesión + generación (partial: .cs orquestación ProcessTurnAsync, .Constants, .Responses, .Session, .Slots, .Generation, .Helpers)
 │   │       ├── SlotExtractorService.cs     # Gemini → extrae slots de texto libre
 │   │       ├── InputNormalizer.cs          # Normaliza input antes de slot extraction
 │   │       ├── OutputSanitizer.cs          # Sanitiza respuesta AI
@@ -149,14 +152,19 @@ LocalList.API.NET/
 │   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
 │   ├── Follow/
-│   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
+│   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Places/
-│   │   └── PlacesController.cs         # GET /places, GET /places/:id
+│   │   ├── PlacesController.cs         # GET /places, GET /places/:id
+│   │   └── Photos/                     # Proxy de fotos de Google (runtime-only, ToS-compliant)
+│   │       ├── PlacePhotosController.cs  # GET /places/:id/photos/:index (302 al photoUri, key server-side)
+│   │       ├── PlacePhotoService.cs      # Place Details (FieldMask=photos, gratis) + /media (key en header) → photoUri
+│   │       ├── PhotoBudgetCounter.cs     # Circuit breaker de presupuesto diario (in-process, reset UTC)
+│   │       └── GooglePhotoHostValidator.cs  # Allowlist de host (*.googleusercontent.com) compartida por este proxy y el preview admin de AdminPlacesController
 │   ├── Plans/
-│   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
-│   │   ├── PlanDtos.cs
-│   │   ├── PlanEditController.cs       # DELETE /plans/:id
+│   │   ├── PlansController.cs          # GET /plans, GET /plans/:id (autoriza vía IPlanAccessService; anónimo exige visibility='public')
+│   │   ├── PlanDtos.cs                 # PlanDto/PlanDetailDto: isPublic derivado de visibility=='public' (back-compat app vieja)
+│   │   ├── PlanEditController.cs       # PUT /plans/:id/stops (CanEdit), DELETE /plans/:id (IsOwner) — ambos vía IPlanAccessService
 │   │   └── PlanEditDtos.cs
 │   ├── Profile/
 │   │   ├── ProfileController.cs        # GET /me/profile, DELETE /me/profile
@@ -164,6 +172,16 @@ LocalList.API.NET/
 │   ├── Routing/                        # Implementaciones (contratos en Shared/Routing/)
 │   │   ├── MapboxRoutingService.cs     # Mapbox Directions API (IRoutingService)
 │   │   └── RouteResolver.cs            # ISegmentResolver — caché de segmentos en RouteSegmentCache
+│   ├── Social/                         # Cimiento del modelo de datos social (S0). Solo entidades
+│   │   └── Entities/                   # (aún sin endpoints; S1+ añade pilares favoritos/follow/co-edición)
+│   │       ├── UserPublicProfile.cs    # Perfil PÚBLICO (handle citext único, avatar, contadores). SEPARADO de UserProfile (privado). Creación LAZY (fila no existe hasta reclamar handle)
+│   │       ├── UserFollow.cs           # Grafo de follows. PK (follower_id, followee_id), CHECK no-self. NUNCA "Follow" (colisiona con Follow Mode)
+│   │       ├── PlanCollaborator.cs     # Co-edición. PK (plan_id, user_id), role editor|viewer. Owner NO es fila (sigue en plans.created_by)
+│   │       ├── PlanInvite.cs           # Invitación por token a colaborar (expira, max_uses, revocable)
+│   │       ├── ActivityEvent.cs        # Feed append-only. object_id polimórfico (sin FK), UNIQUE (actor, verb, object) idempotente
+│   │       ├── PlanLike.cs             # Like. PK (plan_id, user_id). Contador denormalizado en plans.likes_count
+│   │       ├── ContentReport.cs        # Reporte de moderación. reporter_id FK SET NULL (sobrevive borrado de cuenta)
+│   │       └── UserBlock.cs            # Bloqueo. PK (blocker_id, blocked_id). Consumido por PlanAccessService (bloqueo ↔ owner niega CanView)
 │   ├── Taxonomy/
 │   │   └── TaxonomyController.cs       # GET /taxonomy (categories + subcategories)
 │   └── Waitlist/
@@ -172,6 +190,10 @@ LocalList.API.NET/
 │       ├── IEmailMarketingService.cs
 │       └── KlaviyoService.cs           # Klaviyo email marketing integration
 └── Shared/
+    ├── Access/                         # Autorización centralizada de planes (S0)
+    │   ├── IPlanAccessService.cs        # GetAccessAsync(planId, userId) → PlanAccess. Punto ÚNICO de autorización de planes
+    │   ├── PlanAccessService.cs         # Reglas: owner→view+edit; collaborator editor→view+edit, viewer→view; visibility='public'→view (incl. anónimo); 'unlisted' NO por GUID; bloqueo↔owner niega. NO afloja ownership. Consumido por PlansController.GetPlan, PlanEditController, FollowController.StartSession (IDOR #116)
+    │   └── PlanAccess.cs                # readonly record struct: PlanExists, CanView, CanEdit, IsOwner, Role
     ├── AI/
     │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
     │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
@@ -207,9 +229,9 @@ LocalList.API.NET/
     │   ├── DesignTimeDbContextFactory.cs
     │   └── Entities/                   # EF Core entities
     │       ├── User.cs                  # firebase_uid (legado), google_user_id, apple_user_id, password_hash
-    │       ├── UserProfile.cs           # Perfil extendido del usuario
+    │       ├── UserProfile.cs           # Perfil PRIVADO (preferencias de viaje). ≠ Features/Social UserPublicProfile
     │       ├── RefreshToken.cs          # Tokens de refresh rotados (SHA-256 hash)
-    │       ├── Plan.cs
+    │       ├── Plan.cs                   # visibility (private|unlisted|public) = fuente de verdad de autorización (S0); is_public espejo sincronizado 1-2 releases (setters bidireccionales; DTO deriva isPublic de visibility). +share_token único, revision, likes_count, published_at, cloned_from, moderation_locked. Config social en LocalListDbContext.ConfigureSocial
     │       ├── PlanStop.cs
     │       ├── PlanMetric.cs            # Métricas de generación (latencia, coste, señales)
     │       ├── Place.cs
@@ -231,12 +253,13 @@ LocalList.API.NET/
     ├── PostHog/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
     ├── Dtos/
-    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Plans + Admin)
+    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Places + Plans). Photos sintetiza el proxy de fotos (nunca reemite URL de Google con key) + campo photoSource
+    │   ├── PlacePhotoUrls.cs            # Punto único de síntesis Photos/photoSource para un Place, compartido por PlaceDto y ResolvedPlaceDto. SanitizeForStorage() limpia URLs de Google/preview-admin antes de persistir en cualquier ruta de escritura de Place.Photos
     │   ├── OpeningHours.cs              # OpeningHoursData, OpeningPeriod, OpeningTime
     │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
     │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
     │   ├── ScheduledStopDto.cs          # ScheduledStopDto, TravelInfoDto, ScheduleResult
-    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
+    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (Photos vía PlacePhotoUrls, mismo fix que PlaceDto)
     │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
     │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
     ├── Routing/                        # Contratos cross-slice (impl en Features/Routing/)
@@ -272,6 +295,7 @@ Railway despliega **una sola réplica** de esta API. Escalar a 2+ réplicas romp
 | `IMemoryCache` (JWKS cache, etc.) | In-process | Cada réplica llena su propia caché — no hay coherencia |
 | `SemaphoreSlim(4)` en `RouteResolver.FetchAndPersistAsync` | Per-call (variable local) | El semáforo no coordina entre réplicas; posibles ráfagas Mapbox |
 | `SemaphoreSlim(4)` en `SchedulingService.PrefetchDaySegmentsAsync` | Per-call (variable local) | Ídem |
+| `PhotoBudgetCounter` (breaker de presupuesto diario del proxy de fotos, `GooglePlaces:PhotoDailyBudgetCap`) | Contador in-process con reset por día UTC | Cada réplica cuenta su propio presupuesto → el cap efectivo de llamadas `/media` de pago se multiplica por el número de réplicas |
 
 Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStackExchangeRedisRateLimiting`) y reemplazar `IMemoryCache` por `IDistributedCache`.
 
@@ -287,12 +311,12 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Chat | `POST /chat/turn` (anonymous), `POST /chat/generate` (auth requerida desde F4; gates del catálogo Plus), `DELETE /chat/session/:id` |
 | Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
-| Places | `GET /places/`, `GET /places/:id` |
+| Places | `GET /places/`, `GET /places/:id`, `GET /places/:id/photos/:index` (anonymous; 302 al CDN de Google, key server-side, `PhotoLimit`) |
 | Plans | `GET /plans/`, `GET /plans/mine`, `GET /plans/:id`, `POST /plans` (crea plan de usuario; gate del cupo de guardados free = 5), `PUT /plans/:id/stops` (reemplazo atómico de stops, día ≤14), `DELETE /plans/:id` |
 | Profile | `GET /me/profile`, `DELETE /me/profile` |
 | Taxonomy | `GET /taxonomy` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
-| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
+| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places/photo-preview` (preview de foto de Google pre-guardado por googlePlaceId+index, 302 con key server-side vía `IPlacePhotoService` de T1, nunca la expone al admin), `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
 | Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
 | Admin — Analytics | `GET /admin/analytics/chat-turns`, `GET /admin/analytics/chat-turns/stats`, `GET /admin/analytics/plan-metrics`, `GET /admin/analytics/plan-metrics/stats` |
 | Admin — Cities | `DELETE /admin/cities/:id` |

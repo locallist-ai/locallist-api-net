@@ -115,10 +115,27 @@ public class BuilderController : ControllerBase
             });
         }
 
+        // Validación de ventana de fecha ANTES de consumir el gate: una fecha inválida no debe
+        // gastar un permiso del contador mensual. Paridad total con /chat/generate y POST /plans.
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!TripContextDto.IsStartDateWithinWindow(request.TripContext?.StartDate, today))
+        {
+            _logger.LogInformation(
+                "Builder: rejected invalid_start_date startDate={StartDate}",
+                request.TripContext?.StartDate?.ToString("yyyy-MM-dd") ?? "(null)");
+            return BadRequest(new
+            {
+                error = "invalid_start_date",
+                message = $"Trip start date must be between today and {TripContextDto.MaxTripHorizonDays} days from now.",
+                startDate = request.TripContext?.StartDate?.ToString("yyyy-MM-dd"),
+            });
+        }
+
         // Gate del catálogo Plus — último check antes de arrancar (y pagar) el pipeline.
         var gate = await _planGate.CheckAndConsumeAsync(userId.Value, request.TripContext?.Days, ct);
         if (!gate.Allowed)
             return StatusCode(gate.Rejection!.StatusCode, gate.Rejection.Body);
+
 
         using var llmBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         llmBudget.CancelAfter(GenerateLlmBudget);
@@ -163,6 +180,10 @@ public class BuilderController : ControllerBase
                 Type = "ai",
                 Description = result.PlanDescription,
                 DurationDays = result.Prefs.Days,
+                // API-3: persiste la fecha del viaje enviada por el wizard. null si el cliente
+                // no la envia (flujo sin fecha / cliente viejo), sin romper. Ya validada arriba
+                // (invalid_start_date) via TripContextDto.IsStartDateWithinWindow.
+                StartDate = request.TripContext?.StartDate,
                 TripContext = request.TripContext != null
                     ? JsonSerializer.SerializeToDocument(request.TripContext)
                     : JsonSerializer.SerializeToDocument(new {}),

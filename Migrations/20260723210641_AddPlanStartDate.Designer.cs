@@ -15,8 +15,8 @@ using Pgvector;
 namespace LocalList.API.NET.Migrations
 {
     [DbContext(typeof(LocalListDbContext))]
-    [Migration("20260713170724_AddBillingEvents")]
-    partial class AddBillingEvents
+    [Migration("20260723210641_AddPlanStartDate")]
+    partial class AddPlanStartDate
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -28,52 +28,6 @@ namespace LocalList.API.NET.Migrations
 
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "vector");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
-
-            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.BillingEvent", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<string>("AppUserId")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("app_user_id");
-
-                    b.Property<long>("EventTimestampMs")
-                        .HasColumnType("bigint")
-                        .HasColumnName("event_timestamp_ms");
-
-                    b.Property<string>("EventType")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("event_type");
-
-                    b.Property<DateTimeOffset>("ProcessedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("processed_at");
-
-                    b.Property<string>("RcEventId")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("rc_event_id");
-
-                    b.Property<Guid?>("UserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("user_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RcEventId")
-                        .IsUnique();
-
-                    b.HasIndex("UserId", "EventTimestampMs");
-
-                    b.ToTable("billing_events");
-                });
 
             modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.ChatSession", b =>
                 {
@@ -620,6 +574,10 @@ namespace LocalList.API.NET.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("source");
+
+                    b.Property<DateOnly?>("StartDate")
+                        .HasColumnType("date")
+                        .HasColumnName("start_date");
 
                     b.Property<JsonDocument>("TranslationStatus")
                         .HasColumnType("jsonb")

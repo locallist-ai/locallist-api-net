@@ -19,7 +19,7 @@ public class OpenAiCompatibleLlmClientTests
         """;
 
     private static OpenAiCompatibleLlmClient OpenAiClient(HttpMessageHandler handler) =>
-        new(new HttpClient(handler), "test-key", "openai", "https://api.openai.com/v1", "gpt-5-nano",
+        new(new HttpClient(handler), "test-key", "openai", "https://api.openai.com/v1", "gpt-5.4-nano",
             NullLogger.Instance,
             usesMaxCompletionTokens: true, supportsTemperature: false,
             minOutputTokens: 1024, reasoningEffort: "minimal");
@@ -39,7 +39,7 @@ public class OpenAiCompatibleLlmClientTests
 
         using var body = JsonDocument.Parse(handler.LastRequestBody!);
         var root = body.RootElement;
-        Assert.Equal("gpt-5-nano", root.GetProperty("model").GetString());
+        Assert.Equal("gpt-5.4-nano", root.GetProperty("model").GetString());
         Assert.Equal("json_object", root.GetProperty("response_format").GetProperty("type").GetString());
         // GPT-5 Nano: max_completion_tokens con mínimo 1024 (reasoning tokens), sin temperature.
         Assert.Equal(1024, root.GetProperty("max_completion_tokens").GetInt32());
@@ -73,7 +73,7 @@ public class OpenAiCompatibleLlmClientTests
         Assert.True(response.Succeeded);
         Assert.Equal("{\"ok\":true}", response.Text);
         Assert.Equal("openai", response.Diagnostics.Provider);
-        Assert.Equal("gpt-5-nano", response.Diagnostics.Model);
+        Assert.Equal("gpt-5.4-nano", response.Diagnostics.Model);
         Assert.Equal(120, response.Diagnostics.InputTokens);
         Assert.Equal(40, response.Diagnostics.OutputTokens);
         Assert.Equal(32, response.Diagnostics.ThinkingTokens);
@@ -129,11 +129,11 @@ public class OpenAiCompatibleLlmClientTests
     [Fact]
     public async Task Ok_CostIncludesReasoningTokens()
     {
-        // gpt-5-nano: 120 in · 40 out · 32 reasoning → (120·0.05 + (40+32)·0.40) / 1e6.
+        // gpt-5.4-nano: 120 in · 40 out · 32 reasoning → (120·0.20 + (40+32)·1.25) / 1e6.
         var handler = new CapturingHandler(HttpStatusCode.OK, OkBody);
         var response = await OpenAiClient(handler).GenerateJsonAsync(Request);
 
-        var expected = (120 * 0.05m + (40 + 32) * 0.40m) / 1_000_000m;
+        var expected = (120 * 0.20m + (40 + 32) * 1.25m) / 1_000_000m;
         Assert.Equal(expected, response.Diagnostics.CostUsd);
     }
 }

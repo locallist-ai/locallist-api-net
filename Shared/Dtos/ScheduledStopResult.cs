@@ -13,7 +13,10 @@ public sealed record ResolvedPlaceDto(
     string? PriceRange,
     List<string>? Photos,
     decimal? Latitude,
-    decimal? Longitude);
+    decimal? Longitude,
+    // Misma síntesis que PlaceDto (ver PlacePhotoUrls): nunca una URL places.googleapis.com
+    // con key. "google" | "external" | null.
+    string? PhotoSource = null);
 
 public sealed record ScheduledStopResult(
     Guid Id,

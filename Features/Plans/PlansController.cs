@@ -2,9 +2,11 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Routing;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.PostHog;
 using LocalList.API.NET.Shared.Usage;
@@ -20,14 +22,18 @@ public class PlansController : ControllerBase
     private readonly LanguageAccessor _lang;
     private readonly ISegmentResolver _routeResolver;
     private readonly PostHogService _posthog;
+    private readonly IConfiguration _config;
+    private readonly IPlanAccessService _access;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog, IConfiguration config, IPlanAccessService access)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
         _routeResolver = routeResolver;
         _posthog = posthog;
+        _config = config;
+        _access = access;
     }
 
     [HttpPost]
@@ -66,6 +72,23 @@ public class PlansController : ControllerBase
             }
         }
 
+        // Misma validacion de ventana que /builder/chat y /chat/generate (paridad total):
+        // null => OK (plan manual sin fecha). Fuera de [today-1, today+MaxTripHorizonDays] => 400.
+        // El builder manual no corre scheduler, asi que la fecha solo se persiste para display.
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!TripContextDto.IsStartDateWithinWindow(request.StartDate, today))
+        {
+            _logger.LogInformation(
+                "Plans: create rejected invalid_start_date startDate={StartDate}",
+                request.StartDate?.ToString("yyyy-MM-dd") ?? "(null)");
+            return BadRequest(new
+            {
+                error = "invalid_start_date",
+                message = $"Trip start date must be between today and {TripContextDto.MaxTripHorizonDays} days from now.",
+                startDate = request.StartDate?.ToString("yyyy-MM-dd"),
+            });
+        }
+
         var now = DateTimeOffset.UtcNow;
 
         var plan = new Plan
@@ -75,6 +98,7 @@ public class PlansController : ControllerBase
             City = request.City.Trim(),
             Type = request.Type?.Trim() ?? "custom",
             DurationDays = request.DurationDays,
+            StartDate = request.StartDate,
             IsPublic = false,
             IsShowcase = false,
             CreatedById = userId.Value,
@@ -87,7 +111,7 @@ public class PlansController : ControllerBase
 
         _logger.LogInformation("User {UserId} created plan {PlanId} ({Name})", userId, plan.Id, plan.Name);
 
-        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan, _lang.Language));
+        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan, _lang.Language, _config["Api:PublicBaseUrl"]));
     }
 
     [HttpGet("mine")]
@@ -155,6 +179,18 @@ public class PlansController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> GetPlan(Guid id, CancellationToken ct)
     {
+        Guid? userId = await User.GetUserIdAsync(_db, ct);
+
+        // Autorizacion centralizada (S0). Un GET anonimo por GUID solo resuelve visibility='public'
+        // (owner/colaborador tambien pueden ver); 'unlisted' NO se resuelve por este camino.
+        var access = await _access.GetAccessAsync(id, userId, ct);
+        if (!access.CanView)
+        {
+            if (access.PlanExists)
+                _logger.LogWarning("User {UserId} attempted to access non-viewable plan {PlanId}", userId, id);
+            return NotFound(new { error = "Plan not found" });
+        }
+
         var plan = await _db.Plans.AsNoTracking()
             .Include(p => p.Stops)
             .ThenInclude(s => s.Place)
@@ -162,14 +198,6 @@ public class PlansController : ControllerBase
 
         if (plan == null)
             return NotFound(new { error = "Plan not found" });
-
-        Guid? userId = await User.GetUserIdAsync(_db, ct);
-
-        if (!plan.IsPublic && plan.CreatedById != userId)
-        {
-            _logger.LogWarning("User {UserId} attempted to access private plan {PlanId}", userId, id);
-            return NotFound(new { error = "Plan not found" });
-        }
 
         if (userId.HasValue)
         {
@@ -188,6 +216,6 @@ public class PlansController : ControllerBase
                 .SetProperty(m => m.OpenedAt, DateTimeOffset.UtcNow), ct);
 
         var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
-        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments));
+        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments, _config["Api:PublicBaseUrl"]));
     }
 }

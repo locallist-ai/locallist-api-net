@@ -165,6 +165,10 @@ public class PreferenceExtractorService
         if (context.Exclusions != null && context.Exclusions.Count > 0)
             prefs.Exclusions = context.Exclusions.Take(5).ToList();
 
+        // StartDate — fecha de calendario del viaje, la lleva el scheduler day-aware.
+        // El JSON del LLM no puede setearla (JsonIgnore en el DTO); solo fluye por aquí.
+        prefs.StartDate = context.StartDate;
+
         // VibesPrimary → added to Vibes list for the RAG embedding query
         if (!string.IsNullOrWhiteSpace(context.VibesPrimary))
         {
@@ -238,7 +242,7 @@ Return JSON only, no markdown. EXACT shape:
                          ?? new ExtractedPreferences();
 
             if (result.Days < 1 || result.Days > PlanGenerationGateService.PlusMaxDays)
-                _logger.LogWarning("Gemini Days out of range: {Days} (clamping to 1-14)", result.Days);
+                _logger.LogWarning("Gemini Days out of range: {Days} (clamping to 1-{Max})", result.Days, PlanGenerationGateService.PlusMaxDays);
             if (result.MaxStopsPerDay < 3 || result.MaxStopsPerDay > 6)
                 _logger.LogWarning("Gemini MaxStopsPerDay out of range: {Max} (clamping to 3-6)", result.MaxStopsPerDay);
 

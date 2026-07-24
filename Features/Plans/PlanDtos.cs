@@ -13,6 +13,9 @@ public record PlanDto(
     string? Description,
     string? ImageUrl,
     int DurationDays,
+    // API-3: fecha de inicio persistida (yyyy-MM-dd). null = plan sin fecha. La app la usa
+    // para mostrar la fecha del viaje y derivar la fecha de cada dia (dia N = StartDate + N-1).
+    DateOnly? StartDate,
     JsonDocument? TripContext,
     bool IsPublic,
     bool IsShowcase,
@@ -29,7 +32,10 @@ public record PlanDto(
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
-            p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+            // Back-compat S0: la app vieja consume `isPublic`. Se deriva de la fuente de verdad
+            // (visibility=='public') para que clientes previos a la migracion social sigan viendo
+            // el flag correcto sin depender del espejo is_public.
+            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.Visibility == "public", p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt
         );
     }
@@ -47,11 +53,11 @@ public record PlanStopResponseDto(
     PlaceDto? Place
 )
 {
-    public static PlanStopResponseDto FromEntity(PlanStop s, string lang = "en") => new(
+    public static PlanStopResponseDto FromEntity(PlanStop s, string lang = "en", string? publicBaseUrl = null) => new(
         s.Id, s.PlaceId, s.DayNumber, s.OrderIndex,
         s.TimeBlock, s.SuggestedArrival, s.SuggestedDurationMin,
         s.TravelFromPrevious,
-        s.Place is null ? null : PlaceDto.FromEntity(s.Place, lang)
+        s.Place is null ? null : PlaceDto.FromEntity(s.Place, lang, publicBaseUrl)
     );
 }
 
@@ -65,6 +71,8 @@ public record PlanDetailDto(
     string? Description,
     string? ImageUrl,
     int DurationDays,
+    // API-3: fecha de inicio persistida (yyyy-MM-dd). null = plan sin fecha.
+    DateOnly? StartDate,
     JsonDocument? TripContext,
     bool IsPublic,
     bool IsShowcase,
@@ -75,7 +83,8 @@ public record PlanDetailDto(
     List<PlanRouteSegmentDto>? RouteSegments = null
 )
 {
-    public static PlanDetailDto FromEntity(Plan plan, string lang = "en", IReadOnlyList<PlanRouteSegmentDto>? routeSegments = null)
+    public static PlanDetailDto FromEntity(
+        Plan plan, string lang = "en", IReadOnlyList<PlanRouteSegmentDto>? routeSegments = null, string? publicBaseUrl = null)
     {
         var days = plan.Stops
             .OrderBy(s => s.DayNumber)
@@ -83,20 +92,20 @@ public record PlanDetailDto(
             .GroupBy(s => s.DayNumber)
             .Select(g => new PlanDayDto(
                 g.Key,
-                g.Select(s => PlanStopResponseDto.FromEntity(s, lang)).ToList()
+                g.Select(s => PlanStopResponseDto.FromEntity(s, lang, publicBaseUrl)).ToList()
             ))
             .ToList();
         return Build(plan, lang, days, routeSegments);
     }
 
-    public static PlanDetailDto FromEntityWithAllDays(Plan plan, string lang = "en")
+    public static PlanDetailDto FromEntityWithAllDays(Plan plan, string lang = "en", string? publicBaseUrl = null)
     {
         var stopsByDay = plan.Stops
             .GroupBy(s => s.DayNumber)
             .ToDictionary(
                 g => g.Key,
                 g => g.OrderBy(s => s.OrderIndex)
-                    .Select(s => PlanStopResponseDto.FromEntity(s, lang))
+                    .Select(s => PlanStopResponseDto.FromEntity(s, lang, publicBaseUrl))
                     .ToList());
 
         var days = Enumerable.Range(1, plan.DurationDays)
@@ -116,7 +125,8 @@ public record PlanDetailDto(
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
-            p.ImageUrl, p.DurationDays, p.TripContext, p.IsPublic, p.IsShowcase,
+            // Back-compat S0: isPublic derivado de visibility (ver PlanDto.FromEntity).
+            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.Visibility == "public", p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt, days,
             routeSegments?.Count > 0 ? routeSegments.ToList() : null
         );

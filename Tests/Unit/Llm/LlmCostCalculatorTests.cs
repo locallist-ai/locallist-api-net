@@ -6,7 +6,7 @@ public class LlmCostCalculatorTests
 {
     [Theory]
     [InlineData("gemini-2.5-flash", 1_000_000, 1_000_000, 2.80)]   // 0.30 + 2.50
-    [InlineData("gpt-5-nano", 1_000_000, 1_000_000, 0.45)]         // 0.05 + 0.40
+    [InlineData("gpt-5.4-nano", 1_000_000, 1_000_000, 1.45)]       // 0.20 + 1.25
     [InlineData("mistral-small-latest", 1_000_000, 1_000_000, 0.40)] // 0.10 + 0.30
     [InlineData("claude-haiku-4-5", 1_000_000, 1_000_000, 6.00)]   // 1.00 + 5.00
     [InlineData("gemini-3.5-flash", 1_000_000, 1_000_000, 10.50)]  // 1.50 + 9.00
@@ -48,8 +48,8 @@ public class LlmCostCalculatorTests
     public void Calculate_OnlyThinkingTokens_NotNull()
     {
         // Aunque input y output sean null, si hay thinking tokens hay coste (no null).
-        var cost = LlmCostCalculator.Calculate("gpt-5-nano", null, null, 1_000_000);
-        Assert.Equal(0.40m, cost);
+        var cost = LlmCostCalculator.Calculate("gpt-5.4-nano", null, null, 1_000_000);
+        Assert.Equal(1.25m, cost);
     }
 
     [Fact]

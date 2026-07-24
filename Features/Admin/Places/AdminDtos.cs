@@ -47,16 +47,20 @@ public record AdminPlaceDto(
     OpeningHoursData? OpeningHours = null
 )
 {
-    public static AdminPlaceDto FromEntity(Place p)
+    public static AdminPlaceDto FromEntity(Place p, string? publicBaseUrl = null)
     {
         var subs = p.Subcategories is { Count: > 0 } ? p.Subcategories : null;
         var subsEs = LanguageAccessor.ResolveStringList(p.SubcategoriesI18n, "es", p.Subcategories, isCurated: false);
         var bestTimes = p.BestTimes is { Count: > 0 } ? p.BestTimes : null;
+        // Tras el proxy runtime de fotos (PR #114) los sitios Google guardan Photos=null y la URL
+        // se sintetiza en serialización (mismo punto único que PlaceDto). Pasar p.Photos crudo aquí
+        // dejaría al admin sin imagen para los sitios Google. Resolvemos igual que PlaceDto.
+        var (photos, _) = PlacePhotoUrls.Resolve(p.Id, p.GooglePlaceId, p.Photos, publicBaseUrl);
 
         return new(
             p.Id, p.Name, p.Category, subs, p.Neighborhood, p.City,
             p.Latitude, p.Longitude, p.WhyThisPlace, p.BestFor, p.SuitableFor,
-            bestTimes, p.PriceRange, p.Photos, p.GooglePlaceId, p.GoogleRating,
+            bestTimes, p.PriceRange, photos, p.GooglePlaceId, p.GoogleRating,
             p.GoogleReviewCount, p.Source, p.SourceUrl, p.Status,
             p.RejectionReason, p.AiVibeScore, p.VisitDurationMin, p.Flags,
             p.SubmittedById, p.ReviewedById, p.CreatedAt, p.UpdatedAt,
