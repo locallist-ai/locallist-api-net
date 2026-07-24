@@ -32,7 +32,10 @@ public record PlanDto(
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
-            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.IsPublic, p.IsShowcase,
+            // Back-compat S0: la app vieja consume `isPublic`. Se deriva de la fuente de verdad
+            // (visibility=='public') para que clientes previos a la migracion social sigan viendo
+            // el flag correcto sin depender del espejo is_public.
+            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.Visibility == "public", p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt
         );
     }
@@ -122,7 +125,8 @@ public record PlanDetailDto(
             LanguageAccessor.ResolveString(p.NameI18n, lang, p.Name, isCurated) ?? p.Name,
             p.City, p.Type,
             LanguageAccessor.ResolveString(p.DescriptionI18n, lang, p.Description, isCurated),
-            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.IsPublic, p.IsShowcase,
+            // Back-compat S0: isPublic derivado de visibility (ver PlanDto.FromEntity).
+            p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.Visibility == "public", p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt, days,
             routeSegments?.Count > 0 ? routeSegments.ToList() : null
         );

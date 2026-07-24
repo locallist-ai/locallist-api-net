@@ -134,7 +134,7 @@ LocalList.API.NET/
 │   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
 │   ├── Follow/
-│   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
+│   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Places/
 │   │   ├── PlacesController.cs         # GET /places, GET /places/:id
@@ -144,9 +144,9 @@ LocalList.API.NET/
 │   │       ├── PhotoBudgetCounter.cs     # Circuit breaker de presupuesto diario (in-process, reset UTC)
 │   │       └── GooglePhotoHostValidator.cs  # Allowlist de host (*.googleusercontent.com) compartida por este proxy y el preview admin de AdminPlacesController
 │   ├── Plans/
-│   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
-│   │   ├── PlanDtos.cs
-│   │   ├── PlanEditController.cs       # DELETE /plans/:id
+│   │   ├── PlansController.cs          # GET /plans, GET /plans/:id (autoriza vía IPlanAccessService; anónimo exige visibility='public')
+│   │   ├── PlanDtos.cs                 # PlanDto/PlanDetailDto: isPublic derivado de visibility=='public' (back-compat app vieja)
+│   │   ├── PlanEditController.cs       # PUT /plans/:id/stops (CanEdit), DELETE /plans/:id (IsOwner) — ambos vía IPlanAccessService
 │   │   └── PlanEditDtos.cs
 │   ├── Profile/
 │   │   ├── ProfileController.cs        # GET /me/profile, DELETE /me/profile
@@ -154,6 +154,16 @@ LocalList.API.NET/
 │   ├── Routing/                        # Implementaciones (contratos en Shared/Routing/)
 │   │   ├── MapboxRoutingService.cs     # Mapbox Directions API (IRoutingService)
 │   │   └── RouteResolver.cs            # ISegmentResolver — caché de segmentos en RouteSegmentCache
+│   ├── Social/                         # Cimiento del modelo de datos social (S0). Solo entidades
+│   │   └── Entities/                   # (aún sin endpoints; S1+ añade pilares favoritos/follow/co-edición)
+│   │       ├── UserPublicProfile.cs    # Perfil PÚBLICO (handle citext único, avatar, contadores). SEPARADO de UserProfile (privado). Creación LAZY (fila no existe hasta reclamar handle)
+│   │       ├── UserFollow.cs           # Grafo de follows. PK (follower_id, followee_id), CHECK no-self. NUNCA "Follow" (colisiona con Follow Mode)
+│   │       ├── PlanCollaborator.cs     # Co-edición. PK (plan_id, user_id), role editor|viewer. Owner NO es fila (sigue en plans.created_by)
+│   │       ├── PlanInvite.cs           # Invitación por token a colaborar (expira, max_uses, revocable)
+│   │       ├── ActivityEvent.cs        # Feed append-only. object_id polimórfico (sin FK), UNIQUE (actor, verb, object) idempotente
+│   │       ├── PlanLike.cs             # Like. PK (plan_id, user_id). Contador denormalizado en plans.likes_count
+│   │       ├── ContentReport.cs        # Reporte de moderación. reporter_id FK SET NULL (sobrevive borrado de cuenta)
+│   │       └── UserBlock.cs            # Bloqueo. PK (blocker_id, blocked_id). Consumido por PlanAccessService (bloqueo ↔ owner niega CanView)
 │   ├── Taxonomy/
 │   │   └── TaxonomyController.cs       # GET /taxonomy (categories + subcategories)
 │   └── Waitlist/
@@ -162,6 +172,10 @@ LocalList.API.NET/
 │       ├── IEmailMarketingService.cs
 │       └── KlaviyoService.cs           # Klaviyo email marketing integration
 └── Shared/
+    ├── Access/                         # Autorización centralizada de planes (S0)
+    │   ├── IPlanAccessService.cs        # GetAccessAsync(planId, userId) → PlanAccess. Punto ÚNICO de autorización de planes
+    │   ├── PlanAccessService.cs         # Reglas: owner→view+edit; collaborator editor→view+edit, viewer→view; visibility='public'→view (incl. anónimo); 'unlisted' NO por GUID; bloqueo↔owner niega. NO afloja ownership. Consumido por PlansController.GetPlan, PlanEditController, FollowController.StartSession (IDOR #116)
+    │   └── PlanAccess.cs                # readonly record struct: PlanExists, CanView, CanEdit, IsOwner, Role
     ├── AI/
     │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
     │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
@@ -195,9 +209,9 @@ LocalList.API.NET/
     │   ├── DesignTimeDbContextFactory.cs
     │   └── Entities/                   # EF Core entities
     │       ├── User.cs                  # firebase_uid (legado), google_user_id, apple_user_id, password_hash
-    │       ├── UserProfile.cs           # Perfil extendido del usuario
+    │       ├── UserProfile.cs           # Perfil PRIVADO (preferencias de viaje). ≠ Features/Social UserPublicProfile
     │       ├── RefreshToken.cs          # Tokens de refresh rotados (SHA-256 hash)
-    │       ├── Plan.cs
+    │       ├── Plan.cs                   # visibility (private|unlisted|public) = fuente de verdad de autorización (S0); is_public espejo sincronizado 1-2 releases (setters bidireccionales; DTO deriva isPublic de visibility). +share_token único, revision, likes_count, published_at, cloned_from, moderation_locked. Config social en LocalListDbContext.ConfigureSocial
     │       ├── PlanStop.cs
     │       ├── PlanMetric.cs            # Métricas de generación (latencia, coste, señales)
     │       ├── Place.cs

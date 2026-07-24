@@ -4,6 +4,7 @@ using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Coverage;
@@ -25,6 +26,10 @@ public static class DomainServiceExtensions
         this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton(TimeProvider.System);
+
+        // Social foundation (S0): servicio central de autorizacion de planes. Punto UNICO que
+        // consumen PlansController.GetPlan, PlanEditController y FollowController (y S1+/favoritos).
+        services.AddScoped<IPlanAccessService, PlanAccessService>();
         // Gemini services share the same resilience configuration — 25s total timeout,
         // 1 retry on transient network errors only (5xx errors are treated as hard failures).
         Action<HttpStandardResilienceOptions> geminiResilienceOpts = options =>

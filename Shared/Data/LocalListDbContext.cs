@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Features.Social.Entities;
 
 namespace LocalList.API.NET.Shared.Data;
 
@@ -22,11 +23,23 @@ public class LocalListDbContext : DbContext
     public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
     public DbSet<Subcategory> Subcategories { get; set; } = null!;
 
+    // ── Social foundation (S0) ──
+    public DbSet<UserPublicProfile> UserPublicProfiles { get; set; } = null!;
+    public DbSet<UserFollow> UserFollows { get; set; } = null!;
+    public DbSet<PlanCollaborator> PlanCollaborators { get; set; } = null!;
+    public DbSet<PlanInvite> PlanInvites { get; set; } = null!;
+    public DbSet<ActivityEvent> ActivityEvents { get; set; } = null!;
+    public DbSet<PlanLike> PlanLikes { get; set; } = null!;
+    public DbSet<ContentReport> ContentReports { get; set; } = null!;
+    public DbSet<UserBlock> UserBlocks { get; set; } = null!;
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
         modelBuilder.HasPostgresExtension("vector");
+        // citext: handles case-insensitive con unicidad (user_public_profiles.handle).
+        modelBuilder.HasPostgresExtension("citext");
 
         // Constraints and Cascade deletes matching the PostgreSQL drizzle schema
 
@@ -97,7 +110,23 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<Place>().Property(p => p.Embedding).HasColumnType("vector(768)");
 
         modelBuilder.Entity<Plan>().HasIndex(p => p.CreatedById);
-        modelBuilder.Entity<Plan>().HasIndex(p => new { p.City, p.IsPublic });
+        // Social S0: la visibilidad pasa a ser la fuente de verdad; migramos (city, is_public) ->
+        // (city, visibility). is_public sigue como columna espejo (sin indice propio nuevo).
+        modelBuilder.Entity<Plan>().HasIndex(p => new { p.City, p.Visibility });
+        // Column default 'private' (seguro); el CLR default de la entidad es 'public' (compat con
+        // el comportamiento historico is_public=true) y EF siempre envia el valor explicito.
+        modelBuilder.Entity<Plan>().Property(p => p.Visibility).HasDefaultValue("private");
+        modelBuilder.Entity<Plan>().HasIndex(p => p.ShareToken).IsUnique();
+        // Feed: planes publicos ordenados por publicacion (published_at DESC).
+        modelBuilder.Entity<Plan>().HasIndex(p => new { p.Visibility, p.PublishedAt }).IsDescending(false, true);
+        // cloned_from: origen del clone del share-link (S1). Self-FK SET NULL (no navegacion).
+        modelBuilder.Entity<Plan>()
+            .HasOne<Plan>()
+            .WithMany()
+            .HasForeignKey(p => p.ClonedFrom)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        ConfigureSocial(modelBuilder);
 
         modelBuilder.Entity<PlanStop>().HasIndex(ps => new { ps.PlanId, ps.DayNumber });
 
@@ -219,5 +248,136 @@ public class LocalListDbContext : DbContext
             .HasIndex(s => new { s.CategoryKey, s.Key })
             .IsUnique()
             .HasFilter("deleted_at IS NULL");
+    }
+
+    /// <summary>
+    /// Esquema social (S0). Todos los FK a users con ON DELETE CASCADE (borrado de cuenta cascadea
+    /// el grafo social — GDPR), salvo los explicitamente SET NULL (content_reports.reporter_id,
+    /// plan_collaborators.invited_by), que sobreviven al borrado de la cuenta. Las entidades sin
+    /// navegacion a User se configuran con HasOne&lt;User&gt;().WithMany() (dos FK a users por tabla
+    /// son validos en Postgres).
+    /// </summary>
+    private static void ConfigureSocial(ModelBuilder modelBuilder)
+    {
+        // ── UserPublicProfile ──
+        modelBuilder.Entity<UserPublicProfile>()
+            .HasOne(up => up.User)
+            .WithOne()
+            .HasForeignKey<UserPublicProfile>(up => up.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<UserPublicProfile>()
+            .HasIndex(up => up.Handle)
+            .IsUnique();
+
+        // ── UserFollow ──
+        modelBuilder.Entity<UserFollow>()
+            .HasKey(f => new { f.FollowerId, f.FolloweeId });
+        modelBuilder.Entity<UserFollow>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(f => f.FollowerId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<UserFollow>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(f => f.FolloweeId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<UserFollow>()
+            .ToTable(t => t.HasCheckConstraint("ck_user_follows_no_self", "follower_id <> followee_id"));
+        modelBuilder.Entity<UserFollow>()
+            .HasIndex(f => new { f.FolloweeId, f.CreatedAt })
+            .IsDescending(false, true);
+        modelBuilder.Entity<UserFollow>()
+            .HasIndex(f => new { f.FollowerId, f.CreatedAt })
+            .IsDescending(false, true);
+
+        // ── PlanCollaborator ──
+        modelBuilder.Entity<PlanCollaborator>()
+            .HasKey(c => new { c.PlanId, c.UserId });
+        modelBuilder.Entity<PlanCollaborator>()
+            .HasOne<Plan>()
+            .WithMany()
+            .HasForeignKey(c => c.PlanId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<PlanCollaborator>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<PlanCollaborator>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(c => c.InvitedBy)
+            .OnDelete(DeleteBehavior.SetNull);
+        modelBuilder.Entity<PlanCollaborator>()
+            .HasIndex(c => c.UserId);
+
+        // ── PlanInvite ──
+        modelBuilder.Entity<PlanInvite>()
+            .HasOne<Plan>()
+            .WithMany()
+            .HasForeignKey(i => i.PlanId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<PlanInvite>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(i => i.CreatedBy)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // ── ActivityEvent ──
+        modelBuilder.Entity<ActivityEvent>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(a => a.ActorId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<ActivityEvent>()
+            .HasIndex(a => new { a.ActorId, a.CreatedAt })
+            .IsDescending(false, true);
+        modelBuilder.Entity<ActivityEvent>()
+            .HasIndex(a => a.CreatedAt)
+            .IsDescending();
+        modelBuilder.Entity<ActivityEvent>()
+            .HasIndex(a => new { a.ActorId, a.Verb, a.ObjectId })
+            .IsUnique();
+
+        // ── PlanLike ──
+        modelBuilder.Entity<PlanLike>()
+            .HasKey(l => new { l.PlanId, l.UserId });
+        modelBuilder.Entity<PlanLike>()
+            .HasOne<Plan>()
+            .WithMany()
+            .HasForeignKey(l => l.PlanId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<PlanLike>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(l => l.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<PlanLike>()
+            .HasIndex(l => new { l.UserId, l.CreatedAt })
+            .IsDescending(false, true);
+
+        // ── ContentReport ──
+        modelBuilder.Entity<ContentReport>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(r => r.ReporterId)
+            .OnDelete(DeleteBehavior.SetNull);
+        modelBuilder.Entity<ContentReport>()
+            .HasIndex(r => new { r.Status, r.CreatedAt });
+
+        // ── UserBlock ──
+        modelBuilder.Entity<UserBlock>()
+            .HasKey(b => new { b.BlockerId, b.BlockedId });
+        modelBuilder.Entity<UserBlock>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(b => b.BlockerId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<UserBlock>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(b => b.BlockedId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
