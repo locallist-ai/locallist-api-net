@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Features.Plans;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
+using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Follow;
@@ -17,13 +20,15 @@ public class FollowController : ControllerBase
     private readonly TimeProvider _clock;
     private readonly ILogger<FollowController> _logger;
     private readonly PostHogService _posthog;
+    private readonly IConfiguration _config;
 
-    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog)
+    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog, IConfiguration config)
     {
         _db = db;
         _clock = clock;
         _logger = logger;
         _posthog = posthog;
+        _config = config;
     }
 
     /// <summary>Creates a new follow session (state: active). Rejects if user already has an active session. Requires auth.</summary>
@@ -92,11 +97,31 @@ public class FollowController : ControllerBase
         var currentStop = session.CurrentStopIndex < currentDayStops.Count ? currentDayStops[session.CurrentStopIndex] : null;
         var nextStop = session.CurrentStopIndex + 1 < currentDayStops.Count ? currentDayStops[session.CurrentStopIndex + 1] : null;
 
+        // Nunca serializar la entidad Place/PlanStop cruda: expondria la key de Google en
+        // Photos (URL places.googleapis.com) y sobre-expondria campos internos de curacion
+        // (Flags, AiVibeScore, SubmittedById, ReviewedById, RejectionReason, Embedding...).
+        // PlanStopResponseDto embebe PlaceDto (fotos sintetizadas por el proxy + sin campos
+        // internos), y PlaceDto replica el place al nivel superior para no romper el contrato.
+        var lang = LanguageAccessor.ResolveRequestLanguage(Request);
+        var publicBaseUrl = _config["Api:PublicBaseUrl"];
+
         return Ok(new
         {
             session,
-            currentStop = currentStop != null ? new { stop = currentStop, place = currentStop.Place } : null,
-            nextStop = nextStop != null ? new { stop = nextStop, place = nextStop.Place } : null,
+            currentStop = currentStop != null
+                ? new
+                {
+                    stop = PlanStopResponseDto.FromEntity(currentStop, lang, publicBaseUrl),
+                    place = currentStop.Place is null ? null : PlaceDto.FromEntity(currentStop.Place, lang, publicBaseUrl)
+                }
+                : null,
+            nextStop = nextStop != null
+                ? new
+                {
+                    stop = PlanStopResponseDto.FromEntity(nextStop, lang, publicBaseUrl),
+                    place = nextStop.Place is null ? null : PlaceDto.FromEntity(nextStop.Place, lang, publicBaseUrl)
+                }
+                : null,
             totalStopsToday = currentDayStops.Count,
             progress = new
             {

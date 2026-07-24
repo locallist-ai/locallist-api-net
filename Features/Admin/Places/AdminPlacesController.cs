@@ -1,11 +1,13 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Features.Places.Photos;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.AI.Services;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.Search;
 using LocalList.API.NET.Shared.Taxonomy;
@@ -28,6 +30,7 @@ public class AdminPlacesController : ControllerBase
     private readonly IGooglePlacesService _googlePlaces;
     private readonly ITaxonomySvc _taxonomy;
     private readonly PlaceImportService _importSvc;
+    private readonly IPlacePhotoService _photos;
 
     private static readonly HashSet<string> ValidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -43,7 +46,8 @@ public class AdminPlacesController : ControllerBase
         IDescriptionGeneratorService descGen,
         IGooglePlacesService googlePlaces,
         ITaxonomySvc taxonomy,
-        PlaceImportService importSvc)
+        PlaceImportService importSvc,
+        IPlacePhotoService photos)
     {
         _db = db;
         _logger = logger;
@@ -54,6 +58,7 @@ public class AdminPlacesController : ControllerBase
         _googlePlaces = googlePlaces;
         _taxonomy = taxonomy;
         _importSvc = importSvc;
+        _photos = photos;
     }
 
     [HttpGet("cities")]
@@ -94,6 +99,36 @@ public class AdminPlacesController : ControllerBase
 
         _logger.LogInformation("GoogleSearch: query='{Query}' returned {Count} results", textQuery, previews.Count);
         return Ok(new { results = previews });
+    }
+
+    /// <summary>
+    /// Preview de una foto de Google DURANTE el import, antes de que el Place exista en DB (el
+    /// curador aún no ha guardado el sitio, así que no hay un Place.Id interno con el que usar
+    /// el proxy público de T1). Admin-authed (vía <c>[AdminAuthorize]</c> a nivel de clase) para
+    /// que el navegador del admin nunca reciba la URL directa de Google con la key: reutiliza
+    /// <see cref="IPlacePhotoService"/> de T1 (Place Details → <c>/media?skipHttpRedirect=true</c>
+    /// con la key en el header → 302), sin duplicar esa lógica.
+    /// </summary>
+    [HttpGet("photo-preview")]
+    public async Task<IActionResult> PhotoPreview(
+        [FromQuery] string googlePlaceId, [FromQuery] int index, CancellationToken ct)
+    {
+        // no-store: el photoUri es efímero (ToS de Google), no debe cachearse en el navegador
+        // del admin ni en ningún intermediario.
+        Response.Headers.CacheControl = "no-store";
+
+        if (string.IsNullOrWhiteSpace(googlePlaceId))
+            return BadRequest(new { error = "googlePlaceId is required." });
+
+        var photoUri = await _photos.ResolvePhotoUriAsync(googlePlaceId, index, ct);
+        if (string.IsNullOrEmpty(photoUri))
+            return NotFound();
+
+        // Misma allowlist de host que el proxy público de T1: defensa en profundidad.
+        if (!GooglePhotoHostValidator.IsAllowedGooglePhotoHost(photoUri))
+            return NotFound();
+
+        return Redirect(photoUri);
     }
 
     [HttpGet]
@@ -180,7 +215,8 @@ public class AdminPlacesController : ControllerBase
             SuitableFor = request.SuitableFor,
             BestTimes = request.BestTimes,
             PriceRange = request.PriceRange?.Trim(),
-            Photos = request.Photos,
+            // T3: barrido, nunca persistir una URL de Google (key) ni el preview admin-authed.
+            Photos = PlacePhotoUrls.SanitizeForStorage(request.Photos),
             GooglePlaceId = request.GooglePlaceId?.Trim(),
             GoogleRating = request.GoogleRating,
             GoogleReviewCount = request.GoogleReviewCount,
@@ -261,7 +297,8 @@ public class AdminPlacesController : ControllerBase
         if (request.SuitableFor != null) place.SuitableFor = request.SuitableFor;
         if (request.BestTimes != null) place.BestTimes = request.BestTimes;
         if (request.PriceRange != null) place.PriceRange = request.PriceRange.Trim();
-        if (request.Photos != null) place.Photos = request.Photos;
+        // T3: barrido, nunca persistir una URL de Google (key) ni el preview admin-authed.
+        if (request.Photos != null) place.Photos = PlacePhotoUrls.SanitizeForStorage(request.Photos);
         if (request.GooglePlaceId != null) place.GooglePlaceId = request.GooglePlaceId.Trim();
         if (request.GoogleRating.HasValue) place.GoogleRating = request.GoogleRating;
         if (request.GoogleReviewCount.HasValue) place.GoogleReviewCount = request.GoogleReviewCount;

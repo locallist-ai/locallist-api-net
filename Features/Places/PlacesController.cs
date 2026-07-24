@@ -20,12 +20,14 @@ public class PlacesController : ControllerBase
     private readonly LocalListDbContext _db;
     private readonly ILogger<PlacesController> _logger;
     private readonly LanguageAccessor _lang;
+    private readonly IConfiguration _config;
 
-    public PlacesController(LocalListDbContext db, ILogger<PlacesController> logger, LanguageAccessor lang)
+    public PlacesController(LocalListDbContext db, ILogger<PlacesController> logger, LanguageAccessor lang, IConfiguration config)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
+        _config = config;
     }
 
     [HttpGet]
@@ -72,7 +74,8 @@ public class PlacesController : ControllerBase
             .Take(limit)
             .ToListAsync(ct);
 
-        var placeDtos = places.Select(p => PlaceDto.FromEntity(p, lang)).ToList();
+        var publicBaseUrl = _config["Api:PublicBaseUrl"];
+        var placeDtos = places.Select(p => PlaceDto.FromEntity(p, lang, publicBaseUrl)).ToList();
 
         return Ok(new
         {
@@ -96,6 +99,6 @@ public class PlacesController : ControllerBase
         if (isAnonymous && place.Status != "published")
             return NotFound(new { error = "Place not found" });
 
-        return Ok(PlaceDto.FromEntity(place, _lang.Language));
+        return Ok(PlaceDto.FromEntity(place, _lang.Language, _config["Api:PublicBaseUrl"]));
     }
 }

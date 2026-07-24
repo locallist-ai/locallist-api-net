@@ -356,7 +356,9 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             Lat: 25.77m, Lng: -80.19m,
             PrimaryType: "italian_restaurant", Types: ["italian_restaurant", "restaurant"],
             PriceLevel: "$",
-            Photos: ["https://photos.example.com/photo1.jpg"],
+            // T3: aunque GetDetailsAsync devolviera (incorrectamente) una URL de Google con
+            // key, la ingesta NUNCA debe persistirla: este es justo el escenario que T3 cierra.
+            Photos: ["https://places.googleapis.com/v1/places/xyz/media?maxWidthPx=1600&key=SECRET_KEY"],
             Rating: 4.5m, ReviewCount: 200,
             Website: null, Phone: null,
             EditorialSummary: "A great test place");
@@ -372,7 +374,7 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(0, body.GetProperty("failed").GetInt32());
         Assert.Equal("created", body.GetProperty("rows")[0].GetProperty("status").GetString());
 
-        // Verify full taxonomy × price × rating × photo pipeline in DB
+        // Verify full taxonomy × price × rating pipeline in DB
         var freshDb = fixture.GetDbContext();
         var saved = await freshDb.Places.FirstOrDefaultAsync(p => p.GooglePlaceId == placeId);
         Assert.NotNull(saved);
@@ -381,11 +383,23 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Contains("Italian", saved.Subcategories ?? []);
         Assert.Equal("$", saved.PriceRange);
         Assert.Equal(4.5m, saved.GoogleRating);
-        Assert.NotNull(saved.Photos);
-        Assert.Equal(1, saved.Photos!.Count);
         Assert.Equal(25.77m, saved.Latitude);
         Assert.Equal(-80.19m, saved.Longitude);
         Assert.NotNull(saved.Embedding);
+
+        // T3: Place.Photos runtime-only. Un sitio de Google jamás persiste una URL de
+        // Google (ni la key, ni siquiera el preview admin-authed). GooglePlaceId basta.
+        Assert.Null(saved.Photos);
+        Assert.Equal(placeId, saved.GooglePlaceId);
+
+        // Regresión de T2: el PlaceDto público sigue sintetizando la foto del proxy runtime a
+        // partir de GooglePlaceId, con Place.Photos vacío en DB.
+        var placeDtoResponse = await client.GetAsync($"/places/{saved.Id}");
+        Assert.Equal(HttpStatusCode.OK, placeDtoResponse.StatusCode);
+        var placeDto = await placeDtoResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("google", placeDto.GetProperty("photoSource").GetString());
+        var dtoPhotos = placeDto.GetProperty("photos").EnumerateArray().Select(p => p.GetString()).ToList();
+        Assert.Equal(new[] { $"/places/{saved.Id}/photos/0" }, dtoPhotos);
     }
 
     [Fact]

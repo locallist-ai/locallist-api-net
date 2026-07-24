@@ -20,14 +20,16 @@ public class PlansController : ControllerBase
     private readonly LanguageAccessor _lang;
     private readonly ISegmentResolver _routeResolver;
     private readonly PostHogService _posthog;
+    private readonly IConfiguration _config;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog, IConfiguration config)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
         _routeResolver = routeResolver;
         _posthog = posthog;
+        _config = config;
     }
 
     [HttpPost]
@@ -77,7 +79,7 @@ public class PlansController : ControllerBase
 
         _logger.LogInformation("User {UserId} created plan {PlanId} ({Name})", userId, plan.Id, plan.Name);
 
-        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan, _lang.Language));
+        return Created($"/plans/{plan.Id}", PlanDetailDto.FromEntityWithAllDays(plan, _lang.Language, _config["Api:PublicBaseUrl"]));
     }
 
     [HttpGet("mine")]
@@ -178,6 +180,6 @@ public class PlansController : ControllerBase
                 .SetProperty(m => m.OpenedAt, DateTimeOffset.UtcNow), ct);
 
         var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
-        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments));
+        return Ok(PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments, _config["Api:PublicBaseUrl"]));
     }
 }

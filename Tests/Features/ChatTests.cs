@@ -232,6 +232,83 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         Assert.Empty(fixture.FakeGemini.Calls);
     }
 
+    // ── SEGURIDAD (T2 ronda 2): el replay idempotente de POST /chat/generate serializaba la
+    // entidad Plan cruda (plan = existing), cuyo Stops[].Place.Photos filtraba la API key de
+    // Google. Ahora pasa por PlanDetailDto (mismo DTO que GET /plans/:id) → fotos sintetizadas
+    // por el proxy, key server-side, jamas al cliente. Repro adversarial. ──
+    [Fact]
+    public async Task Generate_IdempotentReplay_StopPlaceHasGoogleKey_ResponseNeverLeaksKey()
+    {
+        var db = fixture.GetDbContext();
+
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = "Replay Keyed Spot",
+            Category = "food",
+            City = Miami,
+            WhyThisPlace = "x",
+            Status = "published",
+            GooglePlaceId = "ChIJ_chat_replay_leak",
+            Photos = [PhotoDtoTestData.StoredGoogleUrlWithKey],
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Replay Plan",
+            City = Miami,
+            Type = "ai",
+            DurationDays = 1,
+        };
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        db.PlanStops.Add(new PlanStop
+        {
+            Id = Guid.NewGuid(),
+            PlanId = plan.Id,
+            PlaceId = place.Id,
+            DayNumber = 1,
+            OrderIndex = 0,
+            TimeBlock = "morning",
+        });
+
+        // Sesion anonima ya "generated" → dispara el path idempotente (sin llamar a Gemini).
+        var session = new ChatSession
+        {
+            Status = "generated",
+            GeneratedPlanId = plan.Id,
+            TurnCount = 3,
+            SlotsJson = JsonSerializer.Serialize(new
+            {
+                city = Miami, days = 1, groupType = "solo",
+                categories = new[] { "food" }, budget = "moderate"
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var rawBody = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("googleapis.com", rawBody);
+        Assert.DoesNotContain("key=", rawBody);
+        Assert.DoesNotContain("SUPER-SECRET-KEY", rawBody);
+
+        var body = JsonDocument.Parse(rawBody).RootElement;
+        Assert.True(body.GetProperty("isExisting").GetBoolean());
+
+        // El campo plan (PlanDetailDto) sintetiza la foto por el proxy en el place embebido.
+        var planPlace = body.GetProperty("plan").GetProperty("days")[0].GetProperty("stops")[0].GetProperty("place");
+        Assert.Equal($"/places/{place.Id}/photos/0", planPlace.GetProperty("photos")[0].GetString());
+        Assert.Equal("google", planPlace.GetProperty("photoSource").GetString());
+
+        // El campo stops (ResolveStopPlaces) tambien va sintetizado.
+        var resolvedPlace = body.GetProperty("stops")[0].GetProperty("place");
+        Assert.Equal($"/places/{place.Id}/photos/0", resolvedPlace.GetProperty("photos")[0].GetString());
+    }
+
     [Fact]
     public async Task Generate_SlotsToTripContext_CityUsedInGeneration()
     {

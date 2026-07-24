@@ -8,6 +8,7 @@ using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Plans;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -39,6 +40,7 @@ public class ChatController : ControllerBase
     private readonly ILogger<ChatController> _logger;
     private readonly PostHogService _posthog;
     private readonly ICityCoverageService _coverage;
+    private readonly IConfiguration _config;
 
     public ChatController(
         ChatAgentService agent,
@@ -46,7 +48,8 @@ public class ChatController : ControllerBase
         IPlanGenerationService planGen,
         ILogger<ChatController> logger,
         PostHogService posthog,
-        ICityCoverageService coverage)
+        ICityCoverageService coverage,
+        IConfiguration config)
     {
         _agent = agent;
         _db = db;
@@ -54,6 +57,7 @@ public class ChatController : ControllerBase
         _logger = logger;
         _posthog = posthog;
         _coverage = coverage;
+        _config = config;
     }
 
     /// <summary>
@@ -168,9 +172,13 @@ public class ChatController : ControllerBase
                         SuggestedDurationMin = s.SuggestedDurationMin ?? 0
                     }).ToList();
                 var existingPlaces = existing.Stops.Select(s => s.Place).OfType<Place>().ToList();
+                // No serializar la entidad Plan cruda: sus Stops[].Place emitirian la key de
+                // Google en Photos. Se serializa via el MISMO DTO que GET /plans/:id, que
+                // sintetiza las fotos por el proxy y excluye los campos internos de curacion.
+                var replayLang = LanguageAccessor.ResolveRequestLanguage(Request);
                 return Ok(new
                 {
-                    plan = existing,
+                    plan = PlanDetailDto.FromEntity(existing, replayLang, publicBaseUrl: _config["Api:PublicBaseUrl"]),
                     stops = _planGen.ResolveStopPlaces(existingStopDtos, existingPlaces),
                     message = "Your plan is ready!",
                     warnings = Array.Empty<string>(),

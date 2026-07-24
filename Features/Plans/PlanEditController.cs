@@ -18,13 +18,15 @@ public class PlanEditController : ControllerBase
     private readonly ILogger<PlanEditController> _logger;
     private readonly LanguageAccessor _lang;
     private readonly PostHogService _posthog;
+    private readonly IConfiguration _config;
 
-    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang, PostHogService posthog)
+    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang, PostHogService posthog, IConfiguration config)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
         _posthog = posthog;
+        _config = config;
     }
 
     [HttpPut("{id}/stops")]
@@ -99,7 +101,7 @@ public class PlanEditController : ControllerBase
             .ThenInclude(s => s.Place)
             .FirstAsync(p => p.Id == id, ct);
 
-        return Ok(PlanDetailDto.FromEntity(updatedPlan, _lang.Language));
+        return Ok(PlanDetailDto.FromEntity(updatedPlan, _lang.Language, publicBaseUrl: _config["Api:PublicBaseUrl"]));
     }
 
     [HttpDelete("{id}")]

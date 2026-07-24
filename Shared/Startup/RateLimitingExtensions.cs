@@ -201,6 +201,24 @@ public static class RateLimitingExtensions
                     _ => CreateSlidingHourlyLimiter(permitLimit));
             });
 
+            // ── PhotoLimit: proxy de fotos de Google (GET /places/:id/photos/:index) ─────
+            // [AllowAnonymous] (las <Image> no adjuntan auth). Cada request resuelve un photoUri
+            // fresco (Place Details gratis + /media de pago). El techo por IP acota el abuso del
+            // endpoint; el circuit breaker de presupuesto (PhotoBudgetCounter) es la cota GLOBAL
+            // de coste diario. Fixed window por IP; tunable vía GooglePlaces:PhotoRateLimitPerMinute.
+            var photoPerMinute = configuration.GetValue<int?>("GooglePlaces:PhotoRateLimitPerMinute")
+                                 ?? DefaultPhotoRateLimitPerMinute;
+            options.AddPolicy("PhotoLimit", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        AutoReplenishment = true,
+                        PermitLimit = photoPerMinute,
+                        QueueLimit = 0,
+                        Window = TimeSpan.FromMinutes(1)
+                    }));
+
             options.RejectionStatusCode = 429;
         });
 
@@ -237,6 +255,13 @@ public static class RateLimitingExtensions
     /// completa. Tunable vía <c>Chat:RateLimitTurnsPerHourPerIp</c>.
     /// </summary>
     internal const int DefaultChatTurnIpCeilingPerHour = 120;
+
+    /// <summary>
+    /// Límite por minuto y por IP del proxy de fotos (GET /places/:id/photos/:index).
+    /// Generoso para una galería/hero real; el freno de coste absoluto es el circuit breaker
+    /// de presupuesto diario. Tunable vía <c>GooglePlaces:PhotoRateLimitPerMinute</c>.
+    /// </summary>
+    internal const int DefaultPhotoRateLimitPerMinute = 60;
 
     /// <summary>
     /// Devuelve el userId SOLO si el token es de la app (AppScheme HS256, issuer

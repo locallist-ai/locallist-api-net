@@ -9,11 +9,16 @@ public class SchedulingService
 {
     private readonly ILogger<SchedulingService> _logger;
     private readonly ISegmentResolver? _resolver;
+    private readonly IConfiguration? _config;
 
-    public SchedulingService(ILogger<SchedulingService> logger, ISegmentResolver? resolver = null)
+    public SchedulingService(
+        ILogger<SchedulingService> logger,
+        ISegmentResolver? resolver = null,
+        IConfiguration? config = null)
     {
         _logger = logger;
         _resolver = resolver;
+        _config = config;
     }
 
     // ── Time-block compatibility (kept for IsGoodTimeMatch) ───────────────────
@@ -743,10 +748,33 @@ public class SchedulingService
     public IEnumerable<ScheduledStopResult> ResolveStopPlaces(List<ScheduledStopDto> stops, List<Place> allPlaces)
     {
         var placeMap = allPlaces.ToDictionary(p => p.Id);
+        var publicBaseUrl = _config?["Api:PublicBaseUrl"];
 
         return stops.Select(stop =>
         {
             placeMap.TryGetValue(stop.PlaceId, out var place);
+            ResolvedPlaceDto? placeDto = null;
+            if (place != null)
+            {
+                // Misma síntesis que PlaceDto: nunca reemitir aquí una URL
+                // places.googleapis.com (con key). El proxy de fotos (T1) es el único
+                // sitio autorizado a resolver la key server-side.
+                var (photos, photoSource) = PlacePhotoUrls.Resolve(
+                    place.Id, place.GooglePlaceId, place.Photos, publicBaseUrl);
+
+                placeDto = new ResolvedPlaceDto(
+                    Id: place.Id,
+                    Name: place.Name,
+                    Category: place.Category,
+                    Neighborhood: place.Neighborhood,
+                    WhyThisPlace: place.WhyThisPlace,
+                    PriceRange: place.PriceRange,
+                    Photos: photos,
+                    Latitude: place.Latitude,
+                    Longitude: place.Longitude,
+                    PhotoSource: photoSource);
+            }
+
             return new ScheduledStopResult(
                 Id: Guid.NewGuid(),
                 PlaceId: stop.PlaceId,
@@ -756,18 +784,7 @@ public class SchedulingService
                 SuggestedArrival: stop.SuggestedArrival,
                 SuggestedDurationMin: stop.SuggestedDurationMin,
                 TravelFromPrevious: stop.TravelFromPrevious,
-                Place: place != null
-                    ? new ResolvedPlaceDto(
-                        Id: place.Id,
-                        Name: place.Name,
-                        Category: place.Category,
-                        Neighborhood: place.Neighborhood,
-                        WhyThisPlace: place.WhyThisPlace,
-                        PriceRange: place.PriceRange,
-                        Photos: place.Photos,
-                        Latitude: place.Latitude,
-                        Longitude: place.Longitude)
-                    : null);
+                Place: placeDto);
         });
     }
 

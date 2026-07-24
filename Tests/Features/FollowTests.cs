@@ -91,6 +91,68 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(1, body.GetProperty("currentStopIndex").GetInt32());
     }
 
+    // ── SEGURIDAD (T2 ronda 2): GET /follow/active NO debe filtrar la API key de Google
+    // (Place.Photos con URL places.googleapis.com?...&key=SECRET) ni sobre-exponer los campos
+    // internos de curacion al serializar la entidad Place/PlanStop cruda. Repro adversarial. ──
+    [Fact]
+    public async Task GetActive_StopPlaceHasGoogleKey_ResponseNeverLeaksKey_NorCurationFields()
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-leak-{userId:N}";
+        var planId = Guid.NewGuid();
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = $"follow-leak-{userId:N}@test.com", FirebaseUid = firebaseUid });
+        db.Plans.Add(new Plan { Id = planId, Name = "Leak Plan", City = "Miami", Type = "curated" });
+
+        // Place Google-importada con la URL con key guardada + campos internos de curacion.
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = "Keyed Spot",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "x",
+            Status = "published",
+            GooglePlaceId = "ChIJ_follow_leak",
+            Photos = [PhotoDtoTestData.StoredGoogleUrlWithKey],
+            Flags = ["INTERNAL-FLAG-SENTINEL"],
+            AiVibeScore = 42,
+            RejectionReason = "REJECT-REASON-SENTINEL",
+        };
+        db.Places.Add(place);
+        db.PlanStops.Add(new PlanStop { Id = Guid.NewGuid(), PlanId = planId, PlaceId = place.Id, DayNumber = 1, OrderIndex = 0 });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
+        await client.PostAsJsonAsync("/follow/start", new { planId });
+
+        var response = await client.GetAsync("/follow/active");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var rawBody = await response.Content.ReadAsStringAsync();
+        // La key NUNCA sale.
+        Assert.DoesNotContain("googleapis.com", rawBody);
+        Assert.DoesNotContain("key=", rawBody);
+        Assert.DoesNotContain("SUPER-SECRET-KEY", rawBody);
+        // Los campos internos de curacion NUNCA salen.
+        Assert.DoesNotContain("INTERNAL-FLAG-SENTINEL", rawBody);
+        Assert.DoesNotContain("REJECT-REASON-SENTINEL", rawBody);
+        Assert.DoesNotContain("aiVibeScore", rawBody);
+        Assert.DoesNotContain("submittedById", rawBody);
+        Assert.DoesNotContain("reviewedById", rawBody);
+        Assert.DoesNotContain("rejectionReason", rawBody);
+
+        var body = JsonDocument.Parse(rawBody).RootElement;
+        // La foto legitima SIGUE viniendo, sintetizada por el proxy (ruta relativa, sin PublicBaseUrl).
+        var place1 = body.GetProperty("currentStop").GetProperty("place");
+        Assert.Equal($"/places/{place.Id}/photos/0", place1.GetProperty("photos")[0].GetString());
+        Assert.Equal("google", place1.GetProperty("photoSource").GetString());
+        Assert.False(place1.TryGetProperty("flags", out _));
+        // El place embebido en el stop tambien va sintetizado (PlaceDto).
+        var nestedInStop = body.GetProperty("currentStop").GetProperty("stop").GetProperty("place");
+        Assert.Equal($"/places/{place.Id}/photos/0", nestedInStop.GetProperty("photos")[0].GetString());
+    }
+
     [Fact]
     public async Task Start_Unauthenticated_Returns401()
     {
