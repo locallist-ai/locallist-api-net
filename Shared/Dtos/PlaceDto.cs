@@ -31,10 +31,17 @@ public record PlaceDto(
     string? SourceUrl,
     string Status,
     DateTimeOffset CreatedAt,
-    OpeningHoursData? OpeningHours = null
+    OpeningHoursData? OpeningHours = null,
+    // "google" (proxy sintetizado, ver PlacePhotoUrls) | "external" (URL directa no-Google)
+    // | null (sin fotos). Aditivo: la app lo usa para atribución/UX de la foto.
+    string? PhotoSource = null
 )
 {
-    public static PlaceDto FromEntity(Place p, string lang = "en")
+    /// <param name="publicBaseUrl">
+    /// <c>Api:PublicBaseUrl</c> desde config. Null/vacío -> URL de proxy relativa
+    /// (ver <see cref="PlacePhotoUrls.Hero"/>).
+    /// </param>
+    public static PlaceDto FromEntity(Place p, string lang = "en", string? publicBaseUrl = null)
     {
         var isCurated = p.Source == "curated";
         var ts = p.TranslationStatus;
@@ -44,6 +51,10 @@ public record PlaceDto(
             : (p.Subcategories is { Count: > 0 } ? p.Subcategories : null);
 
         var bestTimes = LanguageAccessor.ResolveStringList(p.BestTimesI18n, lang, p.BestTimes, isCurated, ts);
+
+        // Nunca reemitir una URL places.googleapis.com (con key) guardada en p.Photos: si hay
+        // GooglePlaceId, se sintetiza el proxy; si no, solo pasan URLs externas no-Google.
+        var (photos, photoSource) = PlacePhotoUrls.Resolve(p.Id, p.GooglePlaceId, p.Photos, publicBaseUrl);
 
         return new(
             p.Id,
@@ -60,7 +71,7 @@ public record PlaceDto(
             bestTimes,
             bestTimes?.FirstOrDefault(),
             p.PriceRange,
-            p.Photos,
+            photos,
             p.GooglePlaceId,
             p.GoogleRating,
             p.GoogleReviewCount,
@@ -68,7 +79,8 @@ public record PlaceDto(
             p.SourceUrl,
             p.Status,
             p.CreatedAt,
-            OpeningHours: OpeningHoursData.FromJsonDocument(p.OpeningHours)
+            OpeningHours: OpeningHoursData.FromJsonDocument(p.OpeningHours),
+            PhotoSource: photoSource
         );
     }
 }

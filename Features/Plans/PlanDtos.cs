@@ -50,11 +50,11 @@ public record PlanStopResponseDto(
     PlaceDto? Place
 )
 {
-    public static PlanStopResponseDto FromEntity(PlanStop s, string lang = "en") => new(
+    public static PlanStopResponseDto FromEntity(PlanStop s, string lang = "en", string? publicBaseUrl = null) => new(
         s.Id, s.PlaceId, s.DayNumber, s.OrderIndex,
         s.TimeBlock, s.SuggestedArrival, s.SuggestedDurationMin,
         s.TravelFromPrevious,
-        s.Place is null ? null : PlaceDto.FromEntity(s.Place, lang)
+        s.Place is null ? null : PlaceDto.FromEntity(s.Place, lang, publicBaseUrl)
     );
 }
 
@@ -80,7 +80,8 @@ public record PlanDetailDto(
     List<PlanRouteSegmentDto>? RouteSegments = null
 )
 {
-    public static PlanDetailDto FromEntity(Plan plan, string lang = "en", IReadOnlyList<PlanRouteSegmentDto>? routeSegments = null)
+    public static PlanDetailDto FromEntity(
+        Plan plan, string lang = "en", IReadOnlyList<PlanRouteSegmentDto>? routeSegments = null, string? publicBaseUrl = null)
     {
         var days = plan.Stops
             .OrderBy(s => s.DayNumber)
@@ -88,20 +89,20 @@ public record PlanDetailDto(
             .GroupBy(s => s.DayNumber)
             .Select(g => new PlanDayDto(
                 g.Key,
-                g.Select(s => PlanStopResponseDto.FromEntity(s, lang)).ToList()
+                g.Select(s => PlanStopResponseDto.FromEntity(s, lang, publicBaseUrl)).ToList()
             ))
             .ToList();
         return Build(plan, lang, days, routeSegments);
     }
 
-    public static PlanDetailDto FromEntityWithAllDays(Plan plan, string lang = "en")
+    public static PlanDetailDto FromEntityWithAllDays(Plan plan, string lang = "en", string? publicBaseUrl = null)
     {
         var stopsByDay = plan.Stops
             .GroupBy(s => s.DayNumber)
             .ToDictionary(
                 g => g.Key,
                 g => g.OrderBy(s => s.OrderIndex)
-                    .Select(s => PlanStopResponseDto.FromEntity(s, lang))
+                    .Select(s => PlanStopResponseDto.FromEntity(s, lang, publicBaseUrl))
                     .ToList());
 
         var days = Enumerable.Range(1, plan.DurationDays)
