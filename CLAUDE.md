@@ -80,13 +80,13 @@ LocalList.API.NET/
 │   │   ├── Cities/
 │   │   │   └── AdminCitiesController.cs       # DELETE /admin/cities/:id
 │   │   ├── Places/
-│   │   │   ├── AdminPlacesController.cs       # CRUD + backfill + translate + photo-preview (ver Endpoints)
+│   │   │   ├── AdminPlacesController.*.cs     # CRUD + backfill + translate + photo-preview (ver Endpoints; partial: .cs ctor, .Reads, .Google, .Crud, .Backfill, .Translation)
 │   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration. NUNCA construye URLs con key: ResolvePhotos sintetiza referencias a AdminPlacePhotoPreviewUrls
 │   │   │   ├── AdminPlacePhotoPreviewUrls.cs  # Síntesis de GET /admin/places/photo-preview?googlePlaceId=X&index=I (preview pre-guardado, sin Place.Id aún)
 │   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller. Google-sourced: Photos siempre null (runtime-only, GooglePlaceId basta)
 │   │   │   └── AdminDtos.cs
 │   │   ├── Plans/
-│   │   │   ├── AdminPlansController.cs        # CRUD + translate curated plans
+│   │   │   ├── AdminPlansController.*.cs      # CRUD + translate curated plans (partial: .cs ctor/reads/delete, .Create, .Update, .Translation)
 │   │   │   └── AdminPlanDtos.cs
 │   │   └── Subcategories/
 │   │       ├── AdminSubcategoriesController.cs  # CRUD /admin/subcategories
