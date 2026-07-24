@@ -40,8 +40,14 @@ public partial class CityRequestsController : ControllerBase
 
     // Nombre de ciudad: letra unicode inicial + letras/espacios/apóstrofe/guion/punto.
     // Espejo conceptual de la regex del builder custom de la app
-    // (^[\p{L}][\p{L}\s'\-.]*$). Rechaza <script>, urls, emojis y basura.
-    [GeneratedRegex(@"^[\p{L}][\p{L}\s'\-.]*$")]
+    // (^[\p{L}][\p{L}\s'\-.]*$), con \p{Zs} en vez de \s: solo espacios
+    // HORIZONTALES unicode. \n/\t/\r internos → 400 city_invalid (rechazo, no
+    // colapso) — city_text nunca guarda filas multilínea. Rechaza también
+    // <script>, urls, emojis y basura.
+    // Deuda conocida (review 2026-07-25, ACEPTADA): homóglifos cirílicos pasan
+    // como \p{L} sin confusable-folding ("Мoscow" ≠ "Moscow" en normalized_city).
+    // Revisar si el "top ciudades pedidas" se vuelve serio.
+    [GeneratedRegex(@"^[\p{L}][\p{L}\p{Zs}'\-.]*$")]
     private static partial Regex CityNameRegex();
 
     private readonly LocalListDbContext _db;

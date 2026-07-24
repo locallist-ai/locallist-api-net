@@ -92,6 +92,43 @@ public class CityRequestsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(await db.CityRequests.AnyAsync(cr => cr.CityText == payload));
     }
 
+    // Whitespace interno NO horizontal (\n/\t/\r) → 400 city_invalid (la regex usa
+    // \p{Zs}, no \s): conducta elegida = RECHAZO, no colapso. city_text nunca
+    // guarda filas multilínea.
+    [Theory]
+    [InlineData("Sevilla\nDROP TABLE")]
+    [InlineData("Sevilla\tfoo")]
+    [InlineData("Sevi\rlla")]
+    public async Task Post_InternalControlWhitespace_Returns400InvalidAndNoRow(string payload)
+    {
+        var client = _fixture.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/cities/request", new { city = payload });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<ErrorResponse>();
+        Assert.Equal("city_invalid", body!.Error);
+
+        // Ni la fila cruda ni ninguna fila con \n/\t/\r se ha guardado.
+        var db = _fixture.GetDbContext();
+        Assert.False(await db.CityRequests.AnyAsync(cr => cr.CityText == payload));
+        var texts = await db.CityRequests.Select(cr => cr.CityText).ToListAsync();
+        Assert.DoesNotContain(texts, t => t.Contains('\n') || t.Contains('\t') || t.Contains('\r'));
+    }
+
+    // El espacio horizontal normal sigue siendo válido (regresión del fix \s→\p{Zs}).
+    [Fact]
+    public async Task Post_NameWithRegularSpaces_StillReturns201()
+    {
+        var client = _fixture.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/cities/request", new { city = "San Sebastián de los Reyes" });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var db = _fixture.GetDbContext();
+        Assert.True(await db.CityRequests.AnyAsync(cr => cr.NormalizedCity == "san sebastian de los reyes"));
+    }
+
     // (e) Vacío → 400 city_required.
     [Theory]
     [InlineData("")]
