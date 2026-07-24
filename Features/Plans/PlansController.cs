@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Routing;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -21,8 +22,9 @@ public class PlansController : ControllerBase
     private readonly ISegmentResolver _routeResolver;
     private readonly PostHogService _posthog;
     private readonly IConfiguration _config;
+    private readonly IPlanAccessService _access;
 
-    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog, IConfiguration config)
+    public PlansController(LocalListDbContext db, ILogger<PlansController> logger, LanguageAccessor lang, ISegmentResolver routeResolver, PostHogService posthog, IConfiguration config, IPlanAccessService access)
     {
         _db = db;
         _logger = logger;
@@ -30,6 +32,7 @@ public class PlansController : ControllerBase
         _routeResolver = routeResolver;
         _posthog = posthog;
         _config = config;
+        _access = access;
     }
 
     [HttpPost]
@@ -147,6 +150,18 @@ public class PlansController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> GetPlan(Guid id, CancellationToken ct)
     {
+        Guid? userId = await User.GetUserIdAsync(_db, ct);
+
+        // Autorizacion centralizada (S0). Un GET anonimo por GUID solo resuelve visibility='public'
+        // (owner/colaborador tambien pueden ver); 'unlisted' NO se resuelve por este camino.
+        var access = await _access.GetAccessAsync(id, userId, ct);
+        if (!access.CanView)
+        {
+            if (access.PlanExists)
+                _logger.LogWarning("User {UserId} attempted to access non-viewable plan {PlanId}", userId, id);
+            return NotFound(new { error = "Plan not found" });
+        }
+
         var plan = await _db.Plans.AsNoTracking()
             .Include(p => p.Stops)
             .ThenInclude(s => s.Place)
@@ -154,14 +169,6 @@ public class PlansController : ControllerBase
 
         if (plan == null)
             return NotFound(new { error = "Plan not found" });
-
-        Guid? userId = await User.GetUserIdAsync(_db, ct);
-
-        if (!plan.IsPublic && plan.CreatedById != userId)
-        {
-            _logger.LogWarning("User {UserId} attempted to access private plan {PlanId}", userId, id);
-            return NotFound(new { error = "Plan not found" });
-        }
 
         if (userId.HasValue)
         {

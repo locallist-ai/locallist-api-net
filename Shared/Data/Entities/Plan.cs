@@ -58,8 +58,70 @@ public class Plan
     [Column("trip_context", TypeName = "jsonb")]
     public JsonDocument? TripContext { get; set; }
 
+    // ── Visibilidad social (S0). `visibility` es la fuente de verdad para la autorizacion
+    // (PlanAccessService la consume). `is_public` se mantiene sincronizada 1-2 releases porque
+    // el DTO publico expone `isPublic` y la app vieja lo consume. Sincronizacion bidireccional a
+    // nivel de setter: cualquier codigo legado que escriba IsPublic obtiene una Visibility
+    // coherente, y el codigo nuevo (S1+) que escriba Visibility mantiene IsPublic coherente. Cada
+    // setter solo toca el campo del OTRO lado de forma condicional, de modo que la materializacion
+    // EF (que fija ambas columnas desde la fila, en orden no garantizado) converge al mismo estado
+    // siempre que la fila sea coherente en BD (garantizado por el backfill de la migracion y por
+    // estos setters). No usar backing field unico: perderia 'unlisted' segun el orden de set.
+    private string _visibility = "public";
+    private bool _isPublic = true;
+
+    /// <summary>'private' | 'unlisted' | 'public'. Fuente de verdad de la autorizacion.</summary>
+    [Column("visibility")]
+    [StringLength(10)]
+    [Required]
+    public string Visibility
+    {
+        get => _visibility;
+        set
+        {
+            _visibility = value;
+            _isPublic = value == "public";
+        }
+    }
+
+    /// <summary>Legacy mirror de <see cref="Visibility"/>. Mantener sincronizada (ver nota arriba).</summary>
     [Column("is_public")]
-    public bool IsPublic { get; set; } = true;
+    public bool IsPublic
+    {
+        get => _isPublic;
+        set
+        {
+            _isPublic = value;
+            if (value) _visibility = "public";
+            else if (_visibility == "public") _visibility = "private";
+            // value==false y visibility ya no-publica ('unlisted'/'private'): se preserva.
+        }
+    }
+
+    /// <summary>base62 corto (<=16), generado al primer share. NULL = plan nunca compartido.</summary>
+    [Column("share_token")]
+    [StringLength(16)]
+    public string? ShareToken { get; set; }
+
+    /// <summary>Concurrencia optimista para co-edicion (S1+). Se incrementa en cada mutacion de stops.</summary>
+    [Column("revision")]
+    public int Revision { get; set; } = 0;
+
+    /// <summary>Contador denormalizado de likes. Se mantiene EN LA MISMA TRANSACCION (single-replica).</summary>
+    [Column("likes_count")]
+    public int LikesCount { get; set; } = 0;
+
+    /// <summary>Cuando el plan paso a 'public' (ordena el feed). NULL si nunca publicado.</summary>
+    [Column("published_at")]
+    public DateTimeOffset? PublishedAt { get; set; }
+
+    /// <summary>Origen del clone del share-link (S1). FK plans SET NULL.</summary>
+    [Column("cloned_from")]
+    public Guid? ClonedFrom { get; set; }
+
+    /// <summary>El admin fuerza private y el owner no puede re-publicar mientras este true.</summary>
+    [Column("moderation_locked")]
+    public bool ModerationLocked { get; set; } = false;
 
     [Column("is_showcase")]
     public bool IsShowcase { get; set; } = false;

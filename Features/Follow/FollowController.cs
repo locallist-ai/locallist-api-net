@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Features.Plans;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -21,14 +22,16 @@ public class FollowController : ControllerBase
     private readonly ILogger<FollowController> _logger;
     private readonly PostHogService _posthog;
     private readonly IConfiguration _config;
+    private readonly IPlanAccessService _access;
 
-    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog, IConfiguration config)
+    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog, IConfiguration config, IPlanAccessService access)
     {
         _db = db;
         _clock = clock;
         _logger = logger;
         _posthog = posthog;
         _config = config;
+        _access = access;
     }
 
     /// <summary>Creates a new follow session (state: active). Rejects if user already has an active session. Requires auth.</summary>
@@ -38,16 +41,13 @@ public class FollowController : ControllerBase
         var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
 
-        // IDOR guard: only public (curated) plans or the caller's own plans may be followed.
-        // Without this, a user with the GUID of someone else's private plan could start a
-        // session and read its itinerary via GetActiveSession. Same 404 pattern as
-        // PlansController.GetPlan so existence of private plans is not leaked.
-        var plan = await _db.Plans.AsNoTracking()
-            .Where(p => p.Id == request.PlanId)
-            .Select(p => new { p.IsPublic, p.CreatedById })
-            .FirstOrDefaultAsync(ct);
-
-        if (plan == null || (!plan.IsPublic && plan.CreatedById != userId))
+        // IDOR guard (#116): solo planes que el caller puede VER (publicos, propios o compartidos
+        // como colaborador) pueden seguirse. Sin esto, un user con el GUID de un plan privado ajeno
+        // podia iniciar sesion y leer su itinerario via GetActiveSession. La autorizacion vive ahora
+        // en IPlanAccessService (mismo 404 no-filtrante que PlansController.GetPlan). CanView es
+        // false tanto si el plan no existe como si no es accesible: un unico check cierra el IDOR.
+        var access = await _access.GetAccessAsync(request.PlanId, userId, ct);
+        if (!access.CanView)
         {
             _logger.LogWarning("User {UserId} attempted to follow inaccessible plan {PlanId}", userId, request.PlanId);
             return NotFound(new { error = "Plan not found" });
