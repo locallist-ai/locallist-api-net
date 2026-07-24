@@ -320,18 +320,42 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// <summary>
     /// Creates a Firebase-style RS256 JWT for testing.
     /// </summary>
-    public string CreateToken(string firebaseUid, string email = "test@test.com")
+    /// <param name="emailVerified">
+    /// <c>true</c>/<c>false</c> emits the <c>email_verified</c> claim with that value (default
+    /// <c>true</c>, matching prior behavior). <c>null</c> OMITS the claim entirely, mirroring a
+    /// malformed/legacy Firebase token that never sets it -- used to prove
+    /// <see cref="LocalList.API.NET.Shared.Auth.AdminClaimsExtensions.IsAdminCaller"/> fails closed
+    /// (not open) when the claim is simply absent.
+    /// </param>
+    /// <param name="emailVerifiedAsJsonBoolean">
+    /// When true and <paramref name="emailVerified"/> has a value, emits the claim with
+    /// <see cref="ClaimValueTypes.Boolean"/> so the JWT payload carries a real JSON boolean
+    /// (<c>true</c>/<c>false</c>) instead of a quoted string -- matching the actual wire format
+    /// Firebase ID tokens use.
+    /// </param>
+    public string CreateToken(
+        string firebaseUid,
+        string email = "test@test.com",
+        bool? emailVerified = true,
+        bool emailVerifiedAsJsonBoolean = false)
     {
         var key = new RsaSecurityKey(_testRsa);
         var credentials = new SigningCredentials(key, SecurityAlgorithms.RsaSha256);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(JwtRegisteredClaimNames.Sub, firebaseUid),
             new Claim(JwtRegisteredClaimNames.Email, email),
-            new Claim("email_verified", "true"),
-            new Claim("user_id", firebaseUid)
         };
+
+        if (emailVerified.HasValue)
+        {
+            var value = emailVerified.Value ? "true" : "false";
+            var valueType = emailVerifiedAsJsonBoolean ? ClaimValueTypes.Boolean : ClaimValueTypes.String;
+            claims.Add(new Claim("email_verified", value, valueType));
+        }
+
+        claims.Add(new Claim("user_id", firebaseUid));
 
         var tokenDescriptor = new SecurityTokenDescriptor
         {

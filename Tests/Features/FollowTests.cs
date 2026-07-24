@@ -163,6 +163,53 @@ public class FollowTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // ── SEGURIDAD (audit 2026-07-24): IDOR en StartSession. Un user con el GUID de un plan
+    // PRIVADO ajeno podia iniciar follow y leer su itinerario via GetActiveSession. StartSession
+    // debe rechazar (404) planes privados que no son del caller, igual que PlansController.GetPlan. ──
+    [Fact]
+    public async Task Start_OtherUsersPrivatePlan_Returns404_AndCreatesNoSession()
+    {
+        var ownerId = Guid.NewGuid();
+        var attackerId = Guid.NewGuid();
+        var attackerFbUid = $"fb-idor-{attackerId:N}";
+        var planId = Guid.NewGuid();
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = ownerId, Email = $"owner-{ownerId:N}@test.com", FirebaseUid = $"fb-owner-{ownerId:N}" });
+        db.Users.Add(new User { Id = attackerId, Email = $"attacker-{attackerId:N}@test.com", FirebaseUid = attackerFbUid });
+        db.Plans.Add(new Plan { Id = planId, Name = "Private Plan", City = "Miami", Type = "personal", IsPublic = false, CreatedById = ownerId });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(attackerId, attackerFbUid);
+        var response = await client.PostAsJsonAsync("/follow/start", new { planId });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        var verifyDb = fixture.GetDbContext();
+        var sessionExists = verifyDb.FollowSessions.Any(fs => fs.UserId == attackerId);
+        Assert.False(sessionExists);
+    }
+
+    [Fact]
+    public async Task Start_OwnPrivatePlan_CreatesSession()
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-ownpriv-{userId:N}";
+        var planId = Guid.NewGuid();
+
+        var db = fixture.GetDbContext();
+        db.Users.Add(new User { Id = userId, Email = $"ownpriv-{userId:N}@test.com", FirebaseUid = firebaseUid });
+        db.Plans.Add(new Plan { Id = planId, Name = "My Private Plan", City = "Miami", Type = "personal", IsPublic = false, CreatedById = userId });
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateAuthenticatedClient(userId, firebaseUid);
+        var response = await client.PostAsJsonAsync("/follow/start", new { planId });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("active", body.GetProperty("status").GetString());
+    }
+
     private async Task<(Guid userId, string firebaseUid, Guid planId)> SeedUserAndPlan()
     {
         var userId = Guid.NewGuid();
