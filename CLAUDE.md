@@ -11,7 +11,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Cadena de extracción (chat slot-filling + builder preferences) en `gemini-3.1-flash-lite` (primer provider de `Llm:Providers`). Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. Traducciones/descripciones/embeddings siguen su path Gemini propio (fuera de la cadena). |
-| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** (desde F4 exigen `[Authorize]`: el bucket anon solo acota spam pre-401, nunca llega a Gemini) techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. Photos 60/min por IP (`PhotoLimit`, `GooglePlaces__PhotoRateLimitPerMinute`). `UseRateLimiter` va después de `UseAuthentication`. |
+| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** (desde F4 exigen `[Authorize]`: el bucket anon solo acota spam pre-401, nunca llega a Gemini) techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. CityRequest 5/60s por IP (`CityRequestLimit`). Admin 60/min. Photos 60/min por IP (`PhotoLimit`, `GooglePlaces__PhotoRateLimitPerMinute`). `UseRateLimiter` va después de `UseAuthentication`. |
 
 ## Running Locally
 
@@ -149,6 +149,7 @@ LocalList.API.NET/
 │   │       └── ChatSecLogger.cs            # Log estructurado de eventos de seguridad
 │   ├── Cities/
 │   │   ├── CitiesController.cs         # GET /cities/search, GET /cities/live, POST /cities
+│   │   ├── CityRequestsController.cs   # POST /cities/request (anonymous; feedback "¿No ves tu ciudad?" → city_requests, texto inerte validado por dominio + dedup 24h)
 │   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
 │   ├── Follow/
@@ -238,6 +239,7 @@ LocalList.API.NET/
     │       ├── FollowSession.cs
     │       ├── WaitlistEntry.cs
     │       ├── City.cs
+    │       ├── CityRequest.cs           # Petición de cobertura (feedback selector). Texto INERTE (máx 100, validado por dominio). user_id FK SET NULL (invitado + sobrevive borrado). normalized_city agrupa variantes
     │       ├── Subcategory.cs
     │       ├── ChatSession.cs           # Sesión de chat slot-filling
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
@@ -309,7 +311,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
 | Builder | `POST /builder/chat` (auth requerida desde F4; gates del catálogo Plus) |
 | Chat | `POST /chat/turn` (anonymous), `POST /chat/generate` (auth requerida desde F4; gates del catálogo Plus), `DELETE /chat/session/:id` |
-| Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
+| Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities`, `POST /cities/request` (anonymous; feedback "¿No ves tu ciudad?", `CityRequestLimit`) |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Places | `GET /places/`, `GET /places/:id`, `GET /places/:id/photos/:index` (anonymous; 302 al CDN de Google, key server-side, `PhotoLimit`) |
 | Plans | `GET /plans/`, `GET /plans/mine`, `GET /plans/:id`, `POST /plans` (crea plan de usuario; gate del cupo de guardados free = 5), `PUT /plans/:id/stops` (reemplazo atómico de stops, día ≤14), `DELETE /plans/:id` |
