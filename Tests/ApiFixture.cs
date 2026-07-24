@@ -314,6 +314,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("CityCreateLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("CityRequestLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("ChatTurnLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("RevenueCatWebhookLimit", context =>

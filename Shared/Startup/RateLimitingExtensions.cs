@@ -132,6 +132,20 @@ public static class RateLimitingExtensions
                         Window = TimeSpan.FromSeconds(60)
                     }));
 
+            // CityRequestLimit (anonymous): POST /cities/request escribe feedback de
+            // cliente ("¿No ves tu ciudad?"). Mismo perfil que Waitlist: 5/60s por IP,
+            // fixed window. El dedup 24h del controller es la 2ª capa anti-spam.
+            options.AddPolicy("CityRequestLimit", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        AutoReplenishment = true,
+                        PermitLimit = 5,
+                        QueueLimit = 0,
+                        Window = TimeSpan.FromSeconds(60)
+                    }));
+
             // Admin endpoints: generous limit for internal tooling (bulk imports)
             options.AddPolicy("AdminLimit", context =>
                 RateLimitPartition.GetFixedWindowLimiter(

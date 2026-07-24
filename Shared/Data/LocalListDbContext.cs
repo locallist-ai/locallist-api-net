@@ -24,6 +24,7 @@ public class LocalListDbContext : DbContext
     public DbSet<Subcategory> Subcategories { get; set; } = null!;
     public DbSet<BillingEvent> BillingEvents { get; set; } = null!;
     public DbSet<UsageCounter> UsageCounters { get; set; } = null!;
+    public DbSet<CityRequest> CityRequests { get; set; } = null!;
 
     // ── Social foundation (S0) ──
     public DbSet<UserPublicProfile> UserPublicProfiles { get; set; } = null!;
@@ -135,6 +136,18 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<FollowSession>().HasIndex(fs => new { fs.UserId, fs.Status });
 
         modelBuilder.Entity<WaitlistEntry>().HasIndex(w => w.Email).IsUnique();
+
+        // City requests (feedback "¿No ves tu ciudad?"). user_id FK SET NULL — el
+        // peticionario puede ser invitado y la petición sobrevive al borrado de cuenta.
+        modelBuilder.Entity<CityRequest>()
+            .HasOne(cr => cr.User)
+            .WithMany()
+            .HasForeignKey(cr => cr.UserId)
+            .OnDelete(DeleteBehavior.SetNull);
+        // Índice no-único para agregar "top ciudades pedidas".
+        modelBuilder.Entity<CityRequest>().HasIndex(cr => cr.NormalizedCity);
+        // Índice por created_at para la ventana de dedup 24h y ordenación temporal.
+        modelBuilder.Entity<CityRequest>().HasIndex(cr => cr.CreatedAt);
 
         modelBuilder.Entity<RefreshToken>()
             .HasOne(rt => rt.User)
