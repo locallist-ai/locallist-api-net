@@ -28,12 +28,11 @@ public partial class ChatAgentService
 
         if (error == null)
         {
-            if (ready && !AreAllTier2Filled(slots) && quickReplies.Count == 0)
-            {
-                (aiMessage, quickReplies) = BuildTier2Question(slots, lang);
-                ready = false;
-            }
-            else if (ready && quickReplies.Count == 0)
+            // Regla de producto (directness > más preguntas): en cuanto los slots CRÍTICOS
+            // están cubiertos vamos DIRECTO al plan. NO se fuerza una tanda de refinamiento
+            // (ritmo/vibes) — esos slots se siguen extrayendo de forma OPORTUNISTA si el
+            // usuario los menciona, pero nunca se preguntan por iniciativa propia.
+            if (ready && quickReplies.Count == 0)
             {
                 aiMessage ??= ChatStrings.ReadyToBuild(lang);
             }

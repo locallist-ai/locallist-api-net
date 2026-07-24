@@ -40,7 +40,9 @@ public class ChatSlots
     public List<string> Categories { get; set; } = new();
     public string? Budget { get; set; }         // budget | moderate | premium
     public string? Pace { get; set; }           // slow | normal | fast
-    public List<string> Dietary { get; set; } = new();
+    // Nota: en v1 el chat NO captura restricciones alimentarias/alergias (dietary).
+    // El TIPO de cocina que quiere el usuario (tapas, marisco, italiano...) vive en
+    // Categories (taxonomía de intereses), no aquí.
     public List<string> Exclusions { get; set; } = new();
     public string? VibesPrimary { get; set; }
     // Tier 3 — bonus only

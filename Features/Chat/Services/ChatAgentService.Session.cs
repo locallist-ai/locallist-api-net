@@ -95,11 +95,9 @@ public partial class ChatAgentService
             slots.GroupType = profile.DefaultGroupType;
             anyPrefilled = true;
         }
-        if (profile.DietaryRestrictions.Count > 0)
-        {
-            slots.Dietary = new List<string>(profile.DietaryRestrictions);
-            anyPrefilled = true;
-        }
+        // v1: el chat NO captura restricciones alimentarias, así que tampoco las
+        // pre-rellena desde el perfil (profile.DietaryRestrictions sigue vivo para
+        // el resto de la app, pero no entra en el slot-filling del chat).
         if (!string.IsNullOrWhiteSpace(profile.PacePreference))
         {
             slots.Pace = profile.PacePreference;

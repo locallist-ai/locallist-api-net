@@ -51,14 +51,16 @@ public partial class ChatAgentService
         Budget = slots.Budget,
         Categories = slots.Categories.Count > 0 ? slots.Categories : null,
         Pace = slots.Pace,
-        Dietary = slots.Dietary.Count > 0 ? slots.Dietary : null,
+        // v1: el chat no captura restricciones alimentarias → TripContext.Dietary
+        // se deja sin poblar por esta vía (el campo sigue existiendo para el Builder).
         Exclusions = slots.Exclusions.Count > 0 ? slots.Exclusions : null,
         VibesPrimary = slots.VibesPrimary,
     };
 
     /// <summary>
     /// Builds a natural-language summary of filled slots to pass as the "message"
-    /// to ExtractPreferencesAsync, so Gemini picks up dietary/pace/exclusions/vibes.
+    /// to ExtractPreferencesAsync, so Gemini picks up pace/exclusions/vibes.
+    /// (v1: dietary no forma parte del chat, así que no aparece en el resumen.)
     /// </summary>
     public static string BuildSummaryMessage(ChatSlots slots)
     {
@@ -73,8 +75,6 @@ public partial class ChatAgentService
             parts.Add($"interests: {string.Join(", ", slots.Categories)}");
         if (!string.IsNullOrEmpty(slots.VibesPrimary))
             parts.Add($"vibe: {slots.VibesPrimary}");
-        if (slots.Dietary.Count > 0 && !slots.Dietary.Contains("none", StringComparer.OrdinalIgnoreCase))
-            parts.Add($"dietary: {string.Join(", ", slots.Dietary)}");
         if (!string.IsNullOrEmpty(slots.Pace))
             parts.Add($"pace: {slots.Pace}");
         if (slots.Exclusions.Count > 0)
