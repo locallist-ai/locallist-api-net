@@ -27,9 +27,6 @@ public class SlotExtractorService
     private static readonly string[] AllowedPaces =
         { "slow", "normal", "fast" };
 
-    private static readonly string[] AllowedDietary =
-        { "vegetarian", "vegan", "halal", "kosher", "gluten-free", "none" };
-
 
     public SlotExtractorService(ILlmClient llm, ILogger<SlotExtractorService> logger)
     {
@@ -119,7 +116,6 @@ Extract into this schema (ONLY fill slots the user actually mentioned; never inv
     ""categories"": array of [{string.Join(", ", AllowedCategories.Select(c => $"\"{c}\""))}],
     ""budget"": one of [""budget"", ""moderate"", ""premium""] | null,
     ""pace"": one of [""slow"", ""normal"", ""fast""] | null,
-    ""dietary"": array of [{string.Join(", ", AllowedDietary.Select(d => $"\"{d}\""))}],
     ""exclusions"": string[] (category names or descriptors to avoid),
     ""vibesPrimary"": one of [""romantic"", ""adventurous"", ""relaxed"", ""cultural"", ""foodie"", ""hidden_gems"", ""party"", ""family""] | null,
     ""accommodationArea"": string | null,
@@ -135,7 +131,13 @@ Rules:
 - NEVER fill a slot the user did not mention.
 - If user contradicts a known slot, fill it AND prefix aiMessage with a short acknowledgement in the chosen language (e.g. ""Cambiado a X."" in Spanish or ""Switched to X."" in English).
 - NEVER re-ask a slot that is already filled.
-- If all critical slots are filled (city, days, groupType, categories, budget), set nextQuestion=null.
+- The CRITICAL slots are ONLY: city, days, groupType, categories, budget. Your nextQuestion and
+  aiMessage may ONLY ask for a critical slot that is still MISSING.
+- NEVER proactively ask about dietary restrictions, allergies, pace, or vibe/mood. Do not bring
+  them up on your own initiative — they are not collected in this flow.
+- As soon as all critical slots are filled (city, days, groupType, categories, budget), set
+  nextQuestion=null and make aiMessage a short invitation to build the plan (do NOT keep asking
+  further questions of any kind).
 - quickReplies: 0-4 chips, each id must encode the slot and value (e.g. ""budget_moderate"").
 - If the message is empty or gibberish, set extracted={{}}, aiMessage=<a short question asking where they are headed, in the chosen language>, nextQuestion=""city"".
 - aiMessage MUST NOT contain URLs, markdown links, code blocks, HTML tags, or references to other AI systems.";
@@ -235,12 +237,6 @@ Rules:
             var p = paceEl.GetString()?.ToLowerInvariant();
             if (p != null && AllowedPaces.Contains(p)) s.Pace = p;
         }
-
-        if (el.TryGetProperty("dietary", out var dietEl) && dietEl.ValueKind == JsonValueKind.Array)
-            s.Dietary = dietEl.EnumerateArray()
-                .Select(d => d.GetString()?.ToLowerInvariant())
-                .Where(d => d != null && AllowedDietary.Contains(d))
-                .Cast<string>().ToList();
 
         if (el.TryGetProperty("exclusions", out var exclEl) && exclEl.ValueKind == JsonValueKind.Array)
             s.Exclusions = exclEl.EnumerateArray()

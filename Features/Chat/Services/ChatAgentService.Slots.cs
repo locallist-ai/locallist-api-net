@@ -3,8 +3,8 @@ using LocalList.API.NET.Features.Chat.I18n;
 namespace LocalList.API.NET.Features.Chat.Services;
 
 // Slot merge/completeness logic and next-question routing for ChatAgentService: contradiction-
-// aware MergeSlots, critical-slot accounting, tier-2 gating and the slot → question/quick-reply
-// lookups. Logic is identical to the original single-file version; only its location changed.
+// aware MergeSlots, critical-slot accounting and the slot → question/quick-reply lookups.
+// Once the critical slots are filled the flow goes straight to ready (no refinement round).
 public partial class ChatAgentService
 {
     /// <summary>Merges new slot values into current slots. Returns true if any slot was contradicted.</summary>
@@ -45,7 +45,6 @@ public partial class ChatAgentService
             current.Budget = incoming.Budget;
         }
         if (incoming.Pace != null) current.Pace = incoming.Pace;
-        if (incoming.Dietary.Count > 0) current.Dietary = incoming.Dietary;
         if (incoming.Exclusions.Count > 0)
         {
             foreach (var ex in incoming.Exclusions)
@@ -81,12 +80,6 @@ public partial class ChatAgentService
         if (!string.IsNullOrWhiteSpace(slots.Budget)) count++;
         return count;
     }
-
-    private static bool AreAllTier2Filled(ChatSlots slots)
-        => slots.Pace != null && slots.Dietary.Count > 0 && slots.VibesPrimary != null;
-
-    private static (string aiMessage, List<ChatQuickReply> chips) BuildTier2Question(ChatSlots slots, string lang)
-        => (ChatStrings.Tier2Question(lang), ChatStrings.Tier2Chips(lang));
 
     private static string? MostUrgentMissing(ChatSlots slots)
     {
