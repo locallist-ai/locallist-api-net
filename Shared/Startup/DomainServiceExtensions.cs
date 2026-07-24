@@ -60,6 +60,15 @@ public static class DomainServiceExtensions
         services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
         services.AddHttpClient<IGooglePlacesService, GooglePlacesService>(c => c.Timeout = TimeSpan.FromSeconds(15))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+
+        // Photo proxy (runtime-only, ToS-compliant): Place Details (FieldMask=photos, gratis)
+        // + /media (skipHttpRedirect, key en header) → photoUri efímero. El breaker de
+        // presupuesto diario es singleton (estado global in-process, ver Scaling invariants).
+        services.AddSingleton<LocalList.API.NET.Features.Places.Photos.PhotoBudgetCounter>();
+        services.AddHttpClient<LocalList.API.NET.Features.Places.Photos.IPlacePhotoService,
+                               LocalList.API.NET.Features.Places.Photos.PlacePhotoService>(
+            c => c.Timeout = TimeSpan.FromSeconds(10))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         services.AddScoped<RouteResolver>();
         services.AddScoped<PlaceImportService>();
         services.AddScoped<ISegmentResolver>(sp => sp.GetRequiredService<RouteResolver>());

@@ -11,7 +11,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Cadena de extracción (chat slot-filling + builder preferences) en `gemini-3.1-flash-lite` (primer provider de `Llm:Providers`). Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. Traducciones/descripciones/embeddings siguen su path Gemini propio (fuera de la cadena). |
-| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. `UseRateLimiter` va después de `UseAuthentication`. |
+| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. Photos 60/min por IP (`PhotoLimit`, `GooglePlaces__PhotoRateLimitPerMinute`). `UseRateLimiter` va después de `UseAuthentication`. |
 
 ## Running Locally
 
@@ -47,6 +47,7 @@ Required User Secrets / Environment Variables:
 
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
+- `GooglePlaces__PhotoApiKey` — opcional. Key SEPARADA para el proxy de fotos (`GET /places/:id/photos/:index`). Si falta, cae en fallback a `GooglePlaces__ApiKey`; si NINGUNA está, el endpoint degrada a 404. `GooglePlaces__PhotoDailyBudgetCap` (default 10000) = techo diario in-process de llamadas `/media` de pago.
 
 **Routing (Mapbox)**
 - `Mapbox__AccessToken` — opcional. Si no está, routing se deshabilita gracefully (stops sin `travelFromPrevious`).
@@ -134,7 +135,11 @@ LocalList.API.NET/
 │   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Places/
-│   │   └── PlacesController.cs         # GET /places, GET /places/:id
+│   │   ├── PlacesController.cs         # GET /places, GET /places/:id
+│   │   └── Photos/                     # Proxy de fotos de Google (runtime-only, ToS-compliant)
+│   │       ├── PlacePhotosController.cs  # GET /places/:id/photos/:index (302 al photoUri, key server-side)
+│   │       ├── PlacePhotoService.cs      # Place Details (FieldMask=photos, gratis) + /media (key en header) → photoUri
+│   │       └── PhotoBudgetCounter.cs     # Circuit breaker de presupuesto diario (in-process, reset UTC)
 │   ├── Plans/
 │   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
 │   │   ├── PlanDtos.cs
@@ -245,6 +250,7 @@ Railway despliega **una sola réplica** de esta API. Escalar a 2+ réplicas romp
 | `IMemoryCache` (JWKS cache, etc.) | In-process | Cada réplica llena su propia caché — no hay coherencia |
 | `SemaphoreSlim(4)` en `RouteResolver.FetchAndPersistAsync` | Per-call (variable local) | El semáforo no coordina entre réplicas; posibles ráfagas Mapbox |
 | `SemaphoreSlim(4)` en `SchedulingService.PrefetchDaySegmentsAsync` | Per-call (variable local) | Ídem |
+| `PhotoBudgetCounter` (breaker de presupuesto diario del proxy de fotos, `GooglePlaces:PhotoDailyBudgetCap`) | Contador in-process con reset por día UTC | Cada réplica cuenta su propio presupuesto → el cap efectivo de llamadas `/media` de pago se multiplica por el número de réplicas |
 
 Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStackExchangeRedisRateLimiting`) y reemplazar `IMemoryCache` por `IDistributedCache`.
 
@@ -259,7 +265,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Chat | `POST /chat/turn`, `POST /chat/generate`, `DELETE /chat/session/:id` |
 | Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
-| Places | `GET /places/`, `GET /places/:id` |
+| Places | `GET /places/`, `GET /places/:id`, `GET /places/:id/photos/:index` (anonymous; 302 al CDN de Google, key server-side, `PhotoLimit`) |
 | Plans | `GET /plans/`, `GET /plans/:id`, `DELETE /plans/:id` |
 | Profile | `GET /me/profile`, `DELETE /me/profile` |
 | Taxonomy | `GET /taxonomy` |
