@@ -39,7 +39,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             maxStopsPerDay = 4
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -54,7 +54,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
     [Fact]
     public async Task Generate_SessionNotFound_Returns404()
     {
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = Guid.NewGuid() });
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -76,7 +76,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         db.ChatSessions.Add(session);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 
@@ -97,7 +97,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         db.ChatSessions.Add(session);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 
@@ -172,7 +172,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             maxStopsPerDay = 3
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
@@ -241,6 +241,11 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
     {
         var db = fixture.GetDbContext();
 
+        // /chat/generate exige [Authorize] (F4): usuario autenticado dueño de la sesion.
+        var userId = Guid.NewGuid();
+        var email = $"replay-leak-{Guid.NewGuid():N}@test.com";
+        db.Users.Add(new User { Id = userId, Email = email });
+
         var place = new Place
         {
             Id = Guid.NewGuid(),
@@ -259,6 +264,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             City = Miami,
             Type = "ai",
             DurationDays = 1,
+            CreatedById = userId,
         };
         db.Places.Add(place);
         db.Plans.Add(plan);
@@ -272,9 +278,10 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             TimeBlock = "morning",
         });
 
-        // Sesion anonima ya "generated" → dispara el path idempotente (sin llamar a Gemini).
+        // Sesion del usuario ya "generated" → dispara el path idempotente (sin llamar a Gemini).
         var session = new ChatSession
         {
+            UserId = userId,
             Status = "generated",
             GeneratedPlanId = plan.Id,
             TurnCount = 3,
@@ -288,6 +295,9 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         await db.SaveChangesAsync();
 
         var client = fixture.CreateClient();
+        var token = fixture.CreateAppToken(userId, email);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
@@ -343,7 +353,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             maxStopsPerDay = 3
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);

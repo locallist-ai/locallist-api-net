@@ -65,11 +65,15 @@ public static class RateLimitingExtensions
                 burstLimiter, meteredIpCeilingLimiter);
 
             // ── BuilderLimit: refinamiento por identidad (bajo el techo por IP) ──────────
-            // /builder/chat y /chat/generate llaman a Gemini (coste real por request) y son
-            // [AllowAnonymous] a propósito — v1 se lanza GRATIS y la app permite generar plan
-            // sin cuenta (lib/api.ts solo adjunta Authorization si hay token). NO forzamos
-            // login (sería decisión de producto que rompería la UX gratuita). En su lugar,
-            // cada request pasa por DOS capas (el más restrictivo gana):
+            // /builder/chat y /chat/generate llaman a Gemini (coste real por request). Desde
+            // F4 (catálogo Plus) ambos exigen [Authorize] — sin identidad no hay contador
+            // mensual posible — así que el tráfico ANÓNIMO a estos endpoints ya nunca llega a
+            // Gemini: muere en 401 en la autorización. El bucket anónimo de esta política NO
+            // está muerto: el rate limiter corre ANTES de la autorización (después de
+            // UseAuthentication), de modo que sigue acotando el spam de requests sin token
+            // (barato, pero spam) y protege el pipeline pre-401. El funnel anónimo real vive
+            // en /chat/turn (ChatTurnLimit). Cada request pasa por DOS capas (el más
+            // restrictivo gana):
             //   (a) TECHO por IP (GlobalLimiter encadenado, `Builder:RateLimitPerHourPerIp`,
             //       default 60/h): un atacante que registra N cuentas desde 1 IP NO puede
             //       superar este techo — autenticarse ya no ESCALA la cuota, solo refina.
@@ -174,6 +178,23 @@ public static class RateLimitingExtensions
                         Window = TimeSpan.FromHours(1)
                     });
             });
+
+            // RevenueCatWebhookLimit (anonymous, F4): the billing webhook triggers an outbound
+            // RevenueCat REST lookup per fresh event. An actor with the shared secret could flood
+            // fresh rc_event_ids to make RevenueCat 429 us → legit lookups degrade to 503 and real
+            // upgrades stall (a DoS on revenue). Cap per IP, tighter than the global 100/min, on
+            // top of Kestrel's 10 MB body cap. RevenueCat delivers from a small set of IPs and
+            // retries with backoff, so 60/min/IP is ample for genuine traffic.
+            options.AddPolicy("RevenueCatWebhookLimit", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        AutoReplenishment = true,
+                        PermitLimit = 60,
+                        QueueLimit = 0,
+                        Window = TimeSpan.FromMinutes(1)
+                    }));
 
             // ── ChatTurnLimit: mismo tratamiento que BuilderLimit ────────────────────────
             // /chat/turn también llama a Gemini por turno y es [AllowAnonymous]. Pasa por el

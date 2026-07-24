@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using LocalList.API.NET.Shared.Constants;
 
 namespace LocalList.API.NET.Shared.Dtos;
 
@@ -12,16 +13,19 @@ public class TripContextDto
     /// Shared clamp ceiling used by the extraction chain (PreferenceExtractorService /
     /// SlotExtractorService) so a Plus trip of 8–14 days is no longer silently recut to 7.
     /// Raised from 7 to 14 by API-2 now that the day-aware scheduler walks the full range.
+    /// Anclado a <see cref="PlanLimits.MaxPlanDurationDays"/> (fuente única del hard cap del
+    /// catálogo, = <c>PlanGenerationGateService.PlusMaxDays</c>) para que jamás desincronice.
     /// </summary>
-    public const int MaxTripDays = 14;
+    public const int MaxTripDays = PlanLimits.MaxPlanDurationDays;
 
     [MaxLength(20)]
     public string? GroupType { get; set; }
 
-    // [Range(1, MaxTripDays)]: el wizard Plus ofrece hasta 14 días (maxDaysForTier). Antes
-    // estaba en [1,7] → un Plus con 8-14 días recibía un 400 de model-binding. El clamp a 14
-    // en PreferenceExtractorService/SlotExtractorService ya está alineado (API-2): el scheduler
-    // day-aware recorre todo el rango.
+    // [Range(1, MaxTripDays)]: hard cap global del catálogo — el wizard Plus ofrece hasta 14
+    // días (maxDaysForTier). Antes estaba en [1,7] → un Plus con 8-14 días recibía un 400 de
+    // model-binding. El gate por tier (free ≤ 3) se aplica server-side en
+    // PlanGenerationGateService, no aquí; el clamp a 14 en PreferenceExtractorService/
+    // SlotExtractorService ya está alineado (API-2): el scheduler day-aware recorre todo el rango.
     [Range(1, MaxTripDays)]
     public int? Days { get; set; }
 

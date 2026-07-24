@@ -1,10 +1,106 @@
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.Tests.Features;
 
 public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
+    // ── F2: cupo de planes guardados enforced en POST /plans (decisión Pablo 2026-07-22) ──
+    // Límite de ALMACENAMIENTO independiente del contador mensual de generación IA. Se movió
+    // aquí desde PlanGenerationGateService para que un free con 5 planes manuales no reciba
+    // 403 al GENERAR (que va contra el contador 3/mes, un límite distinto).
+
+    [Fact]
+    public async Task CreatePlan_FreeUser_UnderSavedLimit_Succeeds()
+    {
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"plans-free-under-{userId:N}@test.com");
+        await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit - 1); // 4 < 5
+
+        var res = await client.PostAsJsonAsync("/plans", new { name = "Nuevo plan", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreatePlan_FreeUser_AtSavedLimit_Returns403Structured()
+    {
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"plans-free-at-{userId:N}@test.com");
+        await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit); // 5
+
+        var res = await client.PostAsJsonAsync("/plans", new { name = "Uno más", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("saved_plans_limit_reached", body.GetProperty("error").GetString());
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit, body.GetProperty("used").GetInt32());
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit, body.GetProperty("limit").GetInt32());
+
+        // No se persistió ningún plan extra.
+        var db = fixture.GetDbContext();
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit,
+            await db.Plans.CountAsync(p => p.CreatedById == userId));
+    }
+
+    [Fact]
+    public async Task CreatePlan_FreeUser_AtLimit_DeleteFreesSlot_ThenSucceeds()
+    {
+        // m2/F5: DELETE /plans/:id libera hueco — probado de verdad (el test viejo sembraba y
+        // NUNCA borraba). Free en el tope: POST 403; tras borrar uno, POST vuelve a pasar.
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"plans-free-del-{userId:N}@test.com");
+        var seeded = await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit); // 5
+
+        var blocked = await client.PostAsJsonAsync("/plans", new { name = "Bloqueado", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+
+        var del = await client.DeleteAsync($"/plans/{seeded[0]}");
+        Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
+
+        var afterDelete = await client.PostAsJsonAsync("/plans", new { name = "Ahora sí", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Created, afterDelete.StatusCode);
+
+        var db = fixture.GetDbContext();
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit,
+            await db.Plans.CountAsync(p => p.CreatedById == userId)); // 5 - 1 + 1
+    }
+
+    [Fact]
+    public async Task CreatePlan_ProUser_OverLimit_NotGated()
+    {
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(
+            userId, $"plans-pro-{userId:N}@test.com", tier: "pro");
+        await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit + 1); // 6 > 5
+
+        var res = await client.PostAsJsonAsync("/plans", new { name = "Plus sin límite", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+    }
+
+    private async Task<List<Guid>> SeedSavedPlans(Guid userId, int count)
+    {
+        var db = fixture.GetDbContext();
+        var ids = new List<Guid>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var plan = new Plan
+            {
+                Id = Guid.NewGuid(),
+                Name = $"Saved {i}",
+                City = "Miami",
+                Type = "ai",
+                DurationDays = 1,
+                IsPublic = false,
+                CreatedById = userId,
+            };
+            db.Plans.Add(plan);
+            ids.Add(plan.Id);
+        }
+        await db.SaveChangesAsync();
+        return ids;
+    }
+
     [Fact]
     public async Task GetPlans_Anonymous_ReturnsShowcaseOnly()
     {
