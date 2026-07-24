@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 
 namespace LocalList.API.Tests.Features;
 
@@ -44,6 +45,48 @@ internal static class PhotoDtoTestData
         GooglePlaceId = googlePlaceId,
         Photos = photos,
     };
+}
+
+// ── Defensa en profundidad: [JsonIgnore] sobre Place.Photos ───────────────────────────
+//
+// Cualquier endpoint que llegue a serializar una entidad Place CRUDA (path presente o futuro)
+// NO debe emitir la key de Google guardada en Photos. JsonIgnore bloquea la serializacion pero
+// NO la lectura en C#, asi que PlaceDto.FromEntity sigue sintetizando la foto por el proxy.
+public class PlaceEntityJsonIgnorePhotosTests
+{
+    [Fact]
+    public void RawPlaceEntity_SerializedToJson_OmitsPhotos_NeverLeaksKey()
+    {
+        var place = PhotoDtoTestData.MakePlace(
+            "Raw Entity Spot",
+            googlePlaceId: "ChIJ_raw_entity",
+            photos: [PhotoDtoTestData.StoredGoogleUrlWithKey]);
+
+        var json = JsonSerializer.Serialize(place, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        // [JsonIgnore] elimina Photos de la serializacion (en cualquier casing).
+        Assert.DoesNotContain("photos", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("googleapis.com", json);
+        Assert.DoesNotContain("key=", json);
+        Assert.DoesNotContain("SUPER-SECRET-KEY", json);
+    }
+
+    [Fact]
+    public void PlaceDto_FromSamePlace_StillSynthesizesProxyPhoto()
+    {
+        // La lectura en C# no se ve afectada por [JsonIgnore]: la foto legitima sigue saliendo,
+        // sintetizada por el proxy (ruta relativa sin PublicBaseUrl).
+        var place = PhotoDtoTestData.MakePlace(
+            "Raw Entity Spot",
+            googlePlaceId: "ChIJ_raw_entity",
+            photos: [PhotoDtoTestData.StoredGoogleUrlWithKey]);
+
+        var dto = PlaceDto.FromEntity(place, "en", publicBaseUrl: null);
+
+        Assert.NotNull(dto.Photos);
+        Assert.Equal(new[] { $"/places/{place.Id}/photos/0" }, dto.Photos);
+        Assert.Equal("google", dto.PhotoSource);
+    }
 }
 
 // ── Con Api:PublicBaseUrl configurada -> URL absoluta ─────────────────────────────────
