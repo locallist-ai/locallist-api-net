@@ -22,6 +22,7 @@ public class LocalListDbContext : DbContext
     public DbSet<ChatTurn> ChatTurns { get; set; } = null!;
     public DbSet<PlanMetric> PlanMetrics { get; set; } = null!;
     public DbSet<Subcategory> Subcategories { get; set; } = null!;
+    public DbSet<VideoImportMetric> VideoImportMetrics { get; set; } = null!;
     public DbSet<BillingEvent> BillingEvents { get; set; } = null!;
     public DbSet<UsageCounter> UsageCounters { get; set; } = null!;
     public DbSet<CityRequest> CityRequests { get; set; } = null!;
@@ -264,6 +265,13 @@ public class LocalListDbContext : DbContext
             .HasIndex(s => new { s.CategoryKey, s.Key })
             .IsUnique()
             .HasFilter("deleted_at IS NULL");
+
+        // VideoImportMetric — diagnóstico standalone del import de vídeo (sin FK).
+        modelBuilder.Entity<VideoImportMetric>()
+            .HasIndex(v => v.CreatedAt);
+
+        modelBuilder.Entity<VideoImportMetric>()
+            .HasIndex(v => new { v.Platform, v.CreatedAt });
 
         // Billing — RevenueCat webhook idempotency ledger. Unique rc_event_id is the
         // dedup arbiter (a concurrent duplicate delivery loses on INSERT). The

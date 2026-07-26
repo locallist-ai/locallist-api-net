@@ -72,8 +72,11 @@ Required User Secrets / Environment Variables:
 - `GET /account` expone la cuota mensual proactiva: `aiPlansMonth:{used, limit, resetsAt}` (`limit` omitido = ilimitado para Plus). Los campos `clamped` y `aiPlansMonth` los consume el task app-side — nombres estables, documentados en `Features/Billing/README.md`.
 - Detalle y huecos (favoritos sin modelo, multi-ciudad imposible por construcción) en `Features/Billing/README.md`. `[RequirePro]` (`Shared/Auth/`) sigue disponible para gates binarios.
 
-**Fase 3 — Video import (pendiente, sin plan activo)**
-- Sin Apify. Arquitectura prevista: video file → Gemini multimodal File API directo.
+**Video import (F2 — extracción, servicio autocontenido)**
+- `Import__ApiKey` — opcional; fallback a `Gemini__ApiKey` (misma cuenta). La clave separada solo existe para aislar cuota/coste del import si conviene.
+- `Import__Model` — modelo multimodal, default `gemini-3.1-flash` (**NO** lite: el import es OCR-pesado y flash-lite pierde recall sobre texto pequeño).
+- `Import__MaxDurationSeconds` (600), `Import__MaxSizeBytes` (157286400 = 150MB), `Import__AllowedMimeTypes` (mp4/quicktime/webm), `Import__FilePollDelayMs` (1000), `Import__FilePollMaxAttempts` (60).
+- Slice `Features/Import/` (`VideoExtractionService`) + `Shared/AI/GeminiFileClient.cs`: sube el vídeo a la Gemini File API (subida resumable → poll hasta ACTIVE), extrae sitios con generateContent multimodal, **borra el fichero tras extraer** (finally con `CancellationToken.None`: minimiza retención de contenido de terceros — relevante legalmente). NO usa la cadena de fallback `Llm:Providers` (solo Gemini tiene el fichero; si falla → `ExtractionUnavailable`, retry manual). El vídeo es INPUT HOSTIL: el JSON extraído se sanea reutilizando `OutputValidator`/`OutputSanitizer` del slice Chat (cero URLs, categoría contra taxonomía, drift/canary → drop). Diagnóstico persistido en `video_import_metrics` — inventario de retención honesto: SÍ tokens/coste/latencia/metadatos técnicos **y el `city`/`country`/`language` extraídos** (contexto de mercado para decidir cobertura, mismo propósito que `city_requests`); NO bytes/file_uri/transcript/caption, NO nombres de sitios (solo el count), NO identidad del uploader. Retención indefinida como agregado diagnóstico salvo revisión legal. **NO añade endpoint** (eso es T1). Ratios de tokens de media verificados vs pricing oficial en `VideoCostEstimator` (258 tok/s vídeo + 32 tok/s audio).
 
 ## Project Structure (VSA)
 
@@ -157,6 +160,13 @@ LocalList.API.NET/
 │   ├── Follow/
 │   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
+│   ├── Import/                         # F2 — extracción de vídeo (servicio autocontenido, SIN endpoint aún)
+│   │   ├── VideoExtractionService.cs   # bytes vídeo + caption → JSON estricto de sitios (sube/extrae/borra)
+│   │   ├── VideoOutputSanitizer.cs     # Sanea el JSON hostil (reusa OutputValidator/OutputSanitizer del slice Chat)
+│   │   ├── VideoCostEstimator.cs       # Estimación de tokens de media (258/s vídeo + 32/s audio, verificado)
+│   │   ├── VideoExtractionModels.cs    # ExtractedVideoPlace, VideoExtractionResult
+│   │   ├── VideoExtractionExceptions.cs # VideoTooLong/TooLarge/UnsupportedFormat/NoPlacesFound/ExtractionUnavailable
+│   │   └── ImportOptions.cs            # Config "Import" (modelo, límites, poll)
 │   ├── Places/
 │   │   ├── PlacesController.cs         # GET /places, GET /places/:id
 │   │   └── Photos/                     # Proxy de fotos de Google (runtime-only, ToS-compliant)
@@ -198,6 +208,7 @@ LocalList.API.NET/
     │   ├── PlanAccessService.cs         # Reglas: owner→view+edit; collaborator editor→view+edit, viewer→view; visibility='public'→view (incl. anónimo); 'unlisted' NO por GUID; bloqueo↔owner niega. NO afloja ownership. Consumido por PlansController.GetPlan, PlanEditController, FollowController.StartSession (IDOR #116)
     │   └── PlanAccess.cs                # readonly record struct: PlanExists, CanView, CanEdit, IsOwner, Role
     ├── AI/
+    │   ├── GeminiFileClient.cs                 # Gemini File API (subida resumable + poll ACTIVE + delete) para el import de vídeo
     │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
     │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
     │   │   ├── FallbackLlmClient.cs            # Encadena providers; limpia fences; valida JSON
@@ -245,6 +256,7 @@ LocalList.API.NET/
     │       ├── Subcategory.cs
     │       ├── ChatSession.cs           # Sesión de chat slot-filling
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
+    │       ├── VideoImportMetric.cs     # Diagnóstico del import de vídeo (tokens/coste/resultado + city/country/language extraídos como contexto de mercado; sin FK, sin vídeo/URIs/nombres de sitios/uploader)
     │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
     │       ├── UsageCounter.cs          # Contador de uso (user, feature, period_start) — increment atómico vía UsageCounterService
     │       ├── Favorite.cs              # Favorito de sitio (user_id, place_id) PK compuesta = índice único (idempotencia vía 23505); ambos FK CASCADE (GDPR + borrado de place); índice (user_id, created_at DESC) para el listado

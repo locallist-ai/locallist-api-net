@@ -13,6 +13,7 @@ public static class LlmCostCalculator
     {
         ["gemini-2.5-flash"]      = (0.30m, 2.50m),
         ["gemini-3.5-flash"]      = (1.50m, 9.00m),
+        ["gemini-3.1-flash"]      = (0.25m, 1.50m),
         ["gemini-3.1-flash-lite"] = (0.25m, 1.50m),
         ["gpt-5.4-nano"]          = (0.20m, 1.25m),
         ["mistral-small-latest"]  = (0.10m, 0.30m),
