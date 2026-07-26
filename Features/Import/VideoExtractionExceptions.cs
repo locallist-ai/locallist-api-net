@@ -46,10 +46,22 @@ public sealed class NoPlacesFoundException()
 /// <summary>
 /// Fallo de infraestructura: key ausente, File API caída, generateContent no-2xx,
 /// respuesta truncada/filtrada, o JSON irrecuperable. El usuario reintenta manualmente.
+///
+/// <see cref="Billed"/> distingue si Gemini YA FACTURÓ la llamada multimodal cuando ocurrió el
+/// fallo: <c>truncated</c> (MAX_TOKENS), <c>content_filtered_*</c> (SAFETY y afines) e
+/// <c>invalid_json</c> llegan DESPUÉS de un 2xx de generateContent — los ~150k tokens de input
+/// del vídeo se cobraron aunque el resultado sea inservible. El endpoint (T1) usa este flag
+/// para decidir si la cuota del usuario se mantiene consumida (billed) o se reembolsa (fallo
+/// pre-facturación: upload, poll, duration_unknown, HTTP no-2xx de generate). Sin el flag, un
+/// atacante dispararía llamadas caras a voluntad (el CONTENIDO del vídeo controla MAX_TOKENS/
+/// SAFETY/JSON roto) con cuota siempre reembolsada.
 /// </summary>
-public sealed class ExtractionUnavailableException(string reason)
+public sealed class ExtractionUnavailableException(string reason, bool billed = false)
     : VideoExtractionException($"Video extraction is unavailable: {reason}")
 {
     public override string Code => "extraction_unavailable";
     public string Reason { get; } = reason;
+
+    /// <summary>true si generateContent devolvió 2xx antes del fallo (Gemini cobró los tokens).</summary>
+    public bool Billed { get; } = billed;
 }

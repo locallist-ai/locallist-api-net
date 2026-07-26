@@ -150,7 +150,9 @@ public sealed class VideoExtractionService
                 _logger.LogError(ex, "Video import: Gemini returned unparseable JSON");
                 PersistMetric(platform, mimeType, sizeBytes, file.DurationSec, caption, result: null,
                     diag: diag, errorCode: "invalid_json", errorMessage: ex.Message);
-                throw new ExtractionUnavailableException("invalid_json");
+                // generateContent devolvió 2xx (hay diag): la llamada se facturó aunque el JSON
+                // sea irrecuperable — billed:true para que el endpoint no reembolse la cuota.
+                throw new ExtractionUnavailableException("invalid_json", billed: true);
             }
 
             var result = new VideoExtractionResult(
@@ -265,10 +267,13 @@ public sealed class VideoExtractionService
             cands[0].TryGetProperty("finishReason", out var fr))
             finishReason = fr.GetString();
 
+        // A partir de aquí generateContent devolvió 2xx: los tokens del vídeo YA se facturaron.
+        // Los fallos siguientes (truncado, filtrado, JSON roto) llevan billed:true para que el
+        // endpoint NO reembolse la cuota — el contenido del vídeo puede provocarlos a voluntad.
         if (finishReason == "MAX_TOKENS")
         {
             _logger.LogWarning("Video import: response truncated (MAX_TOKENS)");
-            throw new ExtractionUnavailableException("truncated");
+            throw new ExtractionUnavailableException("truncated", billed: true);
         }
 
         string? text = null;
@@ -281,7 +286,7 @@ public sealed class VideoExtractionService
         if (string.IsNullOrEmpty(text))
         {
             _logger.LogWarning("Video import: empty parts (finishReason={Reason})", finishReason);
-            throw new ExtractionUnavailableException($"content_filtered_{finishReason}");
+            throw new ExtractionUnavailableException($"content_filtered_{finishReason}", billed: true);
         }
 
         var totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0) + (thinkingTokens ?? 0);

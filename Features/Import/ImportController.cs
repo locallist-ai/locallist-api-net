@@ -44,14 +44,19 @@ public sealed class DisableFormValueModelBindingAttribute : Attribute, IResource
 ///   1. <c>[Authorize]</c> AppScheme  → 401 anónimo.
 ///   2. Gate Plus (tier FRESCO de DB) → 403 <c>import_requires_plus</c> (import = feature del
 ///      catálogo Plus). Sin consumir cuota ni tocar Gemini.
-///   3. Validaciones baratas del multipart (mime allowlist + tamaño) → 400 estructurado ANTES
-///      de bufferizar el vídeo entero. Un 400 NO gasta cuota.
-///   4. Gating de terceros (<c>Import:ThirdPartyEnabled</c>, default false): platform ≠ self con
-///      el flag apagado → 403 <c>third_party_import_disabled</c>. Antes de consumir cuota.
+///   3. Gating de terceros (<c>Import:ThirdPartyEnabled</c>, default false): <c>platform</c>
+///      viaja en la QUERY STRING, así que este check corre SIEMPRE antes de leer el body —
+///      platform ≠ self con el flag apagado → 403 <c>third_party_import_disabled</c> sin
+///      streamear un solo byte del vídeo.
+///   4. Validaciones baratas del multipart (mime allowlist + tamaño con cap durante la copia)
+///      → 400 estructurado sin bufferizar el vídeo entero en memoria. Un 400 NO gasta cuota.
 ///   5. Cuota por usuario (30/mes + 10/día, ventanas independientes sobre <c>usage_counters</c>,
 ///      TOCTOU-safe). Agotada → 429 <c>import_limit_reached</c>.
-///   6. Extracción. Éxito o "sin sitios" (Gemini pagó) → cuota consumida; fallo de infra o vídeo
-///      no viable (sin valor) → cuota REEMBOLSADA.
+///   6. Extracción. La cuota sigue la FACTURACIÓN de Gemini: éxito, "sin sitios" y cualquier
+///      fallo post-2xx de generateContent (<c>Billed</c>: truncated/filtered/invalid_json) →
+///      cuota consumida (Gemini cobró; el contenido del vídeo puede provocar esos fallos a
+///      voluntad y reembolsarlos regalaría llamadas caras infinitas). Fallo SIN facturación
+///      (upload/poll, duration_unknown, HTTP no-2xx, límites autoritativos) → REEMBOLSO.
 ///
 /// Rate limit anti-abuso adicional: techo por IP (<c>ImportLimit</c>, 20/hr) además de la cuota
 /// por usuario — un atacante con N cuentas no escala el gasto de Gemini por encima del techo de IP.
@@ -75,8 +80,9 @@ public class ImportController : ControllerBase
     /// <summary>Feature key de la ventana diaria en <c>usage_counters</c> (periodo = día UTC).</summary>
     public const string FeatureDaily = "import_daily";
 
-    /// <summary>Máximo de bytes que aceptamos leer de un campo de texto del form (platform/creatorHandle).</summary>
-    private const int MaxTextFieldBytes = 4096;
+    /// <summary>Margen de overhead multipart (boundaries + headers de la part) sobre MaxSizeBytes
+    /// para el rechazo temprano por Content-Length.</summary>
+    private const int MultipartOverheadBytes = 16 * 1024;
 
     /// <summary>Longitud máxima de <c>creatorHandle</c> tras sanear (atribución de creador).</summary>
     private const int MaxCreatorHandleLength = 64;
@@ -107,16 +113,20 @@ public class ImportController : ControllerBase
     }
 
     /// <summary>
-    /// Import de un vídeo propio del usuario. Multipart: campo de fichero (<c>video</c>/<c>file</c>)
-    /// + campos opcionales <c>platform</c> (self|tiktok|instagram|other, default self) y
-    /// <c>creatorHandle</c>. Límite de tamaño 150 MB SOLO para este endpoint (el resto de la API
-    /// está capado a 10 MB por Kestrel); <see cref="RequestSizeLimitAttribute"/> lo sube per-endpoint.
+    /// Import de un vídeo propio del usuario. El multipart lleva SOLO el fichero; los metadatos
+    /// <c>platform</c> (self|tiktok|instagram|other, default self) y <c>creatorHandle</c> viajan
+    /// en la QUERY STRING a propósito: la query se lee ANTES del body, así el gating de terceros
+    /// corre SIEMPRE pre-body — con los metadatos dentro del form, un multipart hostil que ponga
+    /// el fichero primero forzaría streamear hasta 150 MB a disco para acabar en 403. Límite de
+    /// tamaño 150 MB SOLO para este endpoint (el resto de la API está capado a 10 MB por Kestrel);
+    /// <see cref="RequestSizeLimitAttribute"/> lo sube per-endpoint.
     /// </summary>
     [HttpPost("video")]
     [EnableRateLimiting("ImportLimit")]
     [DisableFormValueModelBinding]
     [RequestSizeLimit(157_286_400)] // 150 MB — override per-endpoint del cap global de Kestrel (10 MB)
-    public async Task<IActionResult> ImportVideo(CancellationToken ct)
+    public async Task<IActionResult> ImportVideo(
+        [FromQuery] string? platform, [FromQuery] string? creatorHandle, CancellationToken ct)
     {
         // 1. Identidad fresca (App HS256 → Guid en sub; Firebase → lookup).
         var userId = await User.GetUserIdAsync(_db, ct);
@@ -144,27 +154,37 @@ public class ImportController : ControllerBase
 
         // 3b. Rechazo temprano por Content-Length: si el cuerpo entero ya supera el límite del
         //     fichero (el vídeo domina el tamaño del multipart), cortamos ANTES de leer el body.
-        if (Request.ContentLength is { } declared && declared > _options.MaxSizeBytes + MaxTextFieldBytes * 4)
+        if (Request.ContentLength is { } declared && declared > _options.MaxSizeBytes + MultipartOverheadBytes)
             return BadRequest(new { error = "import_too_large", maxBytes = _options.MaxSizeBytes });
 
-        // 4. Parse del multipart: campos de texto + fichero a temp file (streaming, con cap).
-        var platform = "self";
-        string? creatorHandle = null;
+        // 4. Metadatos desde la QUERY STRING (leída antes del body): el gating de terceros corre
+        //    SIEMPRE pre-body — un multipart hostil no puede forzarnos a streamear 150 MB a disco
+        //    para acabar en 403 (con los metadatos dentro del form, el orden de las parts lo
+        //    decidía el cliente).
+        var normalizedPlatform = NormalizePlatform(platform);
+        var sanitizedHandle = SanitizeCreatorHandle(creatorHandle);
+        if (!IsPlatformAllowed(normalizedPlatform))
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "third_party_import_disabled" });
+
+        // 5. Parse del multipart: SOLO el fichero, streaming a temp file con cap.
         string? tempPath = null;
         string? fileMime = null;
         long fileSize = 0;
 
         try
         {
-            var reader = new MultipartReader(boundary, Request.Body);
-            MultipartSection? section;
-            while ((section = await reader.ReadNextSectionAsync(ct)) is not null)
+            try
             {
-                if (!ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var cd))
-                    continue;
-
-                if (HasFileContentDisposition(cd))
+                var reader = new MultipartReader(boundary, Request.Body);
+                MultipartSection? section;
+                while ((section = await reader.ReadNextSectionAsync(ct)) is not null)
                 {
+                    if (!ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var cd))
+                        continue;
+
+                    if (!HasFileContentDisposition(cd))
+                        continue; // campos de texto del form se ignoran (los metadatos van por query)
+
                     if (tempPath is not null)
                         continue; // ya tenemos el fichero; ignoramos ficheros extra
 
@@ -172,11 +192,6 @@ public class ImportController : ControllerBase
                     fileMime = (section.ContentType ?? string.Empty).Trim().ToLowerInvariant();
                     if (!_options.AllowedMimeTypes.Contains(fileMime))
                         return BadRequest(new { error = "import_unsupported_format", mimeType = fileMime });
-
-                    // Si ya sabemos que es un import de terceros deshabilitado (platform vino antes
-                    // del fichero), rechazamos sin escribir 150 MB a disco.
-                    if (!IsPlatformAllowed(platform))
-                        return StatusCode(StatusCodes.Status403Forbidden, new { error = "third_party_import_disabled" });
 
                     tempPath = Path.Combine(Path.GetTempPath(), $"llimport-{Guid.NewGuid():N}.tmp");
                     await using var fs = new FileStream(
@@ -186,25 +201,19 @@ public class ImportController : ControllerBase
                     if (fileSize < 0)
                         return BadRequest(new { error = "import_too_large", maxBytes = _options.MaxSizeBytes });
                 }
-                else if (HasFormFieldContentDisposition(cd, out var name))
-                {
-                    var value = await ReadTextFieldAsync(section, ct);
-                    if (string.Equals(name, "platform", StringComparison.OrdinalIgnoreCase))
-                        platform = NormalizePlatform(value);
-                    else if (string.Equals(name, "creatorHandle", StringComparison.OrdinalIgnoreCase))
-                        creatorHandle = SanitizeCreatorHandle(value);
-                }
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException)
+            {
+                // Multipart malformado/truncado (0 parts, boundary roto, body cortado): fallo del
+                // CLIENTE, no nuestro → 400 estructurado, nunca un 500 opaco.
+                _logger.LogInformation(ex, "Import: malformed multipart body");
+                return BadRequest(new { error = "import_invalid_request", message = "malformed multipart body" });
             }
 
             if (tempPath is null || fileSize <= 0)
                 return BadRequest(new { error = "import_missing_file", message = "a video file part is required" });
 
-            // 4b. Gating de terceros (si el fichero llegó antes que el campo platform, este es el
-            //     punto donde lo cazamos). Antes de consumir cuota.
-            if (!IsPlatformAllowed(platform))
-                return StatusCode(StatusCodes.Status403Forbidden, new { error = "third_party_import_disabled" });
-
-            // 5. Cuota — se consume SOLO tras pasar las validaciones baratas (mime/size/terceros).
+            // 6. Cuota — se consume SOLO tras pasar las validaciones baratas (mime/size/terceros).
             //    Dos ventanas independientes. Consumimos la diaria primero (más ajustada); si la
             //    mensual está al tope, REEMBOLSAMOS la diaria y rechazamos (no cobramos un slot por
             //    una request que no arranca). Consumir ANTES de llamar a Gemini acota el coste
@@ -222,20 +231,21 @@ public class ImportController : ControllerBase
                 return await LimitReached(userId.Value, FeatureMonthly, monthStart, MonthlyLimit, "monthly", monthStart.AddMonths(1), ct);
             }
 
-            // 6. Extracción. El servicio sube a Gemini, extrae, sanea y borra el fichero remoto.
+            // 7. Extracción. El servicio sube a Gemini, extrae, sanea y borra el fichero remoto.
             try
             {
                 await using var videoStream = new FileStream(
                     tempPath, FileMode.Open, FileAccess.Read, FileShare.None,
                     bufferSize: 81920, useAsync: true);
 
-                var result = await _extractor.ExtractAsync(videoStream, fileSize, fileMime!, platform, caption: null, ct);
+                var result = await _extractor.ExtractAsync(
+                    videoStream, fileSize, fileMime!, normalizedPlatform, caption: null, ct);
 
                 _logger.LogInformation(
                     "Import: ok user={UserId} platform={Platform} places={N} city={City}",
-                    userId, platform, result.Places.Count, result.City ?? "(null)");
+                    userId, normalizedPlatform, result.Places.Count, result.City ?? "(null)");
 
-                return Ok(ImportVideoResponseMapper.From(result, platform, creatorHandle));
+                return Ok(ImportVideoResponseMapper.From(result, normalizedPlatform, sanitizedHandle));
             }
             catch (NoPlacesFoundException)
             {
@@ -245,11 +255,22 @@ public class ImportController : ControllerBase
             }
             catch (VideoExtractionException ex)
             {
-                // Sin valor entregado (vídeo no viable o fallo de infra) y sin coste de
-                // generateContent facturable → REEMBOLSAMOS ambas ventanas. Decisión: el usuario
-                // no obtuvo su plan, cobrarle la cuota castigaría un fallo que no es suyo.
-                await _counters.ReleaseAsync(userId.Value, FeatureDaily, dayStart, ct);
-                await _counters.ReleaseAsync(userId.Value, FeatureMonthly, monthStart, ct);
+                // Reembolso condicionado a la FACTURACIÓN, no al valor entregado:
+                //   - Billed (truncated/MAX_TOKENS, content_filtered_*, invalid_json — todos
+                //     post-2xx de generateContent): Gemini YA cobró los ~tokens del vídeo, y el
+                //     CONTENIDO del vídeo puede provocar esos fallos a voluntad. Reembolsar aquí
+                //     regalaría llamadas caras ilimitadas contra cuota 0 (solo acotadas por el
+                //     techo por IP) → la cuota SE MANTIENE, como en no_places_found.
+                //   - No facturado (upload/poll fallido, duration_unknown, HTTP no-2xx de
+                //     generate, o rechazo pre-generate como VideoTooLong/VideoTooLarge del
+                //     tamaño/duración autoritativos): sin coste de generateContent → REEMBOLSAMOS
+                //     ambas ventanas (el usuario no obtuvo valor y no hubo gasto que proteger).
+                var billed = ex is ExtractionUnavailableException { Billed: true };
+                if (!billed)
+                {
+                    await _counters.ReleaseAsync(userId.Value, FeatureDaily, dayStart, ct);
+                    await _counters.ReleaseAsync(userId.Value, FeatureMonthly, monthStart, ct);
+                }
                 return MapExtractionError(ex);
             }
         }
@@ -332,26 +353,6 @@ public class ImportController : ControllerBase
         return total;
     }
 
-    /// <summary>
-    /// Lee un campo de texto del multipart directamente de <c>section.Body</c> (NO con
-    /// <see cref="StreamReader"/>, que hace read-ahead y se comería el boundary corrompiendo al
-    /// <see cref="MultipartReader"/>). Acota lo retenido a <see cref="MaxTextFieldBytes"/> pero
-    /// drena el resto para dejar el stream alineado en el siguiente boundary.
-    /// </summary>
-    private static async Task<string> ReadTextFieldAsync(MultipartSection section, CancellationToken ct)
-    {
-        using var ms = new MemoryStream();
-        var buffer = new byte[1024];
-        int read;
-        while ((read = await section.Body.ReadAsync(buffer, ct)) > 0)
-        {
-            var remaining = MaxTextFieldBytes - (int)ms.Length;
-            if (remaining > 0) ms.Write(buffer, 0, Math.Min(read, remaining));
-            // si ya llegamos al cap seguimos leyendo (drenando) pero sin retener más
-        }
-        return System.Text.Encoding.UTF8.GetString(ms.ToArray());
-    }
-
     private void TryDeleteTemp(string path)
     {
         try
@@ -377,15 +378,6 @@ public class ImportController : ControllerBase
     private static bool HasFileContentDisposition(ContentDispositionHeaderValue cd) =>
         cd.DispositionType.Equals("form-data") &&
         (!string.IsNullOrEmpty(cd.FileName.Value) || !string.IsNullOrEmpty(cd.FileNameStar.Value));
-
-    private static bool HasFormFieldContentDisposition(ContentDispositionHeaderValue cd, out string name)
-    {
-        name = HeaderUtilities.RemoveQuotes(cd.Name).Value ?? string.Empty;
-        return cd.DispositionType.Equals("form-data") &&
-               string.IsNullOrEmpty(cd.FileName.Value) &&
-               string.IsNullOrEmpty(cd.FileNameStar.Value) &&
-               !string.IsNullOrEmpty(name);
-    }
 }
 
 /// <summary>Detección barata de multipart/form-data (evita depender del binding de formularios).</summary>

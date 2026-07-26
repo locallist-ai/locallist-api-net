@@ -29,13 +29,11 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         return (client, uid);
     }
 
+    /// <summary>Multipart SOLO con el fichero: los metadatos van en la query string (contrato T1).</summary>
     private static MultipartFormDataContent VideoForm(
-        string mime = "video/mp4", int bytes = 2048, string? platform = null,
-        string? creatorHandle = null, string fileName = "clip.mp4", bool includeFile = true)
+        string mime = "video/mp4", int bytes = 2048, string fileName = "clip.mp4", bool includeFile = true)
     {
         var form = new MultipartFormDataContent();
-        if (platform is not null) form.Add(new StringContent(platform), "platform");
-        if (creatorHandle is not null) form.Add(new StringContent(creatorHandle), "creatorHandle");
         if (includeFile)
         {
             var file = new ByteArrayContent(new byte[bytes]);
@@ -43,6 +41,15 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             form.Add(file, "video", fileName);
         }
         return form;
+    }
+
+    /// <summary>URL del endpoint con los metadatos en query string (platform/creatorHandle).</summary>
+    private static string Url(string? platform = null, string? creatorHandle = null)
+    {
+        var qs = new List<string>();
+        if (platform is not null) qs.Add($"platform={Uri.EscapeDataString(platform)}");
+        if (creatorHandle is not null) qs.Add($"creatorHandle={Uri.EscapeDataString(creatorHandle)}");
+        return "/import/video" + (qs.Count > 0 ? "?" + string.Join("&", qs) : string.Empty);
     }
 
     private async Task<int> Count(Guid userId, string feature, DateOnly period)
@@ -69,7 +76,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     {
         var (client, userId) = await PlusClient("imp-happy");
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self", creatorHandle: "@chef"));
+        var res = await client.PostAsync(Url("self", "@chef"), VideoForm());
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
 
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
@@ -104,7 +111,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(uid, $"imp-free-{uid:N}@test.com", tier: "free");
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self"));
+        var res = await client.PostAsync(Url("self"), VideoForm());
         Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_requires_plus", body.GetProperty("error").GetString());
@@ -120,7 +127,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     public async Task Anonymous_Returns401()
     {
         var client = fixture.CreateClient();
-        var res = await client.PostAsync("/import/video", VideoForm());
+        var res = await client.PostAsync(Url(), VideoForm());
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
         Assert.False(fixture.FakeVideoImport.UploadStarted);
     }
@@ -131,8 +138,8 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     {
         var (client, userId) = await PlusClient("imp-mime");
 
-        var res = await client.PostAsync("/import/video",
-            VideoForm(mime: "image/gif", platform: "self", fileName: "x.gif"));
+        var res = await client.PostAsync(Url("self"),
+            VideoForm(mime: "image/gif", fileName: "x.gif"));
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_unsupported_format", body.GetProperty("error").GetString());
@@ -142,15 +149,29 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(fixture.FakeVideoImport.UploadStarted);
     }
 
-    // ── (d) missing file → 400 ───────────────────────────────────────────────────
+    // ── (d) multipart sin part de fichero → 400 import_missing_file ───────────────
     [Fact]
     public async Task MissingFile_Returns400()
     {
         var (client, _) = await PlusClient("imp-nofile");
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self", includeFile: false));
+        // Multipart VÁLIDO pero sin fichero (solo un campo de texto, que el endpoint ignora).
+        var form = VideoForm(includeFile: false);
+        form.Add(new StringContent("ignored"), "note");
+        var res = await client.PostAsync(Url("self"), form);
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_missing_file", body.GetProperty("error").GetString());
+    }
+
+    // ── (d') multipart vacío/malformado → 400 import_invalid_request (nunca 500) ──
+    [Fact]
+    public async Task EmptyMultipart_Returns400InvalidRequest()
+    {
+        var (client, _) = await PlusClient("imp-empty");
+        var res = await client.PostAsync(Url("self"), VideoForm(includeFile: false)); // 0 parts
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("import_invalid_request", body.GetProperty("error").GetString());
     }
 
     // ── (e) cuota diaria 10/10 → 429 import_limit_reached (window daily) ──────────
@@ -166,7 +187,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         });
         await db.SaveChangesAsync();
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self"));
+        var res = await client.PostAsync(Url("self"), VideoForm());
         Assert.Equal(HttpStatusCode.TooManyRequests, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_limit_reached", body.GetProperty("error").GetString());
@@ -191,7 +212,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         });
         await db.SaveChangesAsync();
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self"));
+        var res = await client.PostAsync(Url("self"), VideoForm());
         Assert.Equal(HttpStatusCode.TooManyRequests, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_limit_reached", body.GetProperty("error").GetString());
@@ -211,7 +232,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         const int fired = ImportController.DailyLimit + 3;
 
         var responses = await Task.WhenAll(Enumerable.Range(0, fired).Select(_ =>
-            client.PostAsync("/import/video", VideoForm(platform: "self"))));
+            client.PostAsync(Url("self"), VideoForm())));
 
         var ok = responses.Count(r => r.StatusCode == HttpStatusCode.OK);
         var limited = responses.Count(r => r.StatusCode == HttpStatusCode.TooManyRequests);
@@ -228,17 +249,19 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     {
         var (client, userId) = await PlusClient("imp-3p");
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "tiktok"));
+        var res = await client.PostAsync(Url("tiktok"), VideoForm());
         Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("third_party_import_disabled", body.GetProperty("error").GetString());
 
         Assert.Equal(0, await Daily(userId));
         Assert.Equal(0, await Monthly(userId));
+        // platform viaja en la query → el gate corre PRE-BODY: no se streameó ni subió nada.
+        Assert.False(fixture.FakeVideoImport.UploadStarted);
         Assert.False(fixture.FakeVideoImport.GenerateContentCalled);
     }
 
-    // ── (g) ExtractionUnavailable → 503 + cuota REEMBOLSADA ──────────────────────
+    // ── (g) ExtractionUnavailable SIN facturar (HTTP no-2xx de generate) → 503 + REEMBOLSO ──
     [Fact]
     public async Task ExtractionUnavailable_Returns503_RefundsBothWindows()
     {
@@ -249,7 +272,7 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
                 Content = new StringContent("{\"error\":\"boom\"}", System.Text.Encoding.UTF8, "application/json")
             };
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self"));
+        var res = await client.PostAsync(Url("self"), VideoForm());
         Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_unavailable", body.GetProperty("error").GetString());
@@ -270,13 +293,95 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             fixture.FakeVideoImport.GenerateContentOk(
                 """{ "city":"Miami","country":"USA","language":"en","places":[],"vibes":[],"confidence":0.1 }""");
 
-        var res = await client.PostAsync("/import/video", VideoForm(platform: "self"));
+        var res = await client.PostAsync(Url("self"), VideoForm());
         Assert.Equal(HttpStatusCode.UnprocessableEntity, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("no_places_found", body.GetProperty("error").GetString());
 
         Assert.Equal(1, await Daily(userId));
         Assert.Equal(1, await Monthly(userId));
+    }
+
+    // ── (g'') Fallos POST-2xx de generateContent (Billed): 503 pero la cuota SE MANTIENE ──
+    // Los tres los provoca el CONTENIDO del vídeo (repro del reviewer): si se reembolsaran,
+    // un atacante encadenaría llamadas multimodales caras (~150k tokens de input c/u, YA
+    // facturadas por Gemini) con cuota siempre a 0, solo acotado por el techo por IP.
+
+    [Fact]
+    public async Task GenerateTruncatedMaxTokens_Returns503_QuotaStaysConsumed()
+    {
+        var (client, userId) = await PlusClient("imp-maxtok");
+        // 2xx con finishReason=MAX_TOKENS → ExtractionUnavailable("truncated", billed:true).
+        fixture.FakeVideoImport.GenerateContentResponder = _ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                { "candidates": [ { "content": { "parts": [ { "text": "{\"pl" } ] }, "finishReason": "MAX_TOKENS" } ],
+                  "usageMetadata": { "promptTokenCount": 150000, "candidatesTokenCount": 4096 } }
+                """, System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        var res = await client.PostAsync(Url("self"), VideoForm());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("import_unavailable", body.GetProperty("error").GetString());
+
+        // Gemini facturó la llamada (2xx) → SIN reembolso: ambas ventanas quedan consumidas.
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
+        Assert.Equal(1, await Daily(userId));
+        Assert.Equal(1, await Monthly(userId));
+    }
+
+    [Fact]
+    public async Task GenerateContentFilteredSafety_Returns503_QuotaStaysConsumed()
+    {
+        var (client, userId) = await PlusClient("imp-safety");
+        // 2xx sin parts y finishReason=SAFETY → ExtractionUnavailable("content_filtered_SAFETY", billed:true).
+        fixture.FakeVideoImport.GenerateContentResponder = _ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                { "candidates": [ { "finishReason": "SAFETY" } ],
+                  "usageMetadata": { "promptTokenCount": 150000, "candidatesTokenCount": 0 } }
+                """, System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        var res = await client.PostAsync(Url("self"), VideoForm());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
+
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
+        Assert.Equal(1, await Daily(userId));
+        Assert.Equal(1, await Monthly(userId));
+    }
+
+    [Fact]
+    public async Task GenerateInvalidJson_Returns503_QuotaStaysConsumed()
+    {
+        var (client, userId) = await PlusClient("imp-badjson");
+        // 2xx con texto no parseable → ExtractionUnavailable("invalid_json", billed:true).
+        fixture.FakeVideoImport.GenerateContentResponder = _ =>
+            fixture.FakeVideoImport.GenerateContentOk("{{{ not json at all");
+
+        var res = await client.PostAsync(Url("self"), VideoForm());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
+
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
+        Assert.Equal(1, await Daily(userId));
+        Assert.Equal(1, await Monthly(userId));
+    }
+
+    // ── (g''') Regresión: fallo PRE-facturación (duration_unknown) → sí reembolsa ──
+    [Fact]
+    public async Task DurationUnknown_FailsBeforeGenerate_Returns503_RefundsBothWindows()
+    {
+        var (client, userId) = await PlusClient("imp-durunk");
+        // ACTIVE sin videoDuration → fail-closed ANTES de generateContent (nada facturado).
+        fixture.FakeVideoImport.OmitDurationOnActive = true;
+
+        var res = await client.PostAsync(Url("self"), VideoForm());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
+
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled);
+        Assert.Equal(0, await Daily(userId));
+        Assert.Equal(0, await Monthly(userId));
     }
 
     // ── (h) /account expone la capability (default false) ────────────────────────
@@ -312,9 +417,9 @@ public class ImportThirdPartyEnabledTests(ImportThirdPartyEnabledFixture fixture
 {
     public void Dispose() => fixture.FakeVideoImport.Reset();
 
-    private static MultipartFormDataContent VideoForm(string platform)
+    private static MultipartFormDataContent VideoForm()
     {
-        var form = new MultipartFormDataContent { { new StringContent(platform), "platform" } };
+        var form = new MultipartFormDataContent();
         var file = new ByteArrayContent(new byte[2048]);
         file.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
         form.Add(file, "video", "clip.mp4");
@@ -328,7 +433,7 @@ public class ImportThirdPartyEnabledTests(ImportThirdPartyEnabledFixture fixture
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(uid, $"imp3p-on-{uid:N}@test.com", tier: "pro");
 
-        var res = await client.PostAsync("/import/video", VideoForm("tiktok"));
+        var res = await client.PostAsync("/import/video?platform=tiktok", VideoForm());
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("tiktok", body.GetProperty("platform").GetString());
@@ -366,13 +471,13 @@ public class ImportSizeLimitTests(ImportSmallSizeFixture fixture)
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(uid, $"imp-size-{uid:N}@test.com", tier: "pro");
 
-        var form = new MultipartFormDataContent { { new StringContent("self"), "platform" } };
+        var form = new MultipartFormDataContent();
         // 4 KB > 512 B → el cap del streaming lo corta antes de subir nada.
         var file = new ByteArrayContent(new byte[4096]);
         file.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
         form.Add(file, "video", "big.mp4");
 
-        var res = await client.PostAsync("/import/video", form);
+        var res = await client.PostAsync("/import/video?platform=self", form);
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_too_large", body.GetProperty("error").GetString());
