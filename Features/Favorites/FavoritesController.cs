@@ -55,7 +55,8 @@ public class FavoritesController : ControllerBase
     /// <summary>
     /// Favorita un place. Idempotente: si ya estaba favoritado devuelve 200 sin duplicar. Place
     /// inexistente o no publicado → 404 opaco (no confirma existencia de borradores). Si el tier
-    /// es free y ya hay 50 favoritos → 403 estructurado <c>favorites_limit_reached</c> (familia
+    /// es free y ya hay 50 favoritos de places PUBLICADOS (misma semántica que el GET: lo que
+    /// ves = lo que cuenta) → 403 estructurado <c>favorites_limit_reached</c> (familia
     /// <c>*_limit_reached</c> que la app mapea a upsell). Cap comprobado atómicamente (ver clase).
     /// </summary>
     [HttpPut("{placeId:guid}")]
@@ -73,6 +74,9 @@ public class FavoritesController : ControllerBase
 
         // Serializamos por usuario: dentro de esta transacción, el lock consultivo garantiza que
         // ninguna otra request del MISMO usuario pueda insertar entre el conteo y nuestro insert.
+        // Colisión del hash de 64 bits (hashtextextended) entre DOS USUARIOS DISTINTOS
+        // (~2^32 usuarios por birthday bound): benigna — solo serializaría cruzadamente sus
+        // requests (una espera a la otra), jamás produce un conteo/cap incorrecto.
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
         await _db.Database.ExecuteSqlAsync(
             $"SELECT pg_advisory_xact_lock(hashtextextended({userId.Value.ToString()}, {AdvisoryLockSeed}))", ct);
@@ -101,7 +105,17 @@ public class FavoritesController : ControllerBase
         var isPro = string.Equals(tier, TierPro, StringComparison.Ordinal);
         if (!isPro)
         {
-            var count = await _db.Favorites.CountAsync(f => f.UserId == userId.Value, ct);
+            // El cap cuenta SOLO favoritos de places PUBLICADOS — la MISMA semántica que el
+            // GET (decisión hub post-review): lo que ves = lo que cuenta. Sin este filtro, un
+            // free con places despublicados quedaba atascado (403 used:50 viendo total:40).
+            // Borde aceptado: si places despublicados se REPUBLICAN y el usuario supera 50
+            // visibles, no pasa nada — el siguiente PUT devuelve 403 hasta bajar de 50, y el
+            // GET sigue mostrando todos los publicados (puede ser >50).
+            var count = await _db.Favorites
+                .Where(f => f.UserId == userId.Value)
+                .Join(_db.Places.Where(p => p.Status == "published"),
+                      f => f.PlaceId, p => p.Id, (f, _) => f)
+                .CountAsync(ct);
             if (count >= FreeFavoritesLimit)
             {
                 await tx.CommitAsync(ct);
@@ -133,6 +147,14 @@ public class FavoritesController : ControllerBase
             // idempotente en cualquier interleaving imprevisto.
             await tx.CommitAsync(ct);
             return Ok(new { favorited = true });
+        }
+        catch (DbUpdateException ex) when (IsForeignKeyViolation(ex))
+        {
+            // Carrera con un hard-delete (admin) del place: el check de published pasó pero el
+            // insert choca con el FK a places (23503) porque el place ya no existe. Mismo 404
+            // opaco que si nunca hubiera existido — nunca un 500. La transacción no commiteada
+            // se revierte al salir del using.
+            return NotFound(new { error = "Place not found" });
         }
 
         await tx.CommitAsync(ct);
@@ -222,6 +244,15 @@ public class FavoritesController : ControllerBase
     private const long AdvisoryLockSeed = 0x_FA_00_71_7E; // "FA…RITE"
 
     /// <summary>Detecta la violación del índice único (user_id, place_id) en Postgres (SqlState "23505").</summary>
-    private static bool IsUniqueViolation(DbUpdateException ex) =>
+    internal static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation;
+
+    /// <summary>
+    /// Detecta la violación del FK a places en Postgres (SqlState "23503") — carrera con un
+    /// hard-delete del place entre el check de published y el insert. Internal para el test
+    /// unitario del catch (la carrera real no es reproducible determinísticamente vía ApiFixture:
+    /// exigiría pausar la request entre el check y el SaveChanges).
+    /// </summary>
+    internal static bool IsForeignKeyViolation(DbUpdateException ex) =>
+        ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.ForeignKeyViolation;
 }

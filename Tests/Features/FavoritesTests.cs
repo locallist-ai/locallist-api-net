@@ -1,6 +1,7 @@
 using System.Text.Json;
 using LocalList.API.NET.Features.Favorites;
 using LocalList.API.NET.Shared.Data.Entities;
+using Npgsql;
 
 namespace LocalList.API.Tests.Features;
 
@@ -173,6 +174,62 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(56, await FavoriteCount(userId));
     }
 
+    [Fact]
+    public async Task Put_FreeUser_UnpublishedFavoritesDoNotCountTowardCap()
+    {
+        // Cap y GET comparten semántica (lo que ves = lo que cuenta): 40 favoritos de places
+        // publicados + 10 de places DESPUBLICADOS → el cap efectivo es 40, no 50, y el PUT entra.
+        var (client, userId) = await AuthedUser("fav-cap-unpub");
+        await SeedFavorites(userId, 40, status: "published");
+        await SeedFavorites(userId, 10, status: "draft");
+
+        var extra = await SeedPlace();
+        var ok = await client.PutAsync($"/favorites/{extra.Id}", null);
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode); // 41 visibles, no atascado en "50"
+
+        // Rellena hasta 50 PUBLICADOS exactos → el siguiente PUT choca con el cap, y el used
+        // del 403 es CONSISTENTE con el total del GET (ambos cuentan solo publicados).
+        await SeedFavorites(userId, 9, status: "published");
+
+        var over = await SeedPlace();
+        var res = await client.PutAsync($"/favorites/{over.Id}", null);
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("favorites_limit_reached", body.GetProperty("error").GetString());
+        Assert.Equal(50, body.GetProperty("used").GetInt32());
+
+        var list = await client.GetAsync("/favorites");
+        var listBody = await list.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(50, listBody.GetProperty("total").GetInt32());
+    }
+
+    [Fact]
+    public async Task Put_RepublishedBeyondCap_Returns403_ButGetShowsAllPublished()
+    {
+        // Borde aceptado (decisión hub): 50 publicados + 5 despublicados que luego se REPUBLICAN
+        // → 55 visibles. No pasa nada: el siguiente PUT da 403 hasta bajar de 50, y el GET
+        // muestra TODOS los publicados (55) — no se poda nada retroactivamente.
+        var (client, userId) = await AuthedUser("fav-repub");
+        await SeedFavorites(userId, 50, status: "published");
+        var draftIds = await SeedFavorites(userId, 5, status: "draft");
+
+        var db = fixture.GetDbContext();
+        await db.Places.Where(p => draftIds.Contains(p.Id))
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, "published"));
+
+        var extra = await SeedPlace();
+        var res = await client.PutAsync($"/favorites/{extra.Id}", null);
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("favorites_limit_reached", body.GetProperty("error").GetString());
+        Assert.Equal(55, body.GetProperty("used").GetInt32());
+
+        var list = await client.GetAsync("/favorites?limit=100");
+        var listBody = await list.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(55, listBody.GetProperty("total").GetInt32());
+        Assert.Equal(55, listBody.GetProperty("places").GetArrayLength());
+    }
+
     // ── (e) carrera: no overshoot ────────────────────────────────────────────
 
     [Fact]
@@ -299,6 +356,31 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal("google", placeDto.GetProperty("photoSource").GetString());
     }
 
+    // ── carrera de hard-delete: predicados del catch (23503 vs 23505) ────────
+
+    [Fact]
+    public void SaveCatchPredicates_ClassifyFkAndUniqueViolations()
+    {
+        // La carrera real (hard-delete admin del place ENTRE el check de published y el
+        // SaveChanges de la MISMA request) no es reproducible determinísticamente vía ApiFixture:
+        // exigiría pausar la request a mitad del action. Se testean los predicados que enrutan
+        // el catch: 23503 → 404 opaco (no 500); 23505 → idempotencia; otros → propagan.
+        var fk = new DbUpdateException("insert failed",
+            new PostgresException("violates foreign key \"FK_favorites_places_place_id\"", "ERROR", "ERROR", "23503"));
+        var unique = new DbUpdateException("insert failed",
+            new PostgresException("duplicate key value violates unique constraint", "ERROR", "ERROR", "23505"));
+        var other = new DbUpdateException("boom", new InvalidOperationException("connection lost"));
+
+        Assert.True(FavoritesController.IsForeignKeyViolation(fk));
+        Assert.False(FavoritesController.IsUniqueViolation(fk));
+
+        Assert.True(FavoritesController.IsUniqueViolation(unique));
+        Assert.False(FavoritesController.IsForeignKeyViolation(unique));
+
+        Assert.False(FavoritesController.IsForeignKeyViolation(other));
+        Assert.False(FavoritesController.IsUniqueViolation(other));
+    }
+
     // ── /favorites/ids ───────────────────────────────────────────────────────
 
     [Fact]
@@ -349,11 +431,16 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         return place;
     }
 
-    /// <summary>Siembra <paramref name="count"/> favoritos directos (bypasa el endpoint) para el user.</summary>
-    private async Task SeedFavorites(Guid userId, int count)
+    /// <summary>
+    /// Siembra <paramref name="count"/> favoritos directos (bypasa el endpoint) para el user.
+    /// Devuelve los ids de los places creados (para poder despublicar/republicar en los tests
+    /// de la semántica del cap).
+    /// </summary>
+    private async Task<List<Guid>> SeedFavorites(Guid userId, int count, string status = "published")
     {
         var db = fixture.GetDbContext();
         var baseTime = new DateTimeOffset(2026, 3, 1, 0, 0, 0, TimeSpan.Zero);
+        var placeIds = new List<Guid>(count);
         for (var i = 0; i < count; i++)
         {
             var place = new Place
@@ -363,12 +450,14 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
                 Category = "food",
                 City = "Miami",
                 WhyThisPlace = "seed",
-                Status = "published",
+                Status = status,
             };
             db.Places.Add(place);
             db.Favorites.Add(new Favorite { UserId = userId, PlaceId = place.Id, CreatedAt = baseTime.AddSeconds(i) });
+            placeIds.Add(place.Id);
         }
         await db.SaveChangesAsync();
+        return placeIds;
     }
 
     private async Task<int> FavoriteCount(Guid userId) =>
