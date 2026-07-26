@@ -276,11 +276,11 @@ public class BuilderController : ControllerBase
 
     // ── Plan naming — test contract surface (BuilderPlanNameTests.cs calls these directly) ──
 
-    public static string BuildPlanName(ExtractedPreferences prefs, string city, string rawMessage)
-        => PlanNamingService.BuildPlanName(prefs, city, rawMessage);
+    public static string BuildPlanName(ExtractedPreferences prefs, string city, string rawMessage, string lang = "en")
+        => PlanNamingService.BuildPlanName(prefs, city, rawMessage, lang);
 
-    public static string BuildPlanDescription(ExtractedPreferences prefs)
-        => PlanNamingService.BuildPlanDescription(prefs);
+    public static string BuildPlanDescription(ExtractedPreferences prefs, string lang = "en")
+        => PlanNamingService.BuildPlanDescription(prefs, lang);
 
     // ── Input validation ──────────────────────────────────────────────────────────
 
