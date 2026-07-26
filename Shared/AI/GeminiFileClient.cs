@@ -24,7 +24,12 @@ public interface IGeminiFileClient
     /// <summary>Poll de files.get hasta ACTIVE. Lanza si el fichero pasa a FAILED o se agotan los intentos.</summary>
     Task<GeminiFile> WaitUntilActiveAsync(string fileName, CancellationToken ct = default);
 
-    /// <summary>Borrado explícito (files.delete). Minimiza la retención de contenido de terceros.</summary>
+    /// <summary>
+    /// Borrado explícito (files.delete). Minimiza la retención de contenido de terceros.
+    /// Backstop: la File API expira los ficheros a las 48h, así que un delete fallido o un
+    /// crash pre-delete deja como mucho 48h de retención residual (ver SafeDeleteAsync en
+    /// VideoExtractionService).
+    /// </summary>
     Task DeleteAsync(string fileName, CancellationToken ct = default);
 }
 

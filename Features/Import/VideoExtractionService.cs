@@ -180,6 +180,12 @@ public sealed class VideoExtractionService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Video import: unexpected failure ({Type})", ex.GetType().Name);
+            // Observabilidad: el fallo inesperado también deja metric (sin él, un bug de infra
+            // sería invisible en video_import_metrics). durationSec/diag pueden no existir aún
+            // en este punto (p.ej. crash durante el upload) → null.
+            PersistMetric(platform, mimeType, sizeBytes, durationSec: null, caption, result: null,
+                diag: null, errorCode: "unexpected_error",
+                errorMessage: $"{ex.GetType().Name}: {ex.Message}");
             throw new ExtractionUnavailableException(ex.GetType().Name);
         }
         finally
@@ -354,6 +360,13 @@ Output schema:
     {
         // Retención con ángulo legal: un delete 503 transitorio no debe dejar el vídeo residente.
         // Retry corto con backoff; el resultado final se swallowea para no enmascarar la extracción.
+        //
+        // Backstop de huérfanos: la Gemini File API expira los ficheros automáticamente a las
+        // 48 horas. Si este delete agota los reintentos, o el proceso crashea entre el upload y
+        // el finally, el fichero huérfano se purga solo en ≤48h — la retención residual está
+        // acotada por diseño de la plataforma, no depende solo de nuestro delete.
+        // TODO(defensa en profundidad, futuro): barrido periódico con files.list que borre
+        // ficheros "import-*" más viejos que N minutos, para cerrar también esa ventana de 48h.
         const int maxAttempts = 3;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {

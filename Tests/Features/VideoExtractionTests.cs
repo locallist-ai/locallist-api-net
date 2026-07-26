@@ -231,6 +231,34 @@ public class VideoExtractionTests(ApiFixture fixture) : IClassFixture<ApiFixture
         Assert.Equal("extraction_unavailable", metric.ErrorCode);
     }
 
+    // ── 7b. Fallo INESPERADO (no tipado) → también deja metric y borra el fichero ─
+    [Fact]
+    public async Task Extraction_UnexpectedFailure_PersistsMetric_DeletesFile()
+    {
+        await ClearMetricsAsync();
+        // Excepción cruda (no VideoExtractionException, no cancelación) desde el transporte:
+        // debe caer en el catch genérico → metric "unexpected_error" + delete en el finally.
+        fixture.FakeVideoImport.GenerateContentResponder = _ =>
+            throw new InvalidOperationException("boom: fake infra bug");
+
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            await Assert.ThrowsAsync<ExtractionUnavailableException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "video/mp4", "tiktok", null, CancellationToken.None));
+        }
+
+        // El finally del delete sigue intacto: sin retención aunque el fallo sea inesperado.
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("unexpected_error", metric.ErrorCode);
+        Assert.Contains("InvalidOperationException", metric.ErrorMessage);
+        Assert.Equal("tiktok", metric.Platform);
+        Assert.Equal(1024, metric.SizeBytes);
+    }
+
     // ── 8. Poll PROCESSING → ACTIVE antes de extraer ──────────────────────────
     [Fact]
     public async Task Extraction_PollsUntilActive()

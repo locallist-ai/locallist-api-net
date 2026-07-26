@@ -8,8 +8,16 @@ namespace LocalList.API.NET.Shared.Data.Entities;
 /// se persisten para observabilidad admin y control de coste. Tabla standalone (sin FK):
 /// aún no hay un registro de import al que colgarse (el endpoint T1 llegará después).
 ///
-/// IMPORTANTE (retención): NO se persiste el fichero, sus bytes, ni el file_uri de Gemini.
-/// El vídeo se borra tras extraer; aquí solo quedan metadatos y diagnóstico.
+/// IMPORTANTE (retención — inventario honesto):
+/// SÍ se retiene: metadatos técnicos (platform/mime/tamaño/duración), diagnóstico AI
+/// (tokens/coste/latencia/finish_reason/error) y el contexto geográfico/idioma EXTRAÍDO del
+/// vídeo (<see cref="City"/>/<see cref="Country"/>/<see cref="Language"/>) — hechos de mercado
+/// para decidir cobertura de ciudades (mismo propósito que city_requests), no contenido creativo
+/// ni PII.
+/// NO se retiene: el fichero ni sus bytes, el file_uri de Gemini, transcript/caption, los
+/// NOMBRES de los sitios extraídos (solo el count en <see cref="NumPlaces"/>), ni identidad
+/// del uploader. El vídeo se borra tras extraer.
+/// Política de retención: indefinida como agregado diagnóstico, salvo revisión legal.
 /// </summary>
 [Table("video_import_metrics")]
 public class VideoImportMetric
@@ -43,6 +51,10 @@ public class VideoImportMetric
     [Column("caption_provided")]
     public bool CaptionProvided { get; set; }
 
+    /// <summary>
+    /// City/Country/Language: contexto de mercado extraído del vídeo (¿de qué ciudades pide
+    /// import la gente?). Retenidos a propósito — ver inventario de retención en el summary.
+    /// </summary>
     [Column("city")]
     public string? City { get; set; }
 
