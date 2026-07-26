@@ -1271,6 +1271,133 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
+    // ── PriceRange validación en rutas de escritura (fix/price-range-validation) ──
+    // Los imports curados escribían el rango a mano sin validar → places gratis con "$".
+    // Create/patch normalizan + validan (400 estructurado); bulk normaliza tolerante (null).
+
+    [Theory]
+    [InlineData("free", "FREE")]
+    [InlineData("Free", "FREE")]
+    [InlineData(" FREE ", "FREE")]
+    [InlineData(" $ ", "$")]
+    public async Task CreatePlace_NormalizesPriceRange(string input, string expected)
+    {
+        var client = CreateAdminClient();
+        var name = $"Price Norm {Guid.NewGuid():N}";
+        var response = await client.PostAsJsonAsync("/admin/places",
+            new { name, category = "Culture", whyThisPlace = "test", city = "Miami", priceRange = input });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+        var db = fixture.GetDbContext();
+        var saved = await db.Places.FirstAsync(p => p.Name == name);
+        Assert.Equal(expected, saved.PriceRange);
+    }
+
+    [Theory]
+    [InlineData("€€")]
+    [InlineData("cheap")]
+    public async Task CreatePlace_InvalidPriceRange_Returns400Structured(string input)
+    {
+        var client = CreateAdminClient();
+        var response = await client.PostAsJsonAsync("/admin/places",
+            new { name = $"Bad Price {Guid.NewGuid():N}", category = "Culture", whyThisPlace = "test", city = "Miami", priceRange = input });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("invalid_price_range", body.GetProperty("error").GetString());
+        var allowed = body.GetProperty("allowed").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains("FREE", allowed);
+        Assert.Contains("$$$$", allowed);
+    }
+
+    [Fact]
+    public async Task CreatePlace_EmptyPriceRange_StoresNull()
+    {
+        var client = CreateAdminClient();
+        var name = $"Empty Price {Guid.NewGuid():N}";
+        var response = await client.PostAsJsonAsync("/admin/places",
+            new { name, category = "Culture", whyThisPlace = "test", city = "Miami", priceRange = "" });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var db = fixture.GetDbContext();
+        var saved = await db.Places.FirstAsync(p => p.Name == name);
+        Assert.Null(saved.PriceRange);
+    }
+
+    [Fact]
+    public async Task UpdatePlace_NormalizesPriceRange()
+    {
+        var db = fixture.GetDbContext();
+        var id = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = id, Name = $"Patch Price {Guid.NewGuid():N}", Category = "Culture",
+            City = "Miami", WhyThisPlace = "test", Status = "in_review", PriceRange = "$$",
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.PatchAsJsonAsync($"/admin/places/{id}", new { priceRange = "free" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var freshDb = fixture.GetDbContext();
+        var saved = await freshDb.Places.FirstAsync(p => p.Id == id);
+        Assert.Equal("FREE", saved.PriceRange);
+    }
+
+    [Fact]
+    public async Task UpdatePlace_InvalidPriceRange_Returns400()
+    {
+        var db = fixture.GetDbContext();
+        var id = Guid.NewGuid();
+        db.Places.Add(new Place
+        {
+            Id = id, Name = $"Patch Bad Price {Guid.NewGuid():N}", Category = "Culture",
+            City = "Miami", WhyThisPlace = "test", Status = "in_review", PriceRange = "$$",
+        });
+        await db.SaveChangesAsync();
+
+        var client = CreateAdminClient();
+        var response = await client.PatchAsJsonAsync($"/admin/places/{id}", new { priceRange = "€€" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("invalid_price_range", body.GetProperty("error").GetString());
+
+        // El valor previo no se toca cuando la validación falla.
+        var freshDb = fixture.GetDbContext();
+        var unchanged = await freshDb.Places.FirstAsync(p => p.Id == id);
+        Assert.Equal("$$", unchanged.PriceRange);
+    }
+
+    [Fact]
+    public async Task BulkImport_DirtyPriceRange_CreatesRowWithNull_RestOfBatchOk()
+    {
+        var client = CreateAdminClient();
+        var dirtyName = $"Dirty Price {Guid.NewGuid():N}";
+        var cleanName = $"Clean Price {Guid.NewGuid():N}";
+        var payload = new[]
+        {
+            new { name = dirtyName, category = "Culture", whyThisPlace = "sucio", city = "Miami", priceRange = "cheap" },
+            new { name = cleanName, category = "Culture", whyThisPlace = "limpio", city = "Miami", priceRange = "free" },
+        };
+
+        var response = await client.PostAsJsonAsync("/admin/places/bulk", payload);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        // El precio sucio NO revienta el batch: ambas filas se crean.
+        Assert.Equal(2, body.GetProperty("created").GetInt32());
+        Assert.Equal(0, body.GetProperty("errors").GetInt32());
+
+        var db = fixture.GetDbContext();
+        var dirty = await db.Places.FirstAsync(p => p.Name == dirtyName);
+        var clean = await db.Places.FirstAsync(p => p.Name == cleanName);
+        Assert.Null(dirty.PriceRange);        // "cheap" descartado a null
+        Assert.Equal("FREE", clean.PriceRange); // "free" normalizado
+    }
+
     private static HttpResponseMessage GeminiOk(string text)
     {
         var envelope = $"{{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":{System.Text.Json.JsonSerializer.Serialize(text)}}}]}}}}]}}";

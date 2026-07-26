@@ -1,4 +1,5 @@
 using LocalList.API.NET.Features.Builder.Shared;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
 
@@ -303,9 +304,14 @@ public class PlaceRankingService
         if (band is null) return 0f;
         if (string.IsNullOrWhiteSpace(place.PriceRange)) return 0.5f; // sin info, neutral
 
-        // tier del place por count de '$'
-        int placeTier = place.PriceRange.Count(c => c == '$');
-        if (placeTier == 0) return 0.5f;
+        // FREE es el tier MÁS BARATO posible (tier 1): para un buscador de budget (banda que
+        // incluye tier 1) un sitio gratis es el mejor match imaginable → 1.0. Antes caía a 0.5
+        // (neutral, como null) porque "FREE" no contiene ningún '$'. El resto se puntúa por el
+        // count de '$'. null/whitespace sigue neutral (0.5, arriba).
+        int placeTier = string.Equals(place.PriceRange, PriceRanges.Free, StringComparison.OrdinalIgnoreCase)
+            ? 1
+            : place.PriceRange.Count(c => c == '$');
+        if (placeTier == 0) return 0.5f; // valor no reconocido (ni FREE ni '$'-based) → neutral
 
         int diff = placeTier < band.Value.Min ? band.Value.Min - placeTier
                  : placeTier > band.Value.Max ? placeTier - band.Value.Max
