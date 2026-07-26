@@ -118,9 +118,9 @@ public class PlanGenerationService : IPlanGenerationService
         var schedule = await _scheduler.BuildPlanScheduleAsync(places, prefs, seed, ct);
 
         // Sanitize Gemini-generated text before returning (L6 defense)
-        var planName = Sanitize(PlanNamingService.BuildPlanName(prefs, city, msg), MaxPlanNameLength);
+        var planName = Sanitize(PlanNamingService.BuildPlanName(prefs, city, msg, lang), MaxPlanNameLength);
         var planDescription = Sanitize(
-            !string.IsNullOrEmpty(prefs.Description) ? prefs.Description : PlanNamingService.BuildPlanDescription(prefs),
+            !string.IsNullOrEmpty(prefs.Description) ? prefs.Description : PlanNamingService.BuildPlanDescription(prefs, lang),
             MaxPlanDescriptionLength);
 
         _logger.LogInformation(

@@ -153,4 +153,122 @@ public class BuilderPlanNameTests
         Assert.Contains("1-day", desc);
         Assert.DoesNotContain("featuring", desc);
     }
+
+    // ── Fallback bilingue (lang="es"): el nombre/descripcion sintetizados se persisten bajo
+    // ── NameI18n["es"]. Con el template siempre-EN, un titulo ingles quedaba etiquetado como
+    // ── espanol. Estos tests fijan que lang="es" produce espanol y lang="en" no cambia.
+
+    [Fact]
+    public void BuildPlanName_LangEs_SynthesizesSpanish()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            Vibes = new List<string> { "romántico" },
+            PlanName = "Hola", // se rechaza -> fallback sintetizado
+        };
+
+        var name = BuilderController.BuildPlanName(prefs, "Miami", "Hola", "es");
+
+        Assert.Equal("Plan de 2 días de romántico en Miami", name);
+        Assert.DoesNotContain("-day", name);
+        Assert.DoesNotContain("plan in", name);
+    }
+
+    [Fact]
+    public void BuildPlanName_LangEs_OneDay_UsesSingular()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 1,
+            Categories = new List<string> { "gastronomía" },
+            PlanName = "hi",
+        };
+
+        var name = BuilderController.BuildPlanName(prefs, "Sevilla", "hi", "es");
+
+        Assert.Equal("Plan de 1 día de gastronomía en Sevilla", name);
+    }
+
+    [Fact]
+    public void BuildPlanName_LangEs_NoSignals_FallsBackToSpanishCurated()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 3,
+            PlanName = "hi there",
+        };
+
+        var name = BuilderController.BuildPlanName(prefs, "", "hi", "es");
+
+        Assert.Equal("Plan a medida de 3 días en Miami", name);
+        Assert.DoesNotContain("curated", name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BuildPlanName_LangEn_Unchanged()
+    {
+        // Regresion: el camino EN no debe alterarse con el nuevo parametro lang.
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            Vibes = new List<string> { "food" },
+            PlanName = "Hola",
+        };
+
+        Assert.Equal("2-day food plan in Miami", BuilderController.BuildPlanName(prefs, "Miami", "Hola", "en"));
+        // Default lang == "en".
+        Assert.Equal("2-day food plan in Miami", BuilderController.BuildPlanName(prefs, "Miami", "Hola"));
+    }
+
+    [Fact]
+    public void BuildPlanDescription_LangEs_WithCategories_Spanish()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            GroupType = "pareja",
+            Categories = new List<string> { "gastronomía", "cultura", "aire libre", "café" },
+        };
+
+        var desc = BuilderController.BuildPlanDescription(prefs, "es");
+
+        Assert.Equal("Un plan de 2 días ideal para pareja con gastronomía, cultura, aire libre.", desc);
+        Assert.DoesNotContain("café", desc); // cuarta queda fuera
+        Assert.DoesNotContain("friendly", desc);
+        Assert.DoesNotContain("featuring", desc);
+    }
+
+    [Fact]
+    public void BuildPlanDescription_LangEs_EmptyCategories_ShortForm()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 1,
+            GroupType = "solo",
+            Categories = new List<string>(),
+        };
+
+        var desc = BuilderController.BuildPlanDescription(prefs, "es");
+
+        Assert.Equal("Un plan de 1 día ideal para solo.", desc);
+    }
+
+    [Fact]
+    public void BuildPlanDescription_LangEn_Unchanged()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            GroupType = "family-kids",
+            Categories = new List<string> { "outdoors", "culture" },
+        };
+
+        Assert.Equal(
+            "A family-kids-friendly 2-day plan featuring outdoors, culture.",
+            BuilderController.BuildPlanDescription(prefs, "en"));
+        Assert.Equal(
+            "A family-kids-friendly 2-day plan featuring outdoors, culture.",
+            BuilderController.BuildPlanDescription(prefs));
+    }
 }

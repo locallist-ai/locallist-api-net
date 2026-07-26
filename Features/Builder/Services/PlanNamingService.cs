@@ -15,7 +15,12 @@ public static class PlanNamingService
         "my plan", "new plan", "untitled", "plan", "trip", "trip plan", "your plan"
     };
 
-    public static string BuildPlanName(ExtractedPreferences prefs, string city, string rawMessage)
+    // Fallback bilingue (EN/ES-Espana) seleccionado por el `lang` de la request.
+    // Motivo: el nombre/descripcion de fallback se persiste bajo NameI18n[lang]
+    // (ChatController / BuilderController). Un template siempre-EN etiquetaba texto
+    // ingles como espanol. El texto de Gemini ya respeta el idioma; esto solo cubre
+    // el camino de rechazo (IsUsableName) o ausencia del nombre del LLM.
+    public static string BuildPlanName(ExtractedPreferences prefs, string city, string rawMessage, string lang = "en")
     {
         var candidate = prefs.PlanName?.Trim() ?? string.Empty;
         var raw = rawMessage?.Trim() ?? string.Empty;
@@ -23,20 +28,40 @@ public static class PlanNamingService
         if (IsUsableName(candidate, raw))
             return candidate;
 
-        var descriptor = FirstNonEmpty(prefs.Vibes) ?? FirstNonEmpty(prefs.Categories) ?? "curated";
-        var dayLabel = prefs.Days == 1 ? "1-day" : $"{prefs.Days}-day";
+        // descriptor = vibe/categoria extraida (dato pasante, no traducible aqui).
+        var descriptor = FirstNonEmpty(prefs.Vibes) ?? FirstNonEmpty(prefs.Categories);
         var cityLabel = string.IsNullOrWhiteSpace(city) ? "Miami" : city;
-        return $"{dayLabel} {descriptor} plan in {cityLabel}";
+
+        if (lang == "es")
+        {
+            var dayLabel = prefs.Days == 1 ? "1 día" : $"{prefs.Days} días";
+            return descriptor is null
+                ? $"Plan a medida de {dayLabel} en {cityLabel}"
+                : $"Plan de {dayLabel} de {descriptor} en {cityLabel}";
+        }
+
+        var dayLabelEn = prefs.Days == 1 ? "1-day" : $"{prefs.Days}-day";
+        return $"{dayLabelEn} {descriptor ?? "curated"} plan in {cityLabel}";
     }
 
-    public static string BuildPlanDescription(ExtractedPreferences prefs)
+    public static string BuildPlanDescription(ExtractedPreferences prefs, string lang = "en")
     {
-        var dayLabel = prefs.Days == 1 ? "1-day" : $"{prefs.Days}-day";
-        var groupLabel = string.IsNullOrWhiteSpace(prefs.GroupType) ? "curated" : $"{prefs.GroupType}-friendly";
         var topCats = (prefs.Categories ?? new List<string>()).Take(3).ToList();
+
+        if (lang == "es")
+        {
+            var dayLabel = prefs.Days == 1 ? "1 día" : $"{prefs.Days} días";
+            var groupClause = string.IsNullOrWhiteSpace(prefs.GroupType) ? "" : $" ideal para {prefs.GroupType}";
+            return topCats.Count == 0
+                ? $"Un plan de {dayLabel}{groupClause}."
+                : $"Un plan de {dayLabel}{groupClause} con {string.Join(", ", topCats)}.";
+        }
+
+        var dayLabelEn = prefs.Days == 1 ? "1-day" : $"{prefs.Days}-day";
+        var groupLabel = string.IsNullOrWhiteSpace(prefs.GroupType) ? "curated" : $"{prefs.GroupType}-friendly";
         if (topCats.Count == 0)
-            return $"A {groupLabel} {dayLabel} plan.";
-        return $"A {groupLabel} {dayLabel} plan featuring {string.Join(", ", topCats)}.";
+            return $"A {groupLabel} {dayLabelEn} plan.";
+        return $"A {groupLabel} {dayLabelEn} plan featuring {string.Join(", ", topCats)}.";
     }
 
     private static bool IsUsableName(string candidate, string rawMessage)
