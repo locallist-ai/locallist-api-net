@@ -156,42 +156,85 @@ public class BuilderPlanNameTests
 
     // ── Fallback bilingue (lang="es"): el nombre/descripcion sintetizados se persisten bajo
     // ── NameI18n["es"]. Con el template siempre-EN, un titulo ingles quedaba etiquetado como
-    // ── espanol. Estos tests fijan que lang="es" produce espanol y lang="en" no cambia.
+    // ── espanol. Los inputs son los tokens CANONICOS EN que produce el pipeline de verdad
+    // ── (vibes del prompt/slot extractor, PlaceTaxonomy en lowercase, AllowedGroupTypes) —
+    // ── no espanol pre-cocinado que el extractor jamas emite. Se aserta la traduccion.
 
     [Fact]
-    public void BuildPlanName_LangEs_SynthesizesSpanish()
+    public void BuildPlanName_LangEs_CanonicalVibe_TranslatedAndPostponed()
     {
         var prefs = new ExtractedPreferences
         {
             Days = 2,
-            Vibes = new List<string> { "romántico" },
+            Vibes = new List<string> { "romantic" }, // token canonico del pipeline
             PlanName = "Hola", // se rechaza -> fallback sintetizado
         };
 
         var name = BuilderController.BuildPlanName(prefs, "Miami", "Hola", "es");
 
-        Assert.Equal("Plan de 2 días de romántico en Miami", name);
+        // Adjetivo traducido y pospuesto — ni "romantic" verbatim ni "de romántico".
+        Assert.Equal("Plan de 2 días romántico en Miami", name);
+        Assert.DoesNotContain("romantic ", name);
         Assert.DoesNotContain("-day", name);
         Assert.DoesNotContain("plan in", name);
     }
 
     [Fact]
-    public void BuildPlanName_LangEs_OneDay_UsesSingular()
+    public void BuildPlanName_LangEs_CanonicalCategory_TranslatedWithSingularDay()
     {
         var prefs = new ExtractedPreferences
         {
             Days = 1,
-            Categories = new List<string> { "gastronomía" },
+            Categories = new List<string> { "food" }, // categoria canonica lowercase
             PlanName = "hi",
         };
 
         var name = BuilderController.BuildPlanName(prefs, "Sevilla", "hi", "es");
 
         Assert.Equal("Plan de 1 día de gastronomía en Sevilla", name);
+        Assert.DoesNotContain("food", name, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void BuildPlanName_LangEs_NoSignals_FallsBackToSpanishCurated()
+    public void BuildPlanName_LangEs_CategoryTokenInsideVibes_StillTranslated()
+    {
+        // El keyword-fallback del extractor copia categorias dentro de Vibes
+        // (PreferenceExtractorService.ExtractWithKeywords) — el diccionario del
+        // nombre debe resolverlas igualmente.
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            Vibes = new List<string> { "outdoors" },
+            PlanName = "hola",
+        };
+
+        var name = BuilderController.BuildPlanName(prefs, "Miami", "hola", "es");
+
+        Assert.Equal("Plan de 2 días al aire libre en Miami", name);
+    }
+
+    [Fact]
+    public void BuildPlanName_LangEs_UnknownToken_OmittedNeverEnglish()
+    {
+        // Regla: token fuera del set canonico se OMITE con gracia — nunca se
+        // interpola ingles dentro de la frase espanola.
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            Vibes = new List<string> { "zen-vibes" },
+            Categories = new List<string> { "speakeasy" },
+            PlanName = "Hola",
+        };
+
+        var name = BuilderController.BuildPlanName(prefs, "Miami", "Hola", "es");
+
+        Assert.Equal("Plan a medida de 2 días en Miami", name);
+        Assert.DoesNotContain("zen-vibes", name);
+        Assert.DoesNotContain("speakeasy", name);
+    }
+
+    [Fact]
+    public void BuildPlanName_LangEs_NoSignals_FallsBackToSpanishGeneric()
     {
         var prefs = new ExtractedPreferences
         {
@@ -222,19 +265,21 @@ public class BuilderPlanNameTests
     }
 
     [Fact]
-    public void BuildPlanDescription_LangEs_WithCategories_Spanish()
+    public void BuildPlanDescription_LangEs_CanonicalTokens_FullyTranslated()
     {
         var prefs = new ExtractedPreferences
         {
             Days = 2,
-            GroupType = "pareja",
-            Categories = new List<string> { "gastronomía", "cultura", "aire libre", "café" },
+            GroupType = "couple", // token canonico de AllowedGroupTypes
+            Categories = new List<string> { "food", "culture", "outdoors", "coffee" },
         };
 
         var desc = BuilderController.BuildPlanDescription(prefs, "es");
 
-        Assert.Equal("Un plan de 2 días ideal para pareja con gastronomía, cultura, aire libre.", desc);
-        Assert.DoesNotContain("café", desc); // cuarta queda fuera
+        Assert.Equal("Un plan de 2 días en pareja con gastronomía, cultura, aire libre.", desc);
+        Assert.DoesNotContain("couple", desc);
+        Assert.DoesNotContain("food", desc, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("cafés", desc); // cuarta categoria queda fuera del top-3
         Assert.DoesNotContain("friendly", desc);
         Assert.DoesNotContain("featuring", desc);
     }
@@ -251,7 +296,41 @@ public class BuilderPlanNameTests
 
         var desc = BuilderController.BuildPlanDescription(prefs, "es");
 
-        Assert.Equal("Un plan de 1 día ideal para solo.", desc);
+        Assert.Equal("Un plan de 1 día en solitario.", desc);
+    }
+
+    [Fact]
+    public void BuildPlanDescription_LangEs_UnknownTokens_OmittedNeverEnglish()
+    {
+        // GroupType fuera del set cerrado -> clausula omitida; categoria no mapeada
+        // -> descartada de la lista. Nada de ingles verbatim en la frase.
+        var prefs = new ExtractedPreferences
+        {
+            Days = 2,
+            GroupType = "squad",
+            Categories = new List<string> { "food", "bizarre-stuff" },
+        };
+
+        var desc = BuilderController.BuildPlanDescription(prefs, "es");
+
+        Assert.Equal("Un plan de 2 días con gastronomía.", desc);
+        Assert.DoesNotContain("squad", desc);
+        Assert.DoesNotContain("bizarre", desc);
+    }
+
+    [Fact]
+    public void BuildPlanDescription_LangEs_AllTokensUnknown_GenericSentence()
+    {
+        var prefs = new ExtractedPreferences
+        {
+            Days = 3,
+            GroupType = "crew",
+            Categories = new List<string> { "mystery" },
+        };
+
+        var desc = BuilderController.BuildPlanDescription(prefs, "es");
+
+        Assert.Equal("Un plan de 3 días.", desc);
     }
 
     [Fact]
