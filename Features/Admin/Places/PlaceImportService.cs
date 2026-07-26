@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.AI.Services;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
@@ -273,6 +274,22 @@ public class PlaceImportService
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Normaliza el rango de precio de un import a su forma canónica. A diferencia de las
+    /// rutas admin CRUD (que devuelven 400), un import no debe reventar un batch por una
+    /// fila sucia: si el valor no es canónico tras normalizar se descarta a null y se loguea.
+    /// </summary>
+    private string? NormalizePriceOrNull(string? raw, string placeName)
+    {
+        if (PriceRanges.TryNormalize(raw, out var normalized))
+            return normalized;
+
+        _logger.LogWarning(
+            "Import: descartado PriceRange no canónico '{Raw}' para '{Place}'; se guarda null.",
+            raw, placeName);
+        return null;
+    }
+
+    /// <summary>
     /// Returns true when the request should be skipped due to matching an existing Name+City
     /// combination. Requests with a non-null GooglePlaceId are always allowed through here —
     /// they are deduped later in InsertWithDedupAsync by GooglePlaceId.
@@ -351,7 +368,9 @@ public class PlaceImportService
                 BestFor = req.BestFor,
                 SuitableFor = req.SuitableFor,
                 BestTimes = req.BestTimes,
-                PriceRange = req.PriceRange?.Trim(),
+                // Import tolerante: normaliza el rango; si tras normalizar sigue sucio se
+                // guarda null (+ log warn) en vez de reventar el batch entero por una fila.
+                PriceRange = NormalizePriceOrNull(req.PriceRange, req.Name),
                 // T3: barrido, nunca persistir una URL de Google (key) ni el preview
                 // admin-authed, venga de donde venga la request (p.ej. bulk import pegado a
                 // mano por un curador desde una respuesta de otro endpoint).

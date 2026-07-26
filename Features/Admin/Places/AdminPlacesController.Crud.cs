@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
@@ -22,6 +23,11 @@ public partial class AdminPlacesController
         if (!await _taxonomy.AreValidSubcategoriesAsync(request.Category, resolvedSubs, ct))
             return BadRequest(new { error = $"Invalid subcategory for category '{request.Category}'.", code = "subcategory_not_in_taxonomy" });
 
+        // Rango de precio normalizado + validado en el borde de escritura: los imports
+        // curados escribían valores a mano y un rango sucio ("€€", "cheap") acababa en DB.
+        if (!PriceRanges.TryNormalize(request.PriceRange, out var normalizedPrice))
+            return BadRequest(new { error = "invalid_price_range", allowed = PriceRanges.All });
+
         var userId = await User.GetUserIdAsync(_db, ct);
         var now = _clock.GetUtcNow();
 
@@ -39,7 +45,7 @@ public partial class AdminPlacesController
             BestFor = request.BestFor,
             SuitableFor = request.SuitableFor,
             BestTimes = request.BestTimes,
-            PriceRange = request.PriceRange?.Trim(),
+            PriceRange = normalizedPrice,
             // T3: barrido, nunca persistir una URL de Google (key) ni el preview admin-authed.
             Photos = PlacePhotoUrls.SanitizeForStorage(request.Photos),
             GooglePlaceId = request.GooglePlaceId?.Trim(),
@@ -109,6 +115,12 @@ public partial class AdminPlacesController
         if (resolvedUpdateSubs != null && !await _taxonomy.AreValidSubcategoriesAsync(effectiveCategory, resolvedUpdateSubs, ct))
             return BadRequest(new { error = $"Invalid subcategory for category '{effectiveCategory}'.", code = "subcategory_not_in_taxonomy" });
 
+        // Solo validamos el rango si viene en el patch (null = campo no tocado). Un valor
+        // presente pero sucio → 400; vacío/whitespace normaliza a null (borra el rango).
+        string? normalizedPrice = null;
+        if (request.PriceRange != null && !PriceRanges.TryNormalize(request.PriceRange, out normalizedPrice))
+            return BadRequest(new { error = "invalid_price_range", allowed = PriceRanges.All });
+
         // Apply non-null fields only (partial update)
         if (request.Name != null) place.Name = request.Name.Trim();
         if (request.Category != null) place.Category = request.Category;
@@ -121,7 +133,7 @@ public partial class AdminPlacesController
         if (request.BestFor != null) place.BestFor = request.BestFor;
         if (request.SuitableFor != null) place.SuitableFor = request.SuitableFor;
         if (request.BestTimes != null) place.BestTimes = request.BestTimes;
-        if (request.PriceRange != null) place.PriceRange = request.PriceRange.Trim();
+        if (request.PriceRange != null) place.PriceRange = normalizedPrice;
         // T3: barrido, nunca persistir una URL de Google (key) ni el preview admin-authed.
         if (request.Photos != null) place.Photos = PlacePhotoUrls.SanitizeForStorage(request.Photos);
         if (request.GooglePlaceId != null) place.GooglePlaceId = request.GooglePlaceId.Trim();
