@@ -454,6 +454,113 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(await db.Plans.AsNoTracking().AnyAsync(p => p.Name == uniqueName));
     }
 
+    // ── i18n de planes CURADOS: el gate curated exige translation_status[lang]=="approved"
+    // ── antes de servir non-EN (regresion: PlanDto/PlanDetailDto no pasaban el doc de estado,
+    // ── asi que servian EN incondicionalmente aunque la traduccion ES estuviese aprobada).
+
+    [Fact]
+    public async Task GetPlans_CuratedApprovedEs_AcceptLanguageEs_ReturnsSpanish()
+    {
+        var db = fixture.GetDbContext();
+        var plan = MakeCuratedI18nPlan(
+            "curated-es-approved",
+            nameEn: "Weekend in Miami", nameEs: "Fin de semana en Miami",
+            descEn: "A curated weekend.", descEs: "Un fin de semana curado.",
+            approvedEs: true);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var body = await GetJsonWithLang("/plans", "es");
+        var served = body.GetProperty("plans").EnumerateArray()
+            .First(p => p.GetProperty("id").GetGuid() == plan.Id);
+        Assert.Equal("Fin de semana en Miami", served.GetProperty("name").GetString());
+        Assert.Equal("Un fin de semana curado.", served.GetProperty("description").GetString());
+    }
+
+    [Fact]
+    public async Task GetPlans_CuratedNotApprovedEs_AcceptLanguageEs_FallsBackToEnglish()
+    {
+        var db = fixture.GetDbContext();
+        var plan = MakeCuratedI18nPlan(
+            "curated-es-unapproved",
+            nameEn: "Weekend in Miami", nameEs: "Fin de semana en Miami",
+            descEn: "A curated weekend.", descEs: "Un fin de semana curado.",
+            approvedEs: false); // traduccion ES existe pero NO aprobada -> gate sirve EN
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var body = await GetJsonWithLang("/plans", "es");
+        var served = body.GetProperty("plans").EnumerateArray()
+            .First(p => p.GetProperty("id").GetGuid() == plan.Id);
+        Assert.Equal("Weekend in Miami", served.GetProperty("name").GetString());
+        Assert.Equal("A curated weekend.", served.GetProperty("description").GetString());
+    }
+
+    [Fact]
+    public async Task GetPlanById_CuratedApprovedEs_AcceptLanguageEs_ReturnsSpanish()
+    {
+        var db = fixture.GetDbContext();
+        var plan = MakeCuratedI18nPlan(
+            "curated-detail-es-approved",
+            nameEn: "Weekend in Miami", nameEs: "Fin de semana en Miami",
+            descEn: "A curated weekend.", descEs: "Un fin de semana curado.",
+            approvedEs: true);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var body = await GetJsonWithLang($"/plans/{plan.Id}", "es");
+        Assert.Equal("Fin de semana en Miami", body.GetProperty("name").GetString());
+        Assert.Equal("Un fin de semana curado.", body.GetProperty("description").GetString());
+    }
+
+    [Fact]
+    public async Task GetPlanById_CuratedApprovedEs_AcceptLanguageEn_ReturnsEnglish()
+    {
+        var db = fixture.GetDbContext();
+        var plan = MakeCuratedI18nPlan(
+            "curated-detail-en",
+            nameEn: "Weekend in Miami", nameEs: "Fin de semana en Miami",
+            descEn: "A curated weekend.", descEs: "Un fin de semana curado.",
+            approvedEs: true);
+        db.Plans.Add(plan);
+        await db.SaveChangesAsync();
+
+        var body = await GetJsonWithLang($"/plans/{plan.Id}", "en");
+        Assert.Equal("Weekend in Miami", body.GetProperty("name").GetString());
+        Assert.Equal("A curated weekend.", body.GetProperty("description").GetString());
+    }
+
+    private async Task<JsonElement> GetJsonWithLang(string url, string lang)
+    {
+        var client = fixture.CreateClient();
+        var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Add("Accept-Language", lang);
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        return await res.Content.ReadFromJsonAsync<JsonElement>();
+    }
+
+    private static Plan MakeCuratedI18nPlan(
+        string slug, string nameEn, string nameEs, string descEn, string descEs, bool approvedEs)
+    {
+        var status = approvedEs ? """{"es":"approved"}""" : """{"es":"pending"}""";
+        return new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = nameEn,
+            City = "Miami",
+            Type = "curated",
+            Source = "curated", // isCurated del DTO se deriva de Source, no de Type
+            Description = descEn,
+            DurationDays = 2,
+            IsPublic = true,
+            IsShowcase = true, // visible para el GET /plans anonimo (showcase)
+            NameI18n = JsonDocument.Parse($$"""{"en":{{JsonSerializer.Serialize(nameEn)}},"es":{{JsonSerializer.Serialize(nameEs)}}}"""),
+            DescriptionI18n = JsonDocument.Parse($$"""{"en":{{JsonSerializer.Serialize(descEn)}},"es":{{JsonSerializer.Serialize(descEs)}}}"""),
+            TranslationStatus = JsonDocument.Parse(status),
+        };
+    }
+
     private static Plan MakePlan(
         string name,
         bool isPublic = true,

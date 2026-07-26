@@ -77,6 +77,66 @@ public class BuilderTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisp
     }
 
     [Fact]
+    public async Task Chat_AcceptLanguageEs_RejectedGeminiName_PersistsRealSpanishUnderEsKey()
+    {
+        // E2E del fallback de naming localizado: Gemini devuelve planName "Hola"
+        // (greeting -> IsUsableName lo rechaza) con tokens canonicos EN reales del
+        // pipeline (romantic/food/couple). Con Accept-Language:es, lo que se persiste
+        // bajo NameI18n["es"]/DescriptionI18n["es"] debe ser espanol de verdad —
+        // antes el template siempre-EN etiquetaba "2-day romantic plan in Miami"
+        // como espanol, y tras el primer fix quedaban tokens EN interpolados.
+        await SeedPublishedMiamiPlaces(3);
+
+        var extracted = new
+        {
+            days = 2,
+            categories = new[] { "food" },
+            vibes = new[] { "romantic" },
+            groupType = "couple",
+            planName = "Hola", // rechazado -> fallback sintetizado
+            // sin "description": fuerza el fallback BuildPlanDescription
+            maxStopsPerDay = 4
+        };
+        fixture.FakeGemini.Responder = _ => GeminiOk(JsonSerializer.Serialize(extracted));
+
+        var client = await fixture.CreateGenerationClientAsync();
+        client.DefaultRequestHeaders.AcceptLanguage.Clear();
+        client.DefaultRequestHeaders.AcceptLanguage.Add(new StringWithQualityHeaderValue("es"));
+
+        var response = await client.PostAsJsonAsync("/builder/chat", new
+        {
+            message = "Hola",
+            tripContext = new { city = Miami, days = 2, groupType = "couple" }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = body.GetProperty("plan").GetProperty("id").GetGuid();
+
+        var db = fixture.GetDbContext();
+        var persisted = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+
+        Assert.NotNull(persisted.NameI18n);
+        var nameEs = persisted.NameI18n!.RootElement.GetProperty("es").GetString();
+        Assert.Equal("Plan de 2 días romántico en Miami", nameEs);
+
+        Assert.NotNull(persisted.DescriptionI18n);
+        var descEs = persisted.DescriptionI18n!.RootElement.GetProperty("es").GetString();
+        Assert.Equal("Un plan de 2 días en pareja con gastronomía.", descEs);
+
+        // Cinturon: nada de ingles del template viejo bajo la clave "es".
+        foreach (var text in new[] { nameEs!, descEs! })
+        {
+            Assert.DoesNotContain("-day", text);
+            Assert.DoesNotContain("plan in", text);
+            Assert.DoesNotContain("featuring", text);
+            Assert.DoesNotContain("friendly", text);
+            Assert.DoesNotContain("romantic ", text);
+            Assert.DoesNotContain("couple", text);
+        }
+    }
+
+    [Fact]
     public async Task Chat_Gemini502_FallsBackToKeywords()
     {
         await SeedPublishedMiamiPlaces(3);
