@@ -254,11 +254,13 @@ public static class RateLimitingExtensions
                         Window = TimeSpan.FromMinutes(1)
                     }));
 
-            // ── ImportLimit: techo por IP del import de vídeo (POST /import/video) ───────
+            // ── ImportLimit: techo por IP del slice de import (POST /import/video + /import/plan) ──
             // El import quema Gemini multimodal (vídeo entero, mucho más caro que un turno de
             // chat) y ya está gateado por [Authorize] + Plus + cuota por usuario (30/mes·10/día).
             // Este techo por IP es la capa ANTI-FARMING: un atacante con N cuentas Plus (o cuotas
-            // por usuario frescas) no puede superar el gasto de Gemini por IP. Sliding window
+            // por usuario frescas) no puede superar el gasto de Gemini por IP. T4 (/import/plan)
+            // comparte el techo: no consume Gemini pero acepta placeIds published arbitrarios sin
+            // exigir un import previo — sin él solo lo acotaría el global 100/min. Sliding window
             // horario por IP (mismo limiter que Builder/Chat). Tunable vía Import:RateLimitPerHourPerIp.
             var importIpCeiling = configuration.GetValue<int?>("Import:RateLimitPerHourPerIp")
                                   ?? DefaultImportIpCeilingPerHour;
@@ -274,7 +276,7 @@ public static class RateLimitingExtensions
     }
 
     /// <summary>
-    /// Techo horario por IP del import de vídeo (POST /import/video). Bajo en absoluto porque
+    /// Techo horario por IP del slice de import (POST /import/video + /import/plan). Bajo en absoluto porque
     /// cada import es una llamada multimodal cara a Gemini; la cuota por usuario (30/mes·10/día)
     /// es el límite fino, este es el suelo anti-farming por IP. Tunable vía
     /// <c>Import:RateLimitPerHourPerIp</c>.

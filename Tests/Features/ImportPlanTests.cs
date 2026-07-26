@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
 
@@ -346,18 +348,99 @@ public class ImportPlanTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Contains("Miami", name);
     }
 
-    // ── (i) determinismo: mismo input → misma secuencia de stops ─────────────────
+    // ── TOCTOU hard-delete: predicado del catch del SaveChanges ─────────────────
     [Fact]
-    public async Task SameInput_ProducesDeterministicSchedule()
+    public void SaveCatchPredicate_ClassifiesFkViolation()
+    {
+        // La carrera real (hard-delete admin de un place ENTRE el SELECT de validación y el
+        // INSERT de los stops) no es reproducible determinísticamente vía ApiFixture — exigiría
+        // pausar la request a mitad del action. Se testea el predicado que enruta el catch de
+        // ImportPlanController (COMPARTIDO con Favorites, misma carrera): 23503 → 400
+        // import_invalid_places (no 500); cualquier otro DbUpdateException → propaga.
+        var fk = new DbUpdateException("insert failed",
+            new Npgsql.PostgresException("violates foreign key \"FK_plan_stops_places_place_id\"", "ERROR", "ERROR", "23503"));
+        var other = new DbUpdateException("boom", new InvalidOperationException("connection lost"));
+
+        Assert.True(LocalList.API.NET.Features.Favorites.FavoritesController.IsForeignKeyViolation(fk));
+        Assert.False(LocalList.API.NET.Features.Favorites.FavoritesController.IsForeignKeyViolation(other));
+    }
+
+    // ── (i) determinismo: mismo SET → misma secuencia de stops, aunque la 2ª llamada
+    //        envíe los placeIds BARAJADOS (el plan es función del set, no del orden de envío) ──
+    [Fact]
+    public async Task SameInput_EvenShuffled_ProducesDeterministicSchedule()
     {
         var (client, _) = await PlusClient("impl-det");
         var city = LiveCity();
         var ids = await SeedLive(city, 6);
+        var shuffled = ids.AsEnumerable().Reverse().ToList();
+        Assert.NotEqual(ids, shuffled); // el shuffle es real
 
         var a = await (await Post(client, city, 3, ids)).Content.ReadFromJsonAsync<JsonElement>();
-        var b = await (await Post(client, city, 3, ids)).Content.ReadFromJsonAsync<JsonElement>();
+        var b = await (await Post(client, city, 3, shuffled)).Content.ReadFromJsonAsync<JsonElement>();
 
         Assert.Equal(StopTuples(a), StopTuples(b));
+    }
+}
+
+/// <summary>
+/// Fixture con el rate limiting REAL activo y <c>Import:RateLimitPerHourPerIp=2</c> — verifica que
+/// <c>POST /import/plan</c> comparte el techo por IP <c>ImportLimit</c> con T1 (este endpoint
+/// acepta placeIds published arbitrarios SIN exigir un import previo, así que sin el techo solo lo
+/// acotaría el global 100/min). Reusa el <see cref="TestClientIpStartupFilter"/> de Builder para
+/// fijar la IP. Container propio (config distinta).
+/// </summary>
+public sealed class ImportPlanRateLimitFixture : ApiFixture
+{
+    protected override bool DisableRateLimiting => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseSetting("Import:RateLimitPerHourPerIp", "2");
+        builder.ConfigureTestServices(s =>
+            s.AddSingleton<IStartupFilter, TestClientIpStartupFilter>());
+        base.ConfigureWebHost(builder);
+    }
+}
+
+public class ImportPlanRateLimitTests(ImportPlanRateLimitFixture fixture)
+    : IClassFixture<ImportPlanRateLimitFixture>
+{
+    [Fact]
+    public async Task ImportPlan_SharesImportLimitIpCeiling_ThirdRequestReturns429()
+    {
+        var uid = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(uid, $"implrl-{uid:N}@test.com", tier: "pro");
+        var city = "TestCity" + Guid.NewGuid().ToString("N")[..10];
+        fixture.MarkCityLive(city);
+
+        var db = fixture.GetDbContext();
+        var ids = new List<Guid>();
+        for (var i = 0; i < 2; i++)
+        {
+            var id = Guid.NewGuid();
+            db.Places.Add(new Place
+            {
+                Id = id, Name = $"RL{i}-{Guid.NewGuid():N}"[..12], City = city,
+                Status = "published", Category = "food", WhyThisPlace = "t",
+            });
+            ids.Add(id);
+        }
+        await db.SaveChangesAsync();
+
+        async Task<HttpResponseMessage> Send()
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, "/import/plan")
+            {
+                Content = JsonContent.Create(new { city, days = 1, placeIds = ids })
+            };
+            req.Headers.Add("X-Test-Client-Ip", "10.99.42.7"); // misma IP → mismo bucket ImportLimit
+            return await client.SendAsync(req);
+        }
+
+        Assert.Equal(HttpStatusCode.Created, (await Send()).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await Send()).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await Send()).StatusCode); // techo 2/hr por IP
     }
 }
 

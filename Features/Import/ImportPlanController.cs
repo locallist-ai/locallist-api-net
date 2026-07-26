@@ -1,9 +1,11 @@
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using LocalList.API.NET.Features.Builder.Services;
+using LocalList.API.NET.Features.Favorites;
 using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Features.Plans;
 using LocalList.API.NET.Shared.Auth;
@@ -33,10 +35,12 @@ namespace LocalList.API.NET.Features.Import;
 /// confirmados (deduplicados), ni uno menos.
 ///
 /// Gate: mismo patrón que T1 — <c>[Authorize]</c> AppScheme + Plus fresco de DB (<c>import_requires_plus</c>).
-/// El import entero es feature Plus; la extracción (cara) ya se pagó en T1, así que la creación NO
-/// consume cuota nueva — el anti-abuso es el rate limit global + el techo de escrituras. Gating de
-/// terceros idéntico a T1 (<c>Import:ThirdPartyEnabled</c>). Origen del plan: <c>source="imported"</c>
-/// (nunca curated/showcase), visibilidad <c>private</c>, owner = caller.
+/// El import entero es feature Plus. La creación NO consume cuota de import (esa mide llamadas a
+/// Gemini y aquí no hay ninguna), pero SÍ comparte el techo por IP <c>ImportLimit</c> (20/hr) con
+/// T1: este endpoint acepta placeIds published arbitrarios SIN exigir un import previo, así que
+/// sin él solo lo acotaría el global 100/min — paridad anti-farming con el resto del slice.
+/// Gating de terceros idéntico a T1 (<c>Import:ThirdPartyEnabled</c>). Origen del plan:
+/// <c>source="imported"</c> (nunca curated/showcase), visibilidad <c>private</c>, owner = caller.
 /// </summary>
 [ApiController]
 [Route("import")]
@@ -80,6 +84,7 @@ public class ImportPlanController : ControllerBase
     }
 
     [HttpPost("plan")]
+    [EnableRateLimiting("ImportLimit")]
     public async Task<IActionResult> CreatePlanFromImport(
         [FromBody] CreateImportPlanRequest request, CancellationToken ct)
     {
@@ -118,8 +123,11 @@ public class ImportPlanController : ControllerBase
         // 5. days: clamp a [1, MaxPlanDurationDays] (import es Plus → tope 14). Nunca rechaza por días.
         var days = Math.Clamp(request.Days, 1, PlanLimits.MaxPlanDurationDays);
 
-        // 6. placeIds: dedup preservando el orden de confirmación del usuario, no vacío.
-        var placeIds = (request.PlaceIds ?? Array.Empty<Guid>()).Distinct().ToList();
+        // 6. placeIds: dedup + orden CANÓNICO por Id, no vacío. El orden de envío del cliente NO
+        //    participa: el plan resultante es función del SET de places (el scheduler reordena por
+        //    geografía igualmente), así que dos confirmaciones del mismo set — en cualquier orden —
+        //    producen exactamente el mismo plan.
+        var placeIds = (request.PlaceIds ?? Array.Empty<Guid>()).Distinct().OrderBy(g => g).ToList();
         if (placeIds.Count == 0)
             return BadRequest(new { error = "import_invalid_places", message = "at least one placeId is required" });
 
@@ -164,12 +172,12 @@ public class ImportPlanController : ControllerBase
                        ?? $"Plan · {city}";
         }
 
-        // 10. Scheduling determinista sobre el SET FIJO. Ordenamos los places por el ORDEN DE
-        //     CONFIRMACIÓN del usuario (placeIds) antes de programar: la query de DB no garantiza
-        //     orden, y el scheduler es sensible al orden de entrada (selección rank-first +
-        //     round-robin). Fijarlo al orden del usuario hace el resultado DETERMINISTA y respeta su
-        //     intención. MaxStopsPerDay = tope global para que la SELECCIÓN no descarte ninguno
-        //     (totalSlots ≥ placeIds.Count garantizado por el cap del paso 6).
+        // 10. Scheduling determinista sobre el SET FIJO. Los places se pasan en el orden CANÓNICO
+        //     de placeIds (paso 6): la query de DB no garantiza orden y el scheduler es sensible al
+        //     orden de entrada (anchor entre top-3 + round-robin), así que fijarlo hace el resultado
+        //     DETERMINISTA e invariante al orden de envío. MaxStopsPerDay = tope global para que la
+        //     SELECCIÓN no descarte ninguno (totalSlots ≥ placeIds.Count garantizado por el cap del
+        //     paso 6).
         var placeById = places.ToDictionary(p => p.Id);
         var orderedPlaces = placeIds.Select(id => placeById[id]).ToList();
 
@@ -210,7 +218,20 @@ public class ImportPlanController : ControllerBase
         _db.PlanStops.AddRange(stops);
 
         // Plan + stops en UN SaveChanges = una transacción → atómico.
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (FavoritesController.IsForeignKeyViolation(ex))
+        {
+            // TOCTOU: hard-delete (admin) de un place entre el SELECT de validación y el INSERT
+            // de los stops → 23503 del FK plan_stops→places. Mismo 400 opaco que si el place
+            // nunca hubiera sido válido — nunca un 500. La transacción implícita del SaveChanges
+            // se revierte entera (0 filas). Predicado compartido con Favorites (misma carrera).
+            _logger.LogInformation(
+                "ImportPlan: place hard-deleted mid-request userId={UserId} city={City}", userId, city);
+            return BadRequest(new { error = "import_invalid_places" });
+        }
 
         _logger.LogInformation(
             "ImportPlan: created plan={PlanId} userId={UserId} city={City} days={Days} places={N} platform={Platform}",
