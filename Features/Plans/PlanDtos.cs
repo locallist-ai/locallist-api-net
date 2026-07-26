@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.I18n;
@@ -81,7 +82,13 @@ public record PlanDetailDto(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     List<PlanDayDto> Days,
-    List<PlanRouteSegmentDto>? RouteSegments = null
+    List<PlanRouteSegmentDto>? RouteSegments = null,
+    // F2 T4 — atribución de import. Aditivo: omitido del JSON cuando null (planes no-import), así
+    // que ningún cliente existente ve campos nuevos salvo en planes creados desde un import.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ImportedFromPlatform = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ImportedCreatorHandle = null
 )
 {
     public static PlanDetailDto FromEntity(
@@ -130,7 +137,8 @@ public record PlanDetailDto(
             // Back-compat S0: isPublic derivado de visibility (ver PlanDto.FromEntity).
             p.ImageUrl, p.DurationDays, p.StartDate, p.TripContext, p.Visibility == "public", p.IsShowcase,
             p.CreatedById, p.CreatedAt, p.UpdatedAt, days,
-            routeSegments?.Count > 0 ? routeSegments.ToList() : null
+            routeSegments?.Count > 0 ? routeSegments.ToList() : null,
+            p.ImportedFromPlatform, p.ImportedCreatorHandle
         );
     }
 }

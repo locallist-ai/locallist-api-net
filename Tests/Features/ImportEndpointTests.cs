@@ -76,11 +76,30 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     {
         var (client, userId) = await PlusClient("imp-happy");
 
+        // Ciudad ÚNICA de ESTE request: el metric no guarda identidad del uploader (retención),
+        // así que la clave de scoping para recuperar LA fila de este test es la city extraída —
+        // filtrar por Platform+CreatedAt agarraba el metric de otro test bajo paralelismo/empate
+        // de timestamps (flaky 1/1200).
+        var city = "ImpHappyCity" + Guid.NewGuid().ToString("N")[..10];
+        fixture.FakeVideoImport.GenerateContentResponder = _ =>
+            fixture.FakeVideoImport.GenerateContentOk($$"""
+                {
+                  "city": "{{city}}",
+                  "country": "USA",
+                  "language": "en",
+                  "places": [
+                    { "name": "Sunny Rooftop", "descriptor": "rooftop bar en Wynwood", "category": "nightlife", "evidence": "ocr", "timestampSec": 12 }
+                  ],
+                  "vibes": ["sunset", "cocktails"],
+                  "confidence": 0.82
+                }
+                """);
+
         var res = await client.PostAsync(Url("self", "@chef"), VideoForm());
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
 
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("Miami", body.GetProperty("city").GetString());
+        Assert.Equal(city, body.GetProperty("city").GetString());
         Assert.Equal("self", body.GetProperty("platform").GetString());
         Assert.Equal("@chef", body.GetProperty("creatorHandle").GetString());
         var places = body.GetProperty("places");
@@ -91,12 +110,13 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(body.TryGetProperty("diagnostics", out _));
         Assert.False(body.TryGetProperty("fileUri", out _));
 
-        // Métrica persistida.
+        // Métrica persistida — scoped por la city única de ESTE request (SingleAsync: si esta
+        // query pudiera devolver >1 fila, el test debe fallar ruidosamente, no elegir una).
         var db = fixture.GetDbContext();
-        var metric = await db.VideoImportMetrics
-            .Where(m => m.Platform == "self").OrderByDescending(m => m.CreatedAt).FirstAsync();
+        var metric = await db.VideoImportMetrics.SingleAsync(m => m.City == city);
         Assert.Null(metric.ErrorCode);
         Assert.Equal(1, metric.NumPlaces);
+        Assert.Equal("self", metric.Platform);
 
         // Cuota consumida en ambas ventanas; fichero remoto borrado (no retención).
         Assert.Equal(1, await Daily(userId));
