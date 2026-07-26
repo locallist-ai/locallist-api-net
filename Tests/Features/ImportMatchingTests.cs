@@ -150,21 +150,109 @@ public class ImportMatchingTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Null(results[0].MatchedPlaceId);
     }
 
-    // ── (h) empates → resultado determinista (mismo Id en 2 runs; el menor Id) ────
+    // ── (h) empate GENUINO entre ≥2 places distintos → AMBIGÜEDAD: null, determinista ──
+    // Cadena/franquicia: elegir "el de menor Id" sería enlazar una sucursal arbitraria y
+    // reportarla como high. Suprimir > enlazar mal.
     [Fact]
-    public async Task Ties_AreDeterministic_PickLowestId()
+    public async Task GenuineTie_TwoIdenticalNames_Ambiguous_ReturnsNull_Deterministic()
     {
         var city = City();
-        var id1 = await Seed("Duplicate Diner", city);
-        var id2 = await Seed("Duplicate Diner", city); // nombre idéntico → empate exacto
-        var expected = new[] { id1, id2 }.OrderBy(x => x).First();
+        await Seed("Starbucks", city);
+        await Seed("Starbucks", city); // dos places DISTINTOS, mismo nombre → tupla idéntica
 
-        var run1 = (await Match(city, Cand("Duplicate Diner")))[0].MatchedPlaceId;
-        var run2 = (await Match(city, Cand("Duplicate Diner")))[0].MatchedPlaceId;
+        var run1 = (await Match(city, Cand("Starbucks")))[0];
+        var run2 = (await Match(city, Cand("Starbucks")))[0];
 
-        Assert.Equal(run1, run2);        // reproducible
-        Assert.Equal(expected, run1);    // desempate por Id (orden total)
-        Assert.Equal(ImportMatchingService.ConfidenceHigh, (await Match(city, Cand("Duplicate Diner")))[0].MatchConfidence);
+        Assert.Null(run1.MatchedPlaceId);   // ambigüedad → sin match, nunca una sucursal al azar
+        Assert.Null(run1.MatchConfidence);
+        Assert.Null(run2.MatchedPlaceId);   // reproducible: mismo resultado en 2 runs
+        Assert.Null(run2.MatchConfidence);
+    }
+
+    // ── (h') sucursales de cadena ("Starbucks Brickell"/"Starbucks Wynwood") → null ──
+    // El nombre de marca es 1 token core: el suelo de 2 tokens del contains lo bloquea ANTES
+    // de llegar a elegir sucursal. Ni high ni medium, jamás una sucursal arbitraria.
+    [Fact]
+    public async Task FranchiseBranches_SingleTokenBrand_NoMatch()
+    {
+        var city = City();
+        await Seed("Starbucks Brickell", city);
+        await Seed("Starbucks Wynwood", city);
+
+        var m = (await Match(city, Cand("Starbucks")))[0];
+
+        Assert.Null(m.MatchedPlaceId);
+        Assert.Null(m.MatchConfidence);
+    }
+
+    // ── (regresión reviewer) contains de 1 token PROHIBIDO, da igual la longitud ──────
+    [Fact]
+    public async Task SingleTokenContains_Havana_NoMatch()
+    {
+        var city = City();
+        await Seed("Little Havana Cafe", city);
+        await Seed("Havana Restaurant", city);
+
+        // "Havana" = 1 token core → contains bloqueado; medium exige ≥2 tokens del candidato.
+        var m = (await Match(city, Cand("Havana")))[0];
+
+        Assert.Null(m.MatchedPlaceId);
+        Assert.Null(m.MatchConfidence);
+    }
+
+    [Fact]
+    public async Task SingleTokenContains_Grill_NoMatch()
+    {
+        var city = City();
+        await Seed("The Rusty Grill", city);
+
+        var m = (await Match(city, Cand("Grill")))[0];
+
+        Assert.Null(m.MatchedPlaceId);
+        Assert.Null(m.MatchConfidence);
+    }
+
+    // ── (regresión reviewer) el ruido se quita ANTES del contains: "Café Cubano" vs
+    // "Cubano" queda en 1 token core ("cafe" es ruido) → NUNCA high; con 1 token, null. ──
+    [Fact]
+    public async Task NoiseStrippedBeforeContains_CafeCubano_vs_Cubano_NoMatch()
+    {
+        var city = City();
+        await Seed("Cubano", city);
+
+        var m = (await Match(city, Cand("Café Cubano")))[0];
+
+        Assert.Null(m.MatchedPlaceId);
+        Assert.Null(m.MatchConfidence);
+    }
+
+    // ── (regresión reviewer, MAJOR 3) contains prefiere el nombre MÁS AJUSTADO ────────
+    [Fact]
+    public async Task Contains_PrefersTightestName_NotLongest()
+    {
+        var city = City();
+        var tight = await Seed("Joe's Stone Crab", city);
+        await Seed("Joe's Stone Crab Restaurant", city); // más largo; su core empata → gana el fullNorm corto
+
+        var m = (await Match(city, Cand("Stone Crab")))[0];
+
+        Assert.Equal(tight, m.MatchedPlaceId);
+        Assert.Equal(ImportMatchingService.ConfidenceHigh, m.MatchConfidence);
+    }
+
+    // ── (guard por mutación) MediumMinTokens=2: un candidato de 1 token DISTINTIVO tampoco
+    // matchea por medium. Mutar MediumMinTokens 2→1 convierte esto en medium → el test rompe. ──
+    [Fact]
+    public async Task SingleDistinctiveToken_NoMediumMatch_GuardsMinTokensFloor()
+    {
+        var city = City();
+        await Seed("Cubano Social Club", city);
+
+        // "Cubano" = 1 token core; con el suelo en 2 no entra ni a evaluar el solape.
+        var m = (await Match(city, Cand("Cubano")))[0];
+
+        Assert.Null(m.MatchedPlaceId);
+        Assert.Null(m.MatchConfidence);
     }
 
     // ── (i) integración end-to-end: import → matchedPlaceId + metric.num_matched ──
