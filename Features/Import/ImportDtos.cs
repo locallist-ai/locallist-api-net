@@ -35,6 +35,19 @@ public sealed record ImportPlaceDto(
     string? MatchedPlaceName = null,
     string? MatchConfidence = null);
 
+/// <summary>
+/// F2 T4 — cuerpo de <c>POST /import/plan</c>. La app envía la ciudad detectada, los días, y los
+/// <see cref="PlaceIds"/> que el usuario CONFIRMÓ (subconjunto de los <c>matchedPlaceId</c> de T3).
+/// <see cref="Platform"/>/<see cref="CreatorHandle"/> arrastran la atribución del creador desde T1.
+/// </summary>
+public sealed record CreateImportPlanRequest(
+    string City,
+    int Days,
+    Guid[] PlaceIds,
+    string? PlanName = null,
+    string? Platform = null,
+    string? CreatorHandle = null);
+
 /// <summary>Mapea el resultado del servicio + el matching al DTO público, sin filtrar diagnósticos.</summary>
 public static class ImportVideoResponseMapper
 {

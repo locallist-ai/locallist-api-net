@@ -130,6 +130,19 @@ public class Plan
     [StringLength(50)]
     public string Source { get; set; } = "user";
 
+    // ── Atribución de import (F2 T4). Solo se pueblan cuando el plan nace de un import de vídeo
+    // confirmado. NO confundir con `cloned_from` (eso es plan→plan del share-link). Un plan con
+    // Source == "imported" NUNCA es curated (isCurated mira Source == "curated") ni showcase.
+    /// <summary>Plataforma de origen del import (tiktok|instagram|other). NULL para self o no-import.</summary>
+    [Column("imported_from_platform")]
+    [StringLength(16)]
+    public string? ImportedFromPlatform { get; set; }
+
+    /// <summary>Handle del creador atribuido, SANEADO y sin '@' (regex tipo handle). NULL si ausente/inválido.</summary>
+    [Column("imported_creator_handle")]
+    [StringLength(64)]
+    public string? ImportedCreatorHandle { get; set; }
+
     [Column("created_by")]
     public Guid? CreatedById { get; set; }
 
