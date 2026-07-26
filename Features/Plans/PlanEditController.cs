@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -18,13 +19,17 @@ public class PlanEditController : ControllerBase
     private readonly ILogger<PlanEditController> _logger;
     private readonly LanguageAccessor _lang;
     private readonly PostHogService _posthog;
+    private readonly IConfiguration _config;
+    private readonly IPlanAccessService _access;
 
-    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang, PostHogService posthog)
+    public PlanEditController(LocalListDbContext db, ILogger<PlanEditController> logger, LanguageAccessor lang, PostHogService posthog, IConfiguration config, IPlanAccessService access)
     {
         _db = db;
         _logger = logger;
         _lang = lang;
         _posthog = posthog;
+        _config = config;
+        _access = access;
     }
 
     [HttpPut("{id}/stops")]
@@ -34,16 +39,22 @@ public class PlanEditController : ControllerBase
         if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
 
+        // Editar stops requiere CanEdit (owner o colaborador editor). Hoy solo el owner existe:
+        // comportamiento observable identico. Mismo 404 no-filtrante que antes.
+        var access = await _access.GetAccessAsync(id, userId.Value, ct);
+        if (!access.CanEdit)
+        {
+            if (access.PlanExists)
+                _logger.LogWarning("User {UserId} attempted to edit plan {PlanId} without edit access", userId, id);
+            return NotFound(new { error = "Plan not found" });
+        }
+
         var plan = await _db.Plans
             .Include(p => p.Stops)
             .FirstOrDefaultAsync(p => p.Id == id, ct);
 
-        if (plan == null || plan.CreatedById != userId.Value)
-        {
-            if (plan != null)
-                _logger.LogWarning("User {UserId} attempted to edit plan {PlanId} owned by {OwnerId}", userId, id, plan.CreatedById);
+        if (plan == null)
             return NotFound(new { error = "Plan not found" });
-        }
 
         // Validate all placeIds exist
         var placeIds = request.Stops.Select(s => s.PlaceId).Distinct().ToList();
@@ -99,7 +110,7 @@ public class PlanEditController : ControllerBase
             .ThenInclude(s => s.Place)
             .FirstAsync(p => p.Id == id, ct);
 
-        return Ok(PlanDetailDto.FromEntity(updatedPlan, _lang.Language));
+        return Ok(PlanDetailDto.FromEntity(updatedPlan, _lang.Language, publicBaseUrl: _config["Api:PublicBaseUrl"]));
     }
 
     [HttpDelete("{id}")]
@@ -109,14 +120,20 @@ public class PlanEditController : ControllerBase
         if (userId == null)
             return Unauthorized(new { error = "Invalid token" });
 
-        var plan = await _db.Plans.FirstOrDefaultAsync(p => p.Id == id, ct);
-
-        if (plan == null || plan.CreatedById != userId.Value)
+        // Borrar el plan queda restringido al OWNER (los colaboradores editor no borran el plan).
+        // Preserva EXACTAMENTE la conducta previa (owner-only) y su 404 no-filtrante.
+        var access = await _access.GetAccessAsync(id, userId.Value, ct);
+        if (!access.IsOwner)
         {
-            if (plan != null)
-                _logger.LogWarning("User {UserId} attempted to delete plan {PlanId} owned by {OwnerId}", userId, id, plan.CreatedById);
+            if (access.PlanExists)
+                _logger.LogWarning("User {UserId} attempted to delete plan {PlanId} they do not own", userId, id);
             return NotFound(new { error = "Plan not found" });
         }
+
+        var plan = await _db.Plans.FirstOrDefaultAsync(p => p.Id == id, ct);
+
+        if (plan == null)
+            return NotFound(new { error = "Plan not found" });
 
         // Audit follow-up 2026-04-27 (C3): cascade en LocalListDbContext borra
         // FollowSessions tied al plan — incluyendo las de OTROS users si el

@@ -39,7 +39,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             maxStopsPerDay = 4
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -54,7 +54,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
     [Fact]
     public async Task Generate_SessionNotFound_Returns404()
     {
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = Guid.NewGuid() });
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -76,7 +76,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         db.ChatSessions.Add(session);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 
@@ -97,7 +97,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         db.ChatSessions.Add(session);
         await db.SaveChangesAsync();
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 
@@ -172,7 +172,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             maxStopsPerDay = 3
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
@@ -232,6 +232,93 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         Assert.Empty(fixture.FakeGemini.Calls);
     }
 
+    // ── SEGURIDAD (T2 ronda 2): el replay idempotente de POST /chat/generate serializaba la
+    // entidad Plan cruda (plan = existing), cuyo Stops[].Place.Photos filtraba la API key de
+    // Google. Ahora pasa por PlanDetailDto (mismo DTO que GET /plans/:id) → fotos sintetizadas
+    // por el proxy, key server-side, jamas al cliente. Repro adversarial. ──
+    [Fact]
+    public async Task Generate_IdempotentReplay_StopPlaceHasGoogleKey_ResponseNeverLeaksKey()
+    {
+        var db = fixture.GetDbContext();
+
+        // /chat/generate exige [Authorize] (F4): usuario autenticado dueño de la sesion.
+        var userId = Guid.NewGuid();
+        var email = $"replay-leak-{Guid.NewGuid():N}@test.com";
+        db.Users.Add(new User { Id = userId, Email = email });
+
+        var place = new Place
+        {
+            Id = Guid.NewGuid(),
+            Name = "Replay Keyed Spot",
+            Category = "food",
+            City = Miami,
+            WhyThisPlace = "x",
+            Status = "published",
+            GooglePlaceId = "ChIJ_chat_replay_leak",
+            Photos = [PhotoDtoTestData.StoredGoogleUrlWithKey],
+        };
+        var plan = new Plan
+        {
+            Id = Guid.NewGuid(),
+            Name = "Replay Plan",
+            City = Miami,
+            Type = "ai",
+            DurationDays = 1,
+            CreatedById = userId,
+        };
+        db.Places.Add(place);
+        db.Plans.Add(plan);
+        db.PlanStops.Add(new PlanStop
+        {
+            Id = Guid.NewGuid(),
+            PlanId = plan.Id,
+            PlaceId = place.Id,
+            DayNumber = 1,
+            OrderIndex = 0,
+            TimeBlock = "morning",
+        });
+
+        // Sesion del usuario ya "generated" → dispara el path idempotente (sin llamar a Gemini).
+        var session = new ChatSession
+        {
+            UserId = userId,
+            Status = "generated",
+            GeneratedPlanId = plan.Id,
+            TurnCount = 3,
+            SlotsJson = JsonSerializer.Serialize(new
+            {
+                city = Miami, days = 1, groupType = "solo",
+                categories = new[] { "food" }, budget = "moderate"
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var token = fixture.CreateAppToken(userId, email);
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var rawBody = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("googleapis.com", rawBody);
+        Assert.DoesNotContain("key=", rawBody);
+        Assert.DoesNotContain("SUPER-SECRET-KEY", rawBody);
+
+        var body = JsonDocument.Parse(rawBody).RootElement;
+        Assert.True(body.GetProperty("isExisting").GetBoolean());
+
+        // El campo plan (PlanDetailDto) sintetiza la foto por el proxy en el place embebido.
+        var planPlace = body.GetProperty("plan").GetProperty("days")[0].GetProperty("stops")[0].GetProperty("place");
+        Assert.Equal($"/places/{place.Id}/photos/0", planPlace.GetProperty("photos")[0].GetString());
+        Assert.Equal("google", planPlace.GetProperty("photoSource").GetString());
+
+        // El campo stops (ResolveStopPlaces) tambien va sintetizado.
+        var resolvedPlace = body.GetProperty("stops")[0].GetProperty("place");
+        Assert.Equal($"/places/{place.Id}/photos/0", resolvedPlace.GetProperty("photos")[0].GetString());
+    }
+
     [Fact]
     public async Task Generate_SlotsToTripContext_CityUsedInGeneration()
     {
@@ -266,7 +353,7 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
             maxStopsPerDay = 3
         });
 
-        var client = fixture.CreateClient();
+        var client = await fixture.CreateGenerationClientAsync();
         var response = await client.PostAsJsonAsync("/chat/generate", new { sessionId = session.Id });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -514,7 +601,210 @@ public class ChatTests(ApiFixture fixture) : IClassFixture<ApiFixture>, IDisposa
         return (sid, quarantined, res.StatusCode);
     }
 
+    // ── Directo al plan: los críticos mandan, sin tanda de refinamiento ───────
+    // Regla de producto (fundador): en cuanto los 5 slots CRÍTICOS están cubiertos, el chat
+    // va DIRECTO a ready. Nunca fuerza una pregunta de dietary/alergias/ritmo/vibes, y en v1
+    // el slot dietary no existe ni se extrae.
+
+    [Fact]
+    public async Task Turn_CriticalsComplete_ReadyTrue_NoDietaryQuestion()
+    {
+        // 4 críticos ya puestos, falta budget. El turno que aporta budget debe pasar a ready
+        // SIN emitir la vieja pregunta de "restricciones alimentarias / ritmo".
+        var db = fixture.GetDbContext();
+        var session = new ChatSession
+        {
+            Status = "active",
+            TurnCount = 2,
+            SlotsJson = JsonSerializer.Serialize(new ChatSlots
+            {
+                City = Miami, Days = 3, GroupType = "couple", Categories = new() { "food" }
+                // Budget missing
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => SlotExtractorOk(new
+        {
+            extracted = new { budget = "moderate" },
+            aiMessage = "Great, that's everything I need!",
+            nextQuestion = (string?)null,
+            quickReplies = Array.Empty<object>()
+        });
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn",
+            new { sessionId = session.Id, message = "moderate budget" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.True(body.GetProperty("ready").GetBoolean());
+        Assert.Equal(0, body.GetProperty("missingCritical").GetArrayLength());
+
+        var aiMsg = body.GetProperty("aiMessage").GetString()!;
+        Assert.DoesNotContain("dietary", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("restriction", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("allerg", aiMsg, StringComparison.OrdinalIgnoreCase);
+
+        // No se ofrecen chips de dietary.
+        var qr = body.GetProperty("quickReplies");
+        for (int i = 0; i < qr.GetArrayLength(); i++)
+            Assert.DoesNotContain("diet", qr[i].GetProperty("id").GetString(),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Turn_AllCriticalsFilled_PaceAndVibesEmpty_StillReady_NoRefinementForced()
+    {
+        // Antes: con los 5 críticos puestos pero pace/vibes vacíos, el gate Tier2 ponía ready=false
+        // y re-preguntaba. Ahora: ready=true directo, sin forzar refinamiento.
+        var db = fixture.GetDbContext();
+        var session = new ChatSession
+        {
+            Status = "active",
+            TurnCount = 2,
+            SlotsJson = JsonSerializer.Serialize(new ChatSlots
+            {
+                City = Miami, Days = 2, GroupType = "solo",
+                Categories = new() { "food" }, Budget = "budget"
+                // Pace y VibesPrimary intencionadamente vacíos
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => SlotExtractorOk(new
+        {
+            extracted = new { },
+            aiMessage = "Ready when you are!",
+            nextQuestion = (string?)null,
+            quickReplies = Array.Empty<object>()
+        });
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn",
+            new { sessionId = session.Id, message = "sounds good" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.True(body.GetProperty("ready").GetBoolean());
+
+        var aiMsg = body.GetProperty("aiMessage").GetString()!;
+        Assert.DoesNotContain("dietary", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("pace", aiMsg, StringComparison.OrdinalIgnoreCase);
+
+        // pace no se pobla por iniciativa propia (nulos se omiten del JSON).
+        var slots = body.GetProperty("slots");
+        var hasPace = slots.TryGetProperty("pace", out var paceEl)
+            && !string.IsNullOrEmpty(paceEl.GetString());
+        Assert.False(hasPace);
+    }
+
+    [Fact]
+    public async Task Turn_OffTopic_AsksOnlyMissingCritical_NeverRepeatsFilledSlot()
+    {
+        // El desvío determinista off-topic pregunta SOLO el crítico que falta (budget),
+        // nunca re-pregunta un slot ya resuelto ni saca dietary.
+        var db = fixture.GetDbContext();
+        var session = new ChatSession
+        {
+            Status = "active",
+            TurnCount = 1,
+            SlotsJson = JsonSerializer.Serialize(new ChatSlots
+            {
+                City = Miami, Days = 3, GroupType = "couple", Categories = new() { "food" }
+                // solo falta budget
+            })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn",
+            new { sessionId = session.Id, message = "what's the weather?" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+
+        var aiMsg = body.GetProperty("aiMessage").GetString()!;
+        Assert.Contains("budget", aiMsg, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("dietary", aiMsg, StringComparison.OrdinalIgnoreCase);
+
+        var missing = body.GetProperty("missingCritical");
+        Assert.Equal(1, missing.GetArrayLength());
+        Assert.Equal("budget", missing[0].GetString());
+    }
+
+    [Fact]
+    public async Task Turn_UserMentionsAllergies_DietaryNeverExtractedOrAsked()
+    {
+        // v1: dietary no forma parte del chat. Aunque el modelo devolviese dietary, el backend
+        // ya no lo parsea (el slot no existe) y la respuesta no lo saca. El resto de la
+        // extracción oportunista (groupType) sí sigue viva.
+        var db = fixture.GetDbContext();
+        var session = new ChatSession
+        {
+            Status = "active",
+            TurnCount = 1,
+            SlotsJson = JsonSerializer.Serialize(new ChatSlots { City = Miami, Days = 2 })
+        };
+        db.ChatSessions.Add(session);
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => SlotExtractorOk(new
+        {
+            extracted = new { groupType = "couple", dietary = new[] { "vegan" } },
+            aiMessage = "Got it! What do you enjoy?",
+            nextQuestion = "categories",
+            quickReplies = Array.Empty<object>()
+        });
+
+        var client = fixture.CreateClient();
+        var res = await client.PostAsJsonAsync("/chat/turn",
+            new { sessionId = session.Id, message = "I'm vegan, couple trip" });
+
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var rawBody = await res.Content.ReadAsStringAsync();
+
+        // dietary/vegan no aparecen en ninguna parte de la respuesta (slots/aiMessage/chips).
+        Assert.DoesNotContain("dietary", rawBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("vegan", rawBody, StringComparison.OrdinalIgnoreCase);
+
+        var body = JsonDocument.Parse(rawBody).RootElement;
+        // La extracción no-dietary sigue funcionando.
+        Assert.Equal("couple", body.GetProperty("slots").GetProperty("groupType").GetString());
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static HttpResponseMessage SlotExtractorOk(object slotJson)
+    {
+        var text = JsonSerializer.Serialize(slotJson);
+        var envelope = new
+        {
+            candidates = new[]
+            {
+                new
+                {
+                    content = new { parts = new[] { new { text } } },
+                    finishReason = "STOP"
+                }
+            },
+            usageMetadata = new
+            {
+                promptTokenCount = 100,
+                candidatesTokenCount = 50,
+                thoughtsTokenCount = 10
+            }
+        };
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(envelope), Encoding.UTF8, "application/json")
+        };
+    }
 
     private async Task<ChatSession> CreateReadySession()
     {

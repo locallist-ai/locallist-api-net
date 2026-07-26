@@ -132,30 +132,6 @@ public static class ChatStrings
         _                    => "Ready to build!"
     };
 
-    public static string Tier2Question(string lang) => lang switch
-    {
-        "es" => "Un último detalle: ¿tienes alguna restricción alimentaria o preferencia de ritmo?",
-        _    => "One last touch: any dietary restrictions, and what pace?"
-    };
-
-    public static List<ChatQuickReply> Tier2Chips(string lang) => lang switch
-    {
-        "es" => new()
-        {
-            new() { Id = "diet_vegetarian", Label = "🥗 Vegetariano" },
-            new() { Id = "diet_none",        Label = "✅ Sin restricciones" },
-            new() { Id = "pace_slow",        Label = "🐢 Ritmo tranquilo" },
-            new() { Id = "skip_refinements", Label = "⏭️ Omitir" },
-        },
-        _ => new()
-        {
-            new() { Id = "diet_vegetarian", Label = "🥗 Vegetarian" },
-            new() { Id = "diet_none",        Label = "✅ No restrictions" },
-            new() { Id = "pace_slow",        Label = "🐢 Slow pace" },
-            new() { Id = "skip_refinements", Label = "⏭️ Skip" },
-        }
-    };
-
     public static List<ChatQuickReply> GreetingDayChips(string lang) => lang switch
     {
         "es" => new()

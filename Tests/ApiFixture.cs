@@ -21,16 +21,20 @@ using Testcontainers.PostgreSql;
 using System.Collections.Concurrent;
 using LocalList.API.NET.Features.Admin.Places;
 using LocalList.API.NET.Features.Auth.Services;
+using LocalList.API.NET.Features.Billing;
 using LocalList.API.NET.Features.Builder;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Features.Import;
 using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Features.Routing;
+using LocalList.API.NET.Shared.Coverage;
 using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
+using Microsoft.Extensions.Configuration;
 
 namespace LocalList.API.Tests;
 
@@ -65,6 +69,22 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// By default all methods return null (simulates missing API key).
     /// </summary>
     public FakeGooglePlacesService FakeGooglePlaces { get; } = new();
+
+    /// <summary>
+    /// In-process fake for <see cref="IRevenueCatClient"/> — the billing webhook's authoritative
+    /// entitlement check. Defaults to <see cref="RevenueCatEntitlementStatus.Active"/>; tests set
+    /// <see cref="FakeRevenueCatClient.ByAppUserId"/> per app_user_id to simulate inactive /
+    /// unavailable RevenueCat state without hitting the real REST API.
+    /// </summary>
+    public FakeRevenueCatClient FakeRevenueCat { get; } = new();
+
+    /// <summary>
+    /// Handler que intercepta las llamadas salientes de <see cref="LocalList.API.NET.Features.Places.Photos.PlacePhotoService"/>
+    /// a Google (Place Details con FieldMask=photos y <c>/media</c>). Por defecto sirve un
+    /// flujo válido (una foto → un photoUri de CDN falso). Los tests ajustan responders o
+    /// flags para forzar degradaciones y verificar que la API key nunca sale al cliente.
+    /// </summary>
+    public FakePhotoHandler FakePhotos { get; } = new();
 
     /// <summary>
     /// Handler que intercepta las llamadas salientes de <see cref="MapboxRoutingService"/>.
@@ -125,7 +145,12 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         // Import de vídeo: sin espera entre polls de files.get para que los tests del loop
         // PROCESSING→ACTIVE no bloqueen (en prod el default es 1000ms).
         Environment.SetEnvironmentVariable("Import__FilePollDelayMs", "0");
+        // RevenueCat webhook auth — valor conocido para firmar las peticiones de test.
+        Environment.SetEnvironmentVariable("REVENUECAT_WEBHOOK_AUTH", TestRevenueCatWebhookSecret);
     }
+
+    /// <summary>Shared secret the Billing webhook tests send in the Authorization header.</summary>
+    public const string TestRevenueCatWebhookSecret = "test-rc-webhook-secret";
 
     public async ValueTask InitializeAsync()
     {
@@ -260,6 +285,29 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
             foreach (var d in googlePlacesDesc) services.Remove(d);
             services.AddSingleton<IGooglePlacesService>(FakeGooglePlaces);
 
+            // Replace IRevenueCatClient with the in-process fake so the billing webhook's
+            // authoritative check is controlled by the test (no real RevenueCat REST call).
+            var rcDesc = services.Where(d => d.ServiceType == typeof(IRevenueCatClient)).ToList();
+            foreach (var d in rcDesc) services.Remove(d);
+            services.AddSingleton<IRevenueCatClient>(FakeRevenueCat);
+
+            // Coverage: envolvemos el CityCoverageService REAL (config Miami-only por defecto,
+            // normalización real) con un decorador que permite a los tests marcar ciudades
+            // aisladas como LIVE en runtime vía MarkCityLive. Necesario desde m1/F4: /builder/chat
+            // ahora rechaza ciudades no cubiertas ANTES del gate, y los tests de generación usan
+            // ciudades GUID aleatorias que no están en la allowlist de boot. Los tests que NO
+            // marcan nada (CoverageGateTests, CitiesTests) ven exactamente el servicio real.
+            services.RemoveAll<ICityCoverageService>();
+            services.AddSingleton<ICityCoverageService>(sp =>
+                new TestCityCoverageService(new CityCoverageService(sp.GetRequiredService<IConfiguration>())));
+
+            // Photo proxy: mantenemos la impl REAL de IPlacePhotoService (para ejercitar key +
+            // fallback + budget breaker) y solo sustituimos el HttpMessageHandler por FakePhotos,
+            // que finge Place Details y /media. El cliente Google se mockea; la DB es real.
+            services.AddHttpClient<LocalList.API.NET.Features.Places.Photos.IPlacePhotoService,
+                                   LocalList.API.NET.Features.Places.Photos.PlacePhotoService>()
+                .ConfigurePrimaryHttpMessageHandler(_ => FakePhotos);
+
             // Disable rate limiting in tests (default). Las suites que testean el propio
             // rate-limiting ponen DisableRateLimiting=false para conservar las políticas
             // reales registradas por AddRateLimitingPolicies.
@@ -286,7 +334,13 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("CityCreateLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("CityRequestLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("ChatTurnLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("RevenueCatWebhookLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("PhotoLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
@@ -309,20 +363,56 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     }
 
     /// <summary>
+    /// Cliente que NO sigue redirects automáticamente — imprescindible para inspeccionar el
+    /// 302 del proxy de fotos (con auto-redirect, HttpClient intentaría bajar el photoUri del
+    /// CDN falso y fallaría). El resto de la config del pipeline es idéntica.
+    /// </summary>
+    public HttpClient CreateNonRedirectingClient()
+    {
+        var client = base.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        EnsureDb();
+        return client;
+    }
+
+    /// <summary>
     /// Creates a Firebase-style RS256 JWT for testing.
     /// </summary>
-    public string CreateToken(string firebaseUid, string email = "test@test.com")
+    /// <param name="emailVerified">
+    /// <c>true</c>/<c>false</c> emits the <c>email_verified</c> claim with that value (default
+    /// <c>true</c>, matching prior behavior). <c>null</c> OMITS the claim entirely, mirroring a
+    /// malformed/legacy Firebase token that never sets it -- used to prove
+    /// <see cref="LocalList.API.NET.Shared.Auth.AdminClaimsExtensions.IsAdminCaller"/> fails closed
+    /// (not open) when the claim is simply absent.
+    /// </param>
+    /// <param name="emailVerifiedAsJsonBoolean">
+    /// When true and <paramref name="emailVerified"/> has a value, emits the claim with
+    /// <see cref="ClaimValueTypes.Boolean"/> so the JWT payload carries a real JSON boolean
+    /// (<c>true</c>/<c>false</c>) instead of a quoted string -- matching the actual wire format
+    /// Firebase ID tokens use.
+    /// </param>
+    public string CreateToken(
+        string firebaseUid,
+        string email = "test@test.com",
+        bool? emailVerified = true,
+        bool emailVerifiedAsJsonBoolean = false)
     {
         var key = new RsaSecurityKey(_testRsa);
         var credentials = new SigningCredentials(key, SecurityAlgorithms.RsaSha256);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(JwtRegisteredClaimNames.Sub, firebaseUid),
             new Claim(JwtRegisteredClaimNames.Email, email),
-            new Claim("email_verified", "true"),
-            new Claim("user_id", firebaseUid)
         };
+
+        if (emailVerified.HasValue)
+        {
+            var value = emailVerified.Value ? "true" : "false";
+            var valueType = emailVerifiedAsJsonBoolean ? ClaimValueTypes.Boolean : ClaimValueTypes.String;
+            claims.Add(new Claim("email_verified", value, valueType));
+        }
+
+        claims.Add(new Claim("user_id", firebaseUid));
 
         var tokenDescriptor = new SecurityTokenDescriptor
         {
@@ -351,7 +441,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// Convenience overload: seeds a user with the given ID and firebase_uid, returns an authenticated client.
     /// </summary>
     public async Task<HttpClient> CreateAuthenticatedClientWithUser(
-        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user")
+        Guid userId, string firebaseUid, string email = "test@test.com", string role = "user",
+        string tier = "free")
     {
         var db = GetDbContext();
         var existing = await db.Users.FindAsync(userId);
@@ -362,11 +453,24 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 Id = userId,
                 Email = email,
                 FirebaseUid = firebaseUid,
-                Role = role
+                Role = role,
+                Tier = tier
             });
             await db.SaveChangesAsync();
         }
         return CreateAuthenticatedClient(userId, firebaseUid, email);
+    }
+
+    /// <summary>
+    /// F4: /builder/chat y /chat/generate exigen auth. Atajo para tests de generación que
+    /// no testean el gate: user App-auth NUEVO por llamada. Tier por defecto "pro" para no
+    /// chocar con el límite free de 3 planes/mes ni el cap de duración (el gate en sí se
+    /// testea aparte en PlanGateTests con users free explícitos).
+    /// </summary>
+    public Task<HttpClient> CreateGenerationClientAsync(string tier = "pro")
+    {
+        var uid = Guid.NewGuid();
+        return CreateAppAuthenticatedClientWithUser(uid, $"gen-{uid}@test.com", tier);
     }
 
     /// <summary>
@@ -376,7 +480,7 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     /// los tests de ese bucket deben usar este helper.
     /// </summary>
     public async Task<HttpClient> CreateAppAuthenticatedClientWithUser(
-        Guid userId, string email)
+        Guid userId, string email, string tier = "free")
     {
         var db = GetDbContext();
         var existing = await db.Users.FindAsync(userId);
@@ -387,13 +491,16 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                 Id = userId,
                 Email = email,
                 FirebaseUid = "app-" + userId,
-                Role = "user"
+                Role = "user",
+                Tier = tier
             });
             await db.SaveChangesAsync();
         }
         var client = CreateClient();
+        // OJO: el claim tier del token NO decide nada server-side (los gates releen DB);
+        // se emite con el tier del user solo por realismo.
         client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email));
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateAppToken(userId, email, tier));
         return client;
     }
 
@@ -403,6 +510,14 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         var scope = Services.CreateScope();
         return scope.ServiceProvider.GetRequiredService<LocalListDbContext>();
     }
+
+    /// <summary>
+    /// Marca una ciudad como cubierta (LIVE) para este fixture, además de la allowlist real
+    /// (Miami). Necesario para los tests de generación que usan ciudades aisladas: desde m1/F4
+    /// tanto /builder/chat como /chat/generate rechazan ciudades no cubiertas antes del gate.
+    /// </summary>
+    public void MarkCityLive(string city) =>
+        ((TestCityCoverageService)Services.GetRequiredService<ICityCoverageService>()).AddLive(city);
 
     /// <summary>
     /// Creates an HS256 JWT signed with the test JWT_SECRET — mirrors what
@@ -429,6 +544,35 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
     }
 }
 
+/// <summary>
+/// Decorador de test sobre <see cref="CityCoverageService"/> real. Delega IsLive/LiveCities al
+/// servicio real (allowlist de boot + normalización real) y añade un set mutable de ciudades
+/// marcadas LIVE en runtime por los tests (<see cref="ApiFixture.MarkCityLive"/>). No altera
+/// <see cref="LiveCities"/> (lo que expone /cities/live) — solo amplía IsLive.
+/// </summary>
+public sealed class TestCityCoverageService : ICityCoverageService
+{
+    private readonly ICityCoverageService _inner;
+    private readonly HashSet<string> _extra = new(StringComparer.Ordinal);
+
+    public TestCityCoverageService(ICityCoverageService inner) => _inner = inner;
+
+    public IReadOnlyList<string> LiveCities => _inner.LiveCities;
+
+    public bool IsLive(string? cityName)
+    {
+        if (_inner.IsLive(cityName)) return true;
+        if (string.IsNullOrWhiteSpace(cityName)) return false;
+        lock (_extra) return _extra.Contains(CityNameNormalizer.Normalize(cityName));
+    }
+
+    public void AddLive(string city)
+    {
+        if (string.IsNullOrWhiteSpace(city)) return;
+        lock (_extra) _extra.Add(CityNameNormalizer.Normalize(city));
+    }
+}
+
 public class FakeAppleIdTokenValidator : IAppleIdTokenValidator
 {
     public Dictionary<string, OAuthClaims> Tokens { get; } = new();
@@ -443,6 +587,41 @@ public class FakeGoogleIdTokenValidator : IGoogleIdTokenValidator
 
     public Task<OAuthClaims?> ValidateAsync(string idToken, CancellationToken ct) =>
         Task.FromResult(Tokens.TryGetValue(idToken, out var claims) ? claims : null);
+}
+
+/// <summary>
+/// In-process fake for <see cref="IRevenueCatClient"/>. Returns <see cref="Default"/> unless a
+/// per-app_user_id override is set in <see cref="ByAppUserId"/>. Lets billing tests simulate the
+/// authoritative RevenueCat REST state (active / inactive / unavailable) deterministically.
+/// </summary>
+public class FakeRevenueCatClient : IRevenueCatClient
+{
+    /// <summary>
+    /// Fallback status for any app_user_id without an explicit override. Defaults to Inactive so
+    /// tests must opt IN to "active" for a specific id — an unmapped id is never silently entitled
+    /// (which previously masked the decoupled-identity vector).
+    /// </summary>
+    public RevenueCatEntitlementStatus Default { get; set; } = RevenueCatEntitlementStatus.Inactive;
+
+    public Dictionary<string, RevenueCatEntitlementStatus> ByAppUserId { get; } =
+        new(StringComparer.Ordinal);
+
+    public List<string> Calls { get; } = new();
+
+    public Task<RevenueCatEntitlementStatus> GetEntitlementStatusAsync(
+        string appUserId, string entitlementId, CancellationToken ct)
+    {
+        Calls.Add(appUserId);
+        return Task.FromResult(
+            ByAppUserId.TryGetValue(appUserId, out var status) ? status : Default);
+    }
+
+    public void Reset()
+    {
+        ByAppUserId.Clear();
+        Calls.Clear();
+        Default = RevenueCatEntitlementStatus.Inactive;
+    }
 }
 
 /// <summary>
@@ -551,6 +730,80 @@ public class FakeGooglePlacesService : IGooglePlacesService
         DetailsByPlaceId.Clear();
         ResolvedByUrl.Clear();
     }
+}
+
+/// <summary>
+/// Handler HTTP fake del proxy de fotos. Distingue por URL: Place Details (path
+/// <c>/v1/places/{id}</c>) vs <c>/media</c>. Por defecto sirve un flujo válido — una foto y
+/// un <c>photoUri</c> de CDN falso — para el camino feliz. Los tests ajustan
+/// <see cref="DetailsResponder"/> / <see cref="MediaResponder"/> o los flags para forzar
+/// degradaciones (sin fotos, 5xx, etc.). Registra cada request en <see cref="Calls"/> y
+/// cuenta las llamadas <c>/media</c> en <see cref="MediaCallCount"/> (para el test del breaker).
+/// </summary>
+public class FakePhotoHandler : HttpMessageHandler
+{
+    public const string DefaultPhotoName = "places/PLACE_ABC/photos/PHOTO_REF_XYZ";
+    public const string DefaultPhotoUri = "https://lh3.googleusercontent.com/fake-cdn/hero-1600.jpg";
+
+    public Func<HttpRequestMessage, HttpResponseMessage>? DetailsResponder { get; set; }
+    public Func<HttpRequestMessage, HttpResponseMessage>? MediaResponder { get; set; }
+
+    /// <summary>Nombre de foto devuelto por Place Details por defecto.</summary>
+    public string PhotoName { get; set; } = DefaultPhotoName;
+    /// <summary>photoUri devuelto por /media por defecto.</summary>
+    public string PhotoUri { get; set; } = DefaultPhotoUri;
+    /// <summary>Si true, Place Details devuelve <c>photos: []</c> (place sin fotos → 404).</summary>
+    public bool ReturnNoPhotos { get; set; }
+
+    public List<HttpRequestMessage> Calls { get; } = new();
+    public int MediaCallCount { get; private set; }
+    public int DetailsCallCount { get; private set; }
+
+    /// <summary>true si algún request saliente llevó el header X-Goog-Api-Key con este valor.</summary>
+    public bool KeyHeaderSentWith(string expected) =>
+        Calls.Any(r => r.Headers.TryGetValues("X-Goog-Api-Key", out var v)
+                       && v.Contains(expected));
+
+    public HttpRequestMessage? LastMediaCall =>
+        Calls.LastOrDefault(r => r.RequestUri!.AbsolutePath.EndsWith("/media", StringComparison.Ordinal));
+
+    /// <summary>Restablece estado mutable — llamar al inicio de cada test que comparte fixture.</summary>
+    public void Reset()
+    {
+        lock (Calls) { Calls.Clear(); }
+        MediaCallCount = 0;
+        DetailsCallCount = 0;
+        DetailsResponder = null;
+        MediaResponder = null;
+        PhotoName = DefaultPhotoName;
+        PhotoUri = DefaultPhotoUri;
+        ReturnNoPhotos = false;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        lock (Calls) { Calls.Add(request); }
+
+        var isMedia = request.RequestUri!.AbsolutePath.EndsWith("/media", StringComparison.Ordinal);
+        if (isMedia)
+        {
+            MediaCallCount++;
+            if (MediaResponder is { } mr) return Task.FromResult(mr(request));
+            return Task.FromResult(Json($"{{\"name\":\"{PhotoName}\",\"photoUri\":\"{PhotoUri}\"}}"));
+        }
+
+        DetailsCallCount++;
+        if (DetailsResponder is { } dr) return Task.FromResult(dr(request));
+        var photos = ReturnNoPhotos ? "[]" : $"[{{\"name\":\"{PhotoName}\"}}]";
+        return Task.FromResult(Json($"{{\"photos\":{photos}}}"));
+    }
+
+    public static HttpResponseMessage Json(string body, HttpStatusCode status = HttpStatusCode.OK) =>
+        new(status)
+        {
+            Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+        };
 }
 
 /// <summary>

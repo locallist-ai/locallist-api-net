@@ -214,7 +214,6 @@ public class ChatAgentServiceTests
             GroupType = "couple",
             Categories = ["food"],
             VibesPrimary = "hidden_gems",
-            Dietary = ["vegetarian"],
             Pace = "slow",
             Exclusions = ["nightlife"],
         };
@@ -225,17 +224,21 @@ public class ChatAgentServiceTests
         Assert.Contains("couple", msg);
         Assert.Contains("food", msg);
         Assert.Contains("hidden_gems", msg);
-        Assert.Contains("vegetarian", msg);
         Assert.Contains("slow", msg);
         Assert.Contains("nightlife", msg);
     }
 
+    // v1: el chat ya no captura restricciones alimentarias; el resumen nunca las incluye.
     [Fact]
-    public void BuildSummaryMessage_DietaryNone_NotIncluded()
+    public void BuildSummaryMessage_NeverIncludesDietary()
     {
-        var slots = new ChatSlots { City = "Miami", Days = 2, Dietary = ["none"] };
+        var slots = new ChatSlots
+        {
+            City = "Miami", Days = 2, GroupType = "solo",
+            Categories = ["food"], Budget = "moderate",
+        };
         var msg = ChatAgentService.BuildSummaryMessage(slots);
-        Assert.DoesNotContain("dietary", msg);
+        Assert.DoesNotContain("dietary", msg, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -340,7 +343,6 @@ public class ChatAgentServiceTests
         Assert.NotEqual(ChatStrings.InjectionRedirect("en"),    ChatStrings.InjectionRedirect("es"));
         Assert.NotEqual(ChatStrings.ChipForgeryReject("en"),    ChatStrings.ChipForgeryReject("es"));
         Assert.NotEqual(ChatStrings.Quarantine("en"),           ChatStrings.Quarantine("es"));
-        Assert.NotEqual(ChatStrings.Tier2Question("en"),        ChatStrings.Tier2Question("es"));
     }
 
     [Fact]

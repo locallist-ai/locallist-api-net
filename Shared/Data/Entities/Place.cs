@@ -59,7 +59,13 @@ public class Place
     [StringLength(10)]
     public string? PriceRange { get; set; }
 
+    // Las URLs de Google Places guardadas aqui llevan la API key en el query string. Igual
+    // que Embedding, JsonIgnore es defensa en profundidad: NINGUNA entidad Place cruda podra
+    // serializar la key por ningun path (presente o futuro). La sintesis para el cliente pasa
+    // siempre por PlacePhotoUrls.Resolve/PlaceDto.FromEntity, que leen este campo en C# (no via
+    // serializacion), asi que las fotos legitimas siguen saliendo sintetizadas por el proxy.
     [Column("photos", TypeName = "text[]")]
+    [JsonIgnore]
     public List<string>? Photos { get; set; }
 
     [Column("opening_hours", TypeName = "jsonb")]

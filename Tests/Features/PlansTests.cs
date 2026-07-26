@@ -1,10 +1,106 @@
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.Tests.Features;
 
 public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
+    // ── F2: cupo de planes guardados enforced en POST /plans (decisión Pablo 2026-07-22) ──
+    // Límite de ALMACENAMIENTO independiente del contador mensual de generación IA. Se movió
+    // aquí desde PlanGenerationGateService para que un free con 5 planes manuales no reciba
+    // 403 al GENERAR (que va contra el contador 3/mes, un límite distinto).
+
+    [Fact]
+    public async Task CreatePlan_FreeUser_UnderSavedLimit_Succeeds()
+    {
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"plans-free-under-{userId:N}@test.com");
+        await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit - 1); // 4 < 5
+
+        var res = await client.PostAsJsonAsync("/plans", new { name = "Nuevo plan", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreatePlan_FreeUser_AtSavedLimit_Returns403Structured()
+    {
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"plans-free-at-{userId:N}@test.com");
+        await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit); // 5
+
+        var res = await client.PostAsJsonAsync("/plans", new { name = "Uno más", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("saved_plans_limit_reached", body.GetProperty("error").GetString());
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit, body.GetProperty("used").GetInt32());
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit, body.GetProperty("limit").GetInt32());
+
+        // No se persistió ningún plan extra.
+        var db = fixture.GetDbContext();
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit,
+            await db.Plans.CountAsync(p => p.CreatedById == userId));
+    }
+
+    [Fact]
+    public async Task CreatePlan_FreeUser_AtLimit_DeleteFreesSlot_ThenSucceeds()
+    {
+        // m2/F5: DELETE /plans/:id libera hueco — probado de verdad (el test viejo sembraba y
+        // NUNCA borraba). Free en el tope: POST 403; tras borrar uno, POST vuelve a pasar.
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(userId, $"plans-free-del-{userId:N}@test.com");
+        var seeded = await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit); // 5
+
+        var blocked = await client.PostAsJsonAsync("/plans", new { name = "Bloqueado", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+
+        var del = await client.DeleteAsync($"/plans/{seeded[0]}");
+        Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
+
+        var afterDelete = await client.PostAsJsonAsync("/plans", new { name = "Ahora sí", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Created, afterDelete.StatusCode);
+
+        var db = fixture.GetDbContext();
+        Assert.Equal(PlanGenerationGateService.FreeSavedPlansLimit,
+            await db.Plans.CountAsync(p => p.CreatedById == userId)); // 5 - 1 + 1
+    }
+
+    [Fact]
+    public async Task CreatePlan_ProUser_OverLimit_NotGated()
+    {
+        var userId = Guid.NewGuid();
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(
+            userId, $"plans-pro-{userId:N}@test.com", tier: "pro");
+        await SeedSavedPlans(userId, PlanGenerationGateService.FreeSavedPlansLimit + 1); // 6 > 5
+
+        var res = await client.PostAsJsonAsync("/plans", new { name = "Plus sin límite", city = "Miami", durationDays = 1 });
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+    }
+
+    private async Task<List<Guid>> SeedSavedPlans(Guid userId, int count)
+    {
+        var db = fixture.GetDbContext();
+        var ids = new List<Guid>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var plan = new Plan
+            {
+                Id = Guid.NewGuid(),
+                Name = $"Saved {i}",
+                City = "Miami",
+                Type = "ai",
+                DurationDays = 1,
+                IsPublic = false,
+                CreatedById = userId,
+            };
+            db.Plans.Add(plan);
+            ids.Add(plan.Id);
+        }
+        await db.SaveChangesAsync();
+        return ids;
+    }
+
     [Fact]
     public async Task GetPlans_Anonymous_ReturnsShowcaseOnly()
     {
@@ -191,6 +287,171 @@ public class PlansTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.False(stopPlace.TryGetProperty("submittedById", out _));
         Assert.False(stopPlace.TryGetProperty("reviewedById", out _));
         Assert.False(stopPlace.TryGetProperty("flags", out _));
+    }
+
+    // ── POST /plans (builder manual): acepta, valida y persiste StartDate. Paridad total con
+    // ── /builder/chat y /chat/generate (misma validacion IsStartDateWithinWindow, mismo formato
+    // ── ISO yyyy-MM-dd, misma semantica null=compat, mismo 400 invalid_start_date). El builder
+    // ── manual NO corre scheduler: la fecha es solo persistencia/display.
+
+    [Fact]
+    public async Task CreatePlan_WithValidStartDate_PersistsAndGetReturnsIt()
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-sd-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-sd-{userId:N}@test.com");
+
+        // Fecha dentro de la ventana ([today-1, today+365]). El controller usa DateTime.UtcNow real.
+        var startDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(30);
+        var startIso = startDate.ToString("yyyy-MM-dd");
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = "Manual Plan With Date",
+            city = "Miami",
+            durationDays = 2,
+            startDate = startIso,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var createBody = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = createBody.GetProperty("id").GetGuid();
+        // La respuesta de creacion ya expone la fecha persistida.
+        Assert.Equal(startIso, createBody.GetProperty("startDate").GetString());
+
+        // Round-trip real por Postgres: el GET la relee de la fila persistida.
+        var getResponse = await client.GetAsync($"/plans/{planId}");
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        var getBody = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(startIso, getBody.GetProperty("startDate").GetString());
+
+        // Y por DbContext directo: Postgres `date` round-trips DateOnly.
+        var db = fixture.GetDbContext();
+        var persisted = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+        Assert.Equal(startDate, persisted.StartDate);
+    }
+
+    [Fact]
+    public async Task CreatePlan_WithoutStartDate_PersistsNull()
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-nosd-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-nosd-{userId:N}@test.com");
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = "Manual Plan No Date",
+            city = "Miami",
+            durationDays = 1,
+            // sin startDate => compat
+        });
+
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var createBody = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = createBody.GetProperty("id").GetGuid();
+
+        var db = fixture.GetDbContext();
+        var persisted = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+        Assert.Null(persisted.StartDate);
+
+        // GET no rompe: startDate ausente (WhenWritingNull) o explicitamente null.
+        var getResponse = await client.GetAsync($"/plans/{planId}");
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        var getBody = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
+        if (getBody.TryGetProperty("startDate", out var sd))
+            Assert.Equal(JsonValueKind.Null, sd.ValueKind);
+    }
+
+    [Fact]
+    public async Task CreatePlan_WithOutOfWindowStartDate_Returns400AndDoesNotPersist()
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-badsd-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-badsd-{userId:N}@test.com");
+
+        // Fuera de ventana: mas alla de MaxTripHorizonDays (365) en el futuro.
+        var badDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(400).ToString("yyyy-MM-dd");
+        const string uniqueName = "Manual Plan Out Of Window Date";
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = uniqueName,
+            city = "Miami",
+            durationDays = 1,
+            startDate = badDate,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, createResponse.StatusCode);
+        var body = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("invalid_start_date", body.GetProperty("error").GetString());
+
+        // No se persistio ninguna fila (fallo antes del SaveChanges).
+        var db = fixture.GetDbContext();
+        Assert.False(await db.Plans.AsNoTracking().AnyAsync(p => p.Name == uniqueName));
+    }
+
+    // ── Bordes exactos de la ventana [today-1, today+MaxTripHorizonDays] via HTTP real. Cierra
+    // ── el MINOR de review: los tests de arriba solo pineaban el interior (+30) y muy fuera
+    // ── (+400); estos pinean el borde exacto en ambos extremos, aceptado y rechazado. El offset
+    // ── se calcula sobre el mismo DateTime.UtcNow que usa el controller (ver PlansController.cs).
+
+    [Theory]
+    [InlineData(-1)]  // ayer: borde inferior aceptado (margen de 1 dia por desfase de huso horario)
+    [InlineData(365)] // MaxTripHorizonDays: borde superior aceptado
+    public async Task CreatePlan_WithStartDateAtAcceptedBoundary_Returns201AndPersists(int offsetDays)
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-sdb-{offsetDays}-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-sdb-{offsetDays}-{userId:N}@test.com");
+
+        var startDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(offsetDays);
+        var startIso = startDate.ToString("yyyy-MM-dd");
+        var uniqueName = $"Manual Plan Boundary Accept {offsetDays} {userId:N}";
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = uniqueName,
+            city = "Miami",
+            durationDays = 1,
+            startDate = startIso,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var createBody = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var planId = createBody.GetProperty("id").GetGuid();
+        Assert.Equal(startIso, createBody.GetProperty("startDate").GetString());
+
+        var db = fixture.GetDbContext();
+        var persisted = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == planId);
+        Assert.Equal(startDate, persisted.StartDate);
+    }
+
+    [Theory]
+    [InlineData(-2)]  // anteayer: justo por debajo del margen de -1 dia
+    [InlineData(366)] // justo por encima de MaxTripHorizonDays (365)
+    public async Task CreatePlan_WithStartDateJustOutsideBoundary_Returns400AndDoesNotPersist(int offsetDays)
+    {
+        var userId = Guid.NewGuid();
+        var firebaseUid = $"fb-create-sdr-{offsetDays}-{userId:N}";
+        var client = await fixture.CreateAuthenticatedClientWithUser(userId, firebaseUid, $"create-sdr-{offsetDays}-{userId:N}@test.com");
+
+        var badDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(offsetDays).ToString("yyyy-MM-dd");
+        var uniqueName = $"Manual Plan Boundary Reject {offsetDays} {userId:N}";
+
+        var createResponse = await client.PostAsJsonAsync("/plans", new
+        {
+            name = uniqueName,
+            city = "Miami",
+            durationDays = 1,
+            startDate = badDate,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, createResponse.StatusCode);
+        var body = await createResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("invalid_start_date", body.GetProperty("error").GetString());
+
+        var db = fixture.GetDbContext();
+        Assert.False(await db.Plans.AsNoTracking().AnyAsync(p => p.Name == uniqueName));
     }
 
     private static Plan MakePlan(

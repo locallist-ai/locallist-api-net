@@ -11,7 +11,7 @@ When the user says "backend", "api", "net", ".net", or "c#", they mean this acti
 | **Deploy** | Railway (Dockerfile) |
 | **Auth** | Dual-scheme JWT multi-issuer: `AppScheme` HS256 (app B2C, issuer `locallist-api`) + `FirebaseScheme` RS256 JWKS (admin interno). El scheme se selecciona por el `iss` del token en `Shared/Startup/AuthenticationExtensions.cs` (policy scheme `Multi`). |
 | **AI** | Cadena de extracción (chat slot-filling + builder preferences) en `gemini-3.1-flash-lite` (primer provider de `Llm:Providers`). Builder pipeline en `Features/Builder/Services/`. Chat slot-filling en `Features/Chat/Services/`. Traducciones/descripciones/embeddings siguen su path Gemini propio (fuera de la cadena). |
-| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. Admin 60/min. `UseRateLimiter` va después de `UseAuthentication`. |
+| **Rate Limit** | 100 req/min global. Endpoints medidos (sliding window, techo por IP encadenado anti account-farming + refinamiento por identidad, bucket alto SOLO AppScheme): **builder/chat-generate** (desde F4 exigen `[Authorize]`: el bucket anon solo acota spam pre-401, nunca llega a Gemini) techo 60/hr por IP (`Builder__RateLimitPerHourPerIp`) + 5/hr anon · 20/hr auth (`Builder__RateLimitPerHour` / `__RateLimitPerHourAuthenticated`); **chat/turn** techo 120/hr por IP (`Chat__RateLimitTurnsPerHourPerIp`) + 20/hr anon · 40/hr auth (`Chat__RateLimitTurnsPerHourAnonymous` / `__Authenticated`). Auth 10/15min. Waitlist 5/60s. CityRequest 5/60s por IP (`CityRequestLimit`). Admin 60/min. Photos 60/min por IP (`PhotoLimit`, `GooglePlaces__PhotoRateLimitPerMinute`). `UseRateLimiter` va después de `UseAuthentication`. |
 
 ## Running Locally
 
@@ -47,6 +47,8 @@ Required User Secrets / Environment Variables:
 
 **Google Places (admin ingestion)**
 - `GooglePlaces__ApiKey` — Google Places API (New) key. Activa en GCP: API "Places API (New)". Si no está, `POST /admin/places/google-search` devuelve 404 graceful.
+- `GooglePlaces__PhotoApiKey` — opcional. Key SEPARADA para el proxy de fotos (`GET /places/:id/photos/:index`). Si falta, cae en fallback a `GooglePlaces__ApiKey`; si NINGUNA está, el endpoint degrada a 404. `GooglePlaces__PhotoDailyBudgetCap` (default 10000) = techo diario in-process de llamadas `/media` de pago.
+- `Api__PublicBaseUrl`: opcional (default `""`). Base URL pública de esta API (p.ej. la de Railway) usada para sintetizar en `PlaceDto`/`ResolvedPlaceDto.Photos` la URL absoluta del proxy de fotos `GET /places/:id/photos/0`, y también la URL del preview admin `GET /admin/places/photo-preview` (`AdminPlacePhotoPreviewUrls`). Vacía en dev: se sirve una ruta relativa y el caller la resuelve contra su propia base. Ver `Shared/Dtos/PlacePhotoUrls.cs`.
 
 **Routing (Mapbox)**
 - `Mapbox__AccessToken` — opcional. Si no está, routing se deshabilita gracefully (stops sin `travelFromPrevious`).
@@ -58,6 +60,17 @@ Required User Secrets / Environment Variables:
 **Email marketing (Klaviyo / Waitlist)**
 - `Klaviyo__ApiKey` — opcional. Sin él, el servicio de email se deshabilita silenciosamente.
 - `Klaviyo__WaitlistListId` — ID de lista de Klaviyo para la waitlist.
+
+**Monetización (F4 — RevenueCat / tier)**
+- El webhook es un TRIGGER, NO la fuente de verdad. El tier se deriva del estado autoritativo consultado a la REST API de RevenueCat (`GET /subscribers/{app_user_id}`), no del payload — un secreto filtrado no permite forjar grants ni congelar pro con `event_timestamp_ms` falso.
+- Anti god-token: se resuelve el `User` primero y se verifica contra RC SOLO sus ids propios (`User.Id` / `RcCustomerId` enlazado), nunca un `app_user_id` arbitrario del payload — así el payload no puede desacoplar "a quién verifico" de "a quién acredito". El webhook NO escribe `rc_customer_id`. Rate-limit por IP `RevenueCatWebhookLimit` (60/min).
+- `REVENUECAT_WEBHOOK_AUTH` — **requerido** para `POST /webhooks/revenuecat`. Valor exacto del header `Authorization` configurado en el dashboard de RevenueCat. Verificado antes de deserializar el body (fail-closed 503 si falta). También legible como `RevenueCat__WebhookAuthToken`.
+- `REVENUECAT_REST_API_KEY` — **requerido** para conceder tier. Secret API key (sk_...) de RC para verificar el suscriptor. Distinta del secreto del webhook. Sin ella no se concede upgrade (webhook 503, RC reintenta). También `RevenueCat__RestApiKey`.
+- `RevenueCat__PlusEntitlementId` — id del entitlement que mapea a tier `pro` (default `plus`).
+- Enforcement: catálogo Plus vs free DECIDIDO (2026-07-13) y aplicado server-side. `PlanGenerationGateService` (`Shared/Usage/`) gatea `POST /chat/generate` y `POST /builder/chat` (ambos `[Authorize]` desde F4): 3 planes IA/mes free (contador atómico en `usage_counters`, upsert condicional) · cap antiabuso 50/día Plus (429) · duración ≤3 días free / ≤14 Plus. El hard cap de días vive en `PlanLimits.MaxPlanDurationDays` (`Shared/Constants/`), única fuente de verdad para `PlanGenerationGateService.PlusMaxDays` Y para el `[Range(1,14)]` de TODOS los DTOs con día/duración (edición + admin) — evita el drift 7→14 que dejaba a un Plus generando 14 días pero sin poder editarlos. Ambos endpoints rechazan ciudad no cubierta ANTES del gate (`400 city_unsupported`, sin consumir contador; `ICityCoverageService`). Cuando el clamp de días derivados por el LLM recorta, la respuesta trae `clamped:{field,requested,applied,upsell}`. Tier SIEMPRE fresco de DB. Errores estructurados para el upsell (`plan_limit_reached`, `duration_requires_plus`, `daily_cap_reached`).
+- **Cupo de planes guardados (5 free) — en `POST /plans` (PlansController), NO en la generación** (decisión Pablo 2026-07-22): límite de ALMACENAMIENTO independiente del contador mensual (un free con 5 planes manuales sigue generando sus 3 IA/mes). `403 {error:"saved_plans_limit_reached", used, limit:5}`; `DELETE /plans/:id` libera hueco; Plus sin límite.
+- `GET /account` expone la cuota mensual proactiva: `aiPlansMonth:{used, limit, resetsAt}` (`limit` omitido = ilimitado para Plus). Los campos `clamped` y `aiPlansMonth` los consume el task app-side — nombres estables, documentados en `Features/Billing/README.md`.
+- Detalle y huecos (favoritos sin modelo, multi-ciudad imposible por construcción) en `Features/Billing/README.md`. `[RequirePro]` (`Shared/Auth/`) sigue disponible para gates binarios.
 
 **Video import (F2 — extracción, servicio autocontenido)**
 - `Import__ApiKey` — opcional; fallback a `Gemini__ApiKey` (misma cuenta). La clave separada solo existe para aislar cuota/coste del import si conviene.
@@ -81,12 +94,13 @@ LocalList.API.NET/
 │   │   ├── Cities/
 │   │   │   └── AdminCitiesController.cs       # DELETE /admin/cities/:id
 │   │   ├── Places/
-│   │   │   ├── AdminPlacesController.cs       # CRUD + backfill + translate (ver Endpoints)
-│   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration
-│   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller
+│   │   │   ├── AdminPlacesController.*.cs     # CRUD + backfill + translate + photo-preview (ver Endpoints; partial: .cs ctor, .Reads, .Google, .Crud, .Backfill, .Translation)
+│   │   │   ├── GooglePlacesService.cs         # Google Places API (New) integration. NUNCA construye URLs con key: ResolvePhotos sintetiza referencias a AdminPlacePhotoPreviewUrls
+│   │   │   ├── AdminPlacePhotoPreviewUrls.cs  # Síntesis de GET /admin/places/photo-preview?googlePlaceId=X&index=I (preview pre-guardado, sin Place.Id aún)
+│   │   │   ├── PlaceImportService.cs          # Lógica de ingesta extraída del controller. Google-sourced: Photos siempre null (runtime-only, GooglePlaceId basta)
 │   │   │   └── AdminDtos.cs
 │   │   ├── Plans/
-│   │   │   ├── AdminPlansController.cs        # CRUD + translate curated plans
+│   │   │   ├── AdminPlansController.*.cs      # CRUD + translate curated plans (partial: .cs ctor/reads/delete, .Create, .Update, .Translation)
 │   │   │   └── AdminPlanDtos.cs
 │   │   └── Subcategories/
 │   │       ├── AdminSubcategoriesController.cs  # CRUD /admin/subcategories
@@ -102,6 +116,13 @@ LocalList.API.NET/
 │   │       ├── GoogleIdTokenValidator.cs   # Valida ID token Google vs JWKS
 │   │       ├── AppleIdTokenValidator.cs    # Valida ID token Apple vs JWKS
 │   │       └── JwksRetriever.cs            # Caché JWKS para Apple
+│   ├── Billing/
+│   │   ├── BillingController.cs        # POST /webhooks/revenuecat (anonymous, secreto Authorization verificado pre-body)
+│   │   ├── BillingEventProcessor.cs    # Único escritor de User.Tier; deriva tier de RC (no del payload), idempotente
+│   │   ├── IRevenueCatClient.cs        # Contrato + status; el webhook es trigger, RC REST es la fuente de verdad
+│   │   ├── RevenueCatClient.cs         # GET /subscribers/{app_user_id} con secret API key → entitlement activo?
+│   │   ├── RevenueCatDtos.cs           # RevenueCatWebhookRequest/Event (payload NO confiable para el tier)
+│   │   └── README.md                   # Doc F4 + modelo de seguridad + PENDIENTE producto: catálogo features Plus
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
 │   │   ├── BuilderDtos.cs              # BuilderChatRequest
@@ -110,7 +131,7 @@ LocalList.API.NET/
 │   │   │   ├── PlaceRankingService.cs          # Reranking determinista ponderado
 │   │   │   ├── PlanGenerationService.cs        # Orquesta RAG + prefs + scheduler
 │   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan
-│   │   │   └── SchedulingService.cs            # Scheduler determinista por semilla
+│   │   │   └── SchedulingService.*.cs          # Scheduler determinista por semilla (partial: .cs API, .Constants, .Selection, .Ordering, .DayWalk, .Refinements, .Helpers)
 │   │   └── Shared/
 │   │       └── GroupTypePolicy.cs       # Reglas de capacidad por tipo de grupo
 │   ├── Chat/
@@ -119,7 +140,7 @@ LocalList.API.NET/
 │   │   ├── I18n/
 │   │   │   └── ChatStrings.cs
 │   │   └── Services/
-│   │       ├── ChatAgentService.cs         # Orquesta slot-filling + sesión + generación
+│   │       ├── ChatAgentService.*.cs        # Orquesta slot-filling + sesión + generación (partial: .cs orquestación ProcessTurnAsync, .Constants, .Responses, .Session, .Slots, .Generation, .Helpers)
 │   │       ├── SlotExtractorService.cs     # Gemini → extrae slots de texto libre
 │   │       ├── InputNormalizer.cs          # Normaliza input antes de slot extraction
 │   │       ├── OutputSanitizer.cs          # Sanitiza respuesta AI
@@ -131,10 +152,13 @@ LocalList.API.NET/
 │   │       └── ChatSecLogger.cs            # Log estructurado de eventos de seguridad
 │   ├── Cities/
 │   │   ├── CitiesController.cs         # GET /cities/search, GET /cities/live, POST /cities
+│   │   ├── CityRequestsController.cs   # POST /cities/request (anonymous; feedback "¿No ves tu ciudad?" → city_requests, texto inerte validado por dominio + dedup 24h)
 │   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
+│   ├── Favorites/
+│   │   └── FavoritesController.cs      # PUT/DELETE /favorites/:placeId (idempotentes), GET /favorites (paginado), GET /favorites/ids. [Authorize] AppScheme. Cap 50 free / ∞ Plus con tier FRESCO de DB; atomicidad del cap vía pg_advisory_xact_lock por usuario (no hay fila-contador única como usage_counters)
 │   ├── Follow/
-│   │   ├── FollowController.cs         # POST /follow/start, GET /active, PATCH next/skip/pause/complete
+│   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Import/                         # F2 — extracción de vídeo (servicio autocontenido, SIN endpoint aún)
 │   │   ├── VideoExtractionService.cs   # bytes vídeo + caption → JSON estricto de sitios (sube/extrae/borra)
@@ -144,11 +168,16 @@ LocalList.API.NET/
 │   │   ├── VideoExtractionExceptions.cs # VideoTooLong/TooLarge/UnsupportedFormat/NoPlacesFound/ExtractionUnavailable
 │   │   └── ImportOptions.cs            # Config "Import" (modelo, límites, poll)
 │   ├── Places/
-│   │   └── PlacesController.cs         # GET /places, GET /places/:id
+│   │   ├── PlacesController.cs         # GET /places, GET /places/:id
+│   │   └── Photos/                     # Proxy de fotos de Google (runtime-only, ToS-compliant)
+│   │       ├── PlacePhotosController.cs  # GET /places/:id/photos/:index (302 al photoUri, key server-side)
+│   │       ├── PlacePhotoService.cs      # Place Details (FieldMask=photos, gratis) + /media (key en header) → photoUri
+│   │       ├── PhotoBudgetCounter.cs     # Circuit breaker de presupuesto diario (in-process, reset UTC)
+│   │       └── GooglePhotoHostValidator.cs  # Allowlist de host (*.googleusercontent.com) compartida por este proxy y el preview admin de AdminPlacesController
 │   ├── Plans/
-│   │   ├── PlansController.cs          # GET /plans, GET /plans/:id
-│   │   ├── PlanDtos.cs
-│   │   ├── PlanEditController.cs       # DELETE /plans/:id
+│   │   ├── PlansController.cs          # GET /plans, GET /plans/:id (autoriza vía IPlanAccessService; anónimo exige visibility='public')
+│   │   ├── PlanDtos.cs                 # PlanDto/PlanDetailDto: isPublic derivado de visibility=='public' (back-compat app vieja)
+│   │   ├── PlanEditController.cs       # PUT /plans/:id/stops (CanEdit), DELETE /plans/:id (IsOwner) — ambos vía IPlanAccessService
 │   │   └── PlanEditDtos.cs
 │   ├── Profile/
 │   │   ├── ProfileController.cs        # GET /me/profile, DELETE /me/profile
@@ -156,6 +185,16 @@ LocalList.API.NET/
 │   ├── Routing/                        # Implementaciones (contratos en Shared/Routing/)
 │   │   ├── MapboxRoutingService.cs     # Mapbox Directions API (IRoutingService)
 │   │   └── RouteResolver.cs            # ISegmentResolver — caché de segmentos en RouteSegmentCache
+│   ├── Social/                         # Cimiento del modelo de datos social (S0). Solo entidades
+│   │   └── Entities/                   # (aún sin endpoints; S1+ añade pilares favoritos/follow/co-edición)
+│   │       ├── UserPublicProfile.cs    # Perfil PÚBLICO (handle citext único, avatar, contadores). SEPARADO de UserProfile (privado). Creación LAZY (fila no existe hasta reclamar handle)
+│   │       ├── UserFollow.cs           # Grafo de follows. PK (follower_id, followee_id), CHECK no-self. NUNCA "Follow" (colisiona con Follow Mode)
+│   │       ├── PlanCollaborator.cs     # Co-edición. PK (plan_id, user_id), role editor|viewer. Owner NO es fila (sigue en plans.created_by)
+│   │       ├── PlanInvite.cs           # Invitación por token a colaborar (expira, max_uses, revocable)
+│   │       ├── ActivityEvent.cs        # Feed append-only. object_id polimórfico (sin FK), UNIQUE (actor, verb, object) idempotente
+│   │       ├── PlanLike.cs             # Like. PK (plan_id, user_id). Contador denormalizado en plans.likes_count
+│   │       ├── ContentReport.cs        # Reporte de moderación. reporter_id FK SET NULL (sobrevive borrado de cuenta)
+│   │       └── UserBlock.cs            # Bloqueo. PK (blocker_id, blocked_id). Consumido por PlanAccessService (bloqueo ↔ owner niega CanView)
 │   ├── Taxonomy/
 │   │   └── TaxonomyController.cs       # GET /taxonomy (categories + subcategories)
 │   └── Waitlist/
@@ -164,6 +203,10 @@ LocalList.API.NET/
 │       ├── IEmailMarketingService.cs
 │       └── KlaviyoService.cs           # Klaviyo email marketing integration
 └── Shared/
+    ├── Access/                         # Autorización centralizada de planes (S0)
+    │   ├── IPlanAccessService.cs        # GetAccessAsync(planId, userId) → PlanAccess. Punto ÚNICO de autorización de planes
+    │   ├── PlanAccessService.cs         # Reglas: owner→view+edit; collaborator editor→view+edit, viewer→view; visibility='public'→view (incl. anónimo); 'unlisted' NO por GUID; bloqueo↔owner niega. NO afloja ownership. Consumido por PlansController.GetPlan, PlanEditController, FollowController.StartSession (IDOR #116)
+    │   └── PlanAccess.cs                # readonly record struct: PlanExists, CanView, CanEdit, IsOwner, Role
     ├── AI/
     │   ├── GeminiFileClient.cs                 # Gemini File API (subida resumable + poll ACTIVE + delete) para el import de vídeo
     │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
@@ -186,9 +229,11 @@ LocalList.API.NET/
     │   ├── AdminAuthorizationFilter.cs  # Admin role check via email domain
     │   ├── AdminClaimsExtensions.cs     # Extensions para claims admin
     │   ├── AuthSchemes.cs              # Constantes de nombre de scheme
+    │   ├── RequireProAttribute.cs       # [RequirePro] — gate binario de tier (los endpoints de generación usan PlanGenerationGateService)
+    │   ├── RequireProAuthorizationFilter.cs  # Valida tier RE-CONSULTANDO la DB (no el claim `tier` del JWT, vida 15 min)
     │   └── FirebaseUserExtensions.cs    # GetFirebaseUid(), GetEmail(), GetUserIdAsync()
     ├── Constants/
-    │   ├── PlanLimits.cs               # Límites de stops por día, etc.
+    │   ├── PlanLimits.cs               # MaxStopsPerDay + MaxPlanDurationDays (hard cap 14, fuente única del [Range] de días)
     │   └── PriceRanges.cs              # Rangos de precio normalizados
     ├── Coverage/                       # Gate de ciudades en vivo (contrato cross-slice)
     │   ├── ICityCoverageService.cs      # IsLive(city) + LiveCities (impl en Features/Cities/)
@@ -198,19 +243,23 @@ LocalList.API.NET/
     │   ├── DesignTimeDbContextFactory.cs
     │   └── Entities/                   # EF Core entities
     │       ├── User.cs                  # firebase_uid (legado), google_user_id, apple_user_id, password_hash
-    │       ├── UserProfile.cs           # Perfil extendido del usuario
+    │       ├── UserProfile.cs           # Perfil PRIVADO (preferencias de viaje). ≠ Features/Social UserPublicProfile
     │       ├── RefreshToken.cs          # Tokens de refresh rotados (SHA-256 hash)
-    │       ├── Plan.cs
+    │       ├── Plan.cs                   # visibility (private|unlisted|public) = fuente de verdad de autorización (S0); is_public espejo sincronizado 1-2 releases (setters bidireccionales; DTO deriva isPublic de visibility). +share_token único, revision, likes_count, published_at, cloned_from, moderation_locked. Config social en LocalListDbContext.ConfigureSocial
     │       ├── PlanStop.cs
     │       ├── PlanMetric.cs            # Métricas de generación (latencia, coste, señales)
     │       ├── Place.cs
     │       ├── FollowSession.cs
     │       ├── WaitlistEntry.cs
     │       ├── City.cs
+    │       ├── CityRequest.cs           # Petición de cobertura (feedback selector). Texto INERTE (máx 100, validado por dominio). user_id FK SET NULL (invitado + sobrevive borrado). normalized_city agrupa variantes
     │       ├── Subcategory.cs
     │       ├── ChatSession.cs           # Sesión de chat slot-filling
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
     │       ├── VideoImportMetric.cs     # Diagnóstico del import de vídeo (tokens/coste/resultado; sin FK, sin retener el vídeo)
+    │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
+    │       ├── UsageCounter.cs          # Contador de uso (user, feature, period_start) — increment atómico vía UsageCounterService
+    │       ├── Favorite.cs              # Favorito de sitio (user_id, place_id) PK compuesta = índice único (idempotencia vía 23505); ambos FK CASCADE (GDPR + borrado de place); índice (user_id, created_at DESC) para el listado
     │       └── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
     ├── I18n/
     │   └── LanguageAccessor.cs         # Resolución de idioma por Accept-Language / query param
@@ -221,12 +270,13 @@ LocalList.API.NET/
     ├── PostHog/
     │   └── PostHogService.cs           # PostHog analytics (Capture, Identify, Alias)
     ├── Dtos/
-    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Plans + Admin)
+    │   ├── PlaceDto.cs                  # PlaceDto (cross-slice, usado por Places + Plans). Photos sintetiza el proxy de fotos (nunca reemite URL de Google con key) + campo photoSource
+    │   ├── PlacePhotoUrls.cs            # Punto único de síntesis Photos/photoSource para un Place, compartido por PlaceDto y ResolvedPlaceDto. SanitizeForStorage() limpia URLs de Google/preview-admin antes de persistir en cualquier ruta de escritura de Place.Photos
     │   ├── OpeningHours.cs              # OpeningHoursData, OpeningPeriod, OpeningTime
     │   ├── TripContextDto.cs            # Contexto de viaje (Builder + Chat)
     │   ├── ExtractedPreferences.cs      # Preferencias extraídas por Gemini
     │   ├── ScheduledStopDto.cs          # ScheduledStopDto, TravelInfoDto, ScheduleResult
-    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (tipado de ResolveStopPlaces)
+    │   ├── ScheduledStopResult.cs       # ScheduledStopResult + ResolvedPlaceDto (Photos vía PlacePhotoUrls, mismo fix que PlaceDto)
     │   ├── PlanGenerationResult.cs      # Resultado del pipeline de generación
     │   └── PlanRouteSegmentDto.cs       # Segmento de ruta (Plans + Routing)
     ├── Routing/                        # Contratos cross-slice (impl en Features/Routing/)
@@ -241,6 +291,11 @@ LocalList.API.NET/
     │   ├── AuthenticationExtensions.cs     # AddJwtAuthentication (multi-scheme JWT + app auth services)
     │   ├── CorsExtensions.cs               # AddCorsPolicy
     │   └── RateLimitingExtensions.cs       # AddRateLimitingPolicies
+    ├── Usage/                          # F4 — gates del catálogo Plus (cross-slice: Chat + Builder)
+    │   ├── IUsageCounterService.cs      # TryConsumeAsync/GetUsedAsync — consumo atómico por (user, feature, periodo)
+    │   ├── UsageCounterService.cs       # INSERT … ON CONFLICT … WHERE count < limit en 1 statement (sin ventana RMW)
+    │   ├── IPlanGenerationGateService.cs # CheckAndConsumeAsync + PlanGateResult/PlanGateRejection
+    │   └── PlanGenerationGateService.cs # Catálogo Plus: 3/mes free, 50/día pro, duración por tier (cupo de guardados vive en POST /plans, no aquí)
     └── Taxonomy/
         ├── ITaxonomyService.cs
         ├── PlaceTaxonomy.cs            # Árbol de categorías/subcategorías
@@ -257,6 +312,7 @@ Railway despliega **una sola réplica** de esta API. Escalar a 2+ réplicas romp
 | `IMemoryCache` (JWKS cache, etc.) | In-process | Cada réplica llena su propia caché — no hay coherencia |
 | `SemaphoreSlim(4)` en `RouteResolver.FetchAndPersistAsync` | Per-call (variable local) | El semáforo no coordina entre réplicas; posibles ráfagas Mapbox |
 | `SemaphoreSlim(4)` en `SchedulingService.PrefetchDaySegmentsAsync` | Per-call (variable local) | Ídem |
+| `PhotoBudgetCounter` (breaker de presupuesto diario del proxy de fotos, `GooglePlaces:PhotoDailyBudgetCap`) | Contador in-process con reset por día UTC | Cada réplica cuenta su propio presupuesto → el cap efectivo de llamadas `/media` de pago se multiplica por el número de réplicas |
 
 Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStackExchangeRedisRateLimiting`) y reemplazar `IMemoryCache` por `IDistributedCache`.
 
@@ -265,18 +321,20 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Feature | Endpoints |
 |---|---|
 | Account | `GET /account`, `DELETE /account` |
+| Billing | `POST /webhooks/revenuecat` (anonymous, verifica header `Authorization` vs secreto; escribe `User.Tier` idempotente + reorder-safe) |
 | Auth (admin / Firebase) | `POST /auth/sync` (Firebase token required) |
 | Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
-| Builder | `POST /builder/chat` |
-| Chat | `POST /chat/turn`, `POST /chat/generate`, `DELETE /chat/session/:id` |
-| Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities` |
+| Builder | `POST /builder/chat` (auth requerida desde F4; gates del catálogo Plus) |
+| Chat | `POST /chat/turn` (anonymous), `POST /chat/generate` (auth requerida desde F4; gates del catálogo Plus), `DELETE /chat/session/:id` |
+| Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities`, `POST /cities/request` (anonymous; feedback "¿No ves tu ciudad?", `CityRequestLimit`) |
+| Favorites | `PUT /favorites/:placeId` (favorita, idempotente; 404 opaco si el place no existe/no publicado; 403 `favorites_limit_reached` en free con ≥50 favoritos de places PUBLICADOS — misma semántica que el GET: lo que ves = lo que cuenta), `DELETE /favorites/:placeId` (desfavorita, idempotente → 204), `GET /favorites` (paginado `limit`/`offset`, PlaceDto ordenado `created_at DESC` + tiebreaker `place_id DESC`, solo publicados), `GET /favorites/ids` (ids ligeros para pintar corazones). Todos `[Authorize]` AppScheme (anónimo → 401) |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
-| Places | `GET /places/`, `GET /places/:id` |
-| Plans | `GET /plans/`, `GET /plans/:id`, `DELETE /plans/:id` |
+| Places | `GET /places/`, `GET /places/:id`, `GET /places/:id/photos/:index` (anonymous; 302 al CDN de Google, key server-side, `PhotoLimit`) |
+| Plans | `GET /plans/`, `GET /plans/mine`, `GET /plans/:id`, `POST /plans` (crea plan de usuario; gate del cupo de guardados free = 5), `PUT /plans/:id/stops` (reemplazo atómico de stops, día ≤14), `DELETE /plans/:id` |
 | Profile | `GET /me/profile`, `DELETE /me/profile` |
 | Taxonomy | `GET /taxonomy` |
 | Waitlist | `POST /waitlist` (anonymous), `GET /waitlist/count` (anonymous) |
-| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
+| Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places/photo-preview` (preview de foto de Google pre-guardado por googlePlaceId+index, 302 con key server-side vía `IPlacePhotoService` de T1, nunca la expone al admin), `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
 | Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
 | Admin — Analytics | `GET /admin/analytics/chat-turns`, `GET /admin/analytics/chat-turns/stats`, `GET /admin/analytics/plan-metrics`, `GET /admin/analytics/plan-metrics/stats` |
 | Admin — Cities | `DELETE /admin/cities/:id` |

@@ -484,6 +484,75 @@ public class PlaceRankingServiceTests
         Assert.Equal(expected, scored[0].Breakdown.BudgetMatch);
     }
 
+    // ── FREE = tier más barato (fix/price-range-validation) ──────────────────
+    // Antes "FREE" (0 dólares) caía al neutral 0.5 como null. Ahora se trata como tier 1
+    // (el más barato): un parque gratis es el mejor match posible para un buscador de budget.
+
+    [Fact]
+    public void ScoreBudgetMatch_Free_ScoresOneForBudgetTier()
+    {
+        var svc = new PlaceRankingService();
+        // budget → banda (1,2). FREE = tier 1 → diff 0 → 1.0 (no el viejo 0.5).
+        var park = P("FreePark", priceRange: "FREE");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetTier = "budget",
+        };
+
+        var scored = svc.RankWithScores(new[] { (park, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_Free_ScoresOneForLowAmountTierOne()
+    {
+        var svc = new PlaceRankingService();
+        // amount 50 → desiredTier 1, banda (1,1). FREE = tier 1 → 1.0.
+        var park = P("FreeMuseum", priceRange: "FREE");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 50,
+        };
+
+        var scored = svc.RankWithScores(new[] { (park, 0.20f) }, prefs);
+        Assert.Equal(1f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_NullPriceRange_StaysNeutralHalf()
+    {
+        var svc = new PlaceRankingService();
+        // Regresión: null (sin info de precio) sigue neutral 0.5, NO se confunde con FREE.
+        var place = P("Untagged", priceRange: null);
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetTier = "budget",
+        };
+
+        var scored = svc.RankWithScores(new[] { (place, 0.20f) }, prefs);
+        Assert.Equal(0.5f, scored[0].Breakdown.BudgetMatch);
+    }
+
+    [Fact]
+    public void ScoreBudgetMatch_ExpensiveForLowBudget_StaysLow()
+    {
+        var svc = new PlaceRankingService();
+        // Regresión: $$$ para un budget bajo (amount 50 → banda (1,1)) sigue puntuando bajo.
+        // placeTier 3, diff 2 → 0. El cambio de FREE no afecta a los rangos '$'-based.
+        var pricey = P("Steakhouse", priceRange: "$$$");
+        var prefs = new ExtractedPreferences
+        {
+            Categories = new List<string>(),
+            BudgetAmount = 50,
+        };
+
+        var scored = svc.RankWithScores(new[] { (pricey, 0.20f) }, prefs);
+        Assert.Equal(0f, scored[0].Breakdown.BudgetMatch);
+    }
+
     [Fact]
     public void ScoreBudgetMatch_AmountTakesPrecedenceOverTier()
     {

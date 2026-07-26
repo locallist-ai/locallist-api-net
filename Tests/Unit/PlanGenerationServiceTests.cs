@@ -212,6 +212,7 @@ public class PlanGenerationServiceTests
     [InlineData("budget")]
     [InlineData("categories")]
     [InlineData("pace")]
+    [InlineData("startdate")]
     public void ComputeRequestSeed_DifferentParam_DifferentSeed(string param)
     {
         var baseline = PlanGenerationService.ComputeRequestSeed("romantic dinner", "Miami", "en", Ctx());
@@ -225,6 +226,7 @@ public class PlanGenerationServiceTests
             case "budget":     ctx.Budget = "budget"; break;
             case "categories": ctx.Categories = new List<string> { "culture" }; break;
             case "pace":       ctx.Pace = "slow"; break;
+            case "startdate":  ctx.StartDate = new DateOnly(2026, 8, 1); break;
         }
         var variant = PlanGenerationService.ComputeRequestSeed(message, "Miami", "en", ctx);
 

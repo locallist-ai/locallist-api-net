@@ -1,9 +1,13 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Features.Plans;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
+using LocalList.API.NET.Shared.I18n;
 using LocalList.API.NET.Shared.PostHog;
 
 namespace LocalList.API.NET.Features.Follow;
@@ -17,13 +21,17 @@ public class FollowController : ControllerBase
     private readonly TimeProvider _clock;
     private readonly ILogger<FollowController> _logger;
     private readonly PostHogService _posthog;
+    private readonly IConfiguration _config;
+    private readonly IPlanAccessService _access;
 
-    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog)
+    public FollowController(LocalListDbContext db, TimeProvider clock, ILogger<FollowController> logger, PostHogService posthog, IConfiguration config, IPlanAccessService access)
     {
         _db = db;
         _clock = clock;
         _logger = logger;
         _posthog = posthog;
+        _config = config;
+        _access = access;
     }
 
     /// <summary>Creates a new follow session (state: active). Rejects if user already has an active session. Requires auth.</summary>
@@ -32,6 +40,18 @@ public class FollowController : ControllerBase
     {
         var userId = await GetUserIdAsync(ct);
         if (userId == null) return Unauthorized(new { error = "Invalid token claims" });
+
+        // IDOR guard (#116): solo planes que el caller puede VER (publicos, propios o compartidos
+        // como colaborador) pueden seguirse. Sin esto, un user con el GUID de un plan privado ajeno
+        // podia iniciar sesion y leer su itinerario via GetActiveSession. La autorizacion vive ahora
+        // en IPlanAccessService (mismo 404 no-filtrante que PlansController.GetPlan). CanView es
+        // false tanto si el plan no existe como si no es accesible: un unico check cierra el IDOR.
+        var access = await _access.GetAccessAsync(request.PlanId, userId, ct);
+        if (!access.CanView)
+        {
+            _logger.LogWarning("User {UserId} attempted to follow inaccessible plan {PlanId}", userId, request.PlanId);
+            return NotFound(new { error = "Plan not found" });
+        }
 
         var existing = await _db.FollowSessions.AsNoTracking()
             .Where(fs => fs.UserId == userId.Value && fs.Status == "active")
@@ -92,11 +112,31 @@ public class FollowController : ControllerBase
         var currentStop = session.CurrentStopIndex < currentDayStops.Count ? currentDayStops[session.CurrentStopIndex] : null;
         var nextStop = session.CurrentStopIndex + 1 < currentDayStops.Count ? currentDayStops[session.CurrentStopIndex + 1] : null;
 
+        // Nunca serializar la entidad Place/PlanStop cruda: expondria la key de Google en
+        // Photos (URL places.googleapis.com) y sobre-expondria campos internos de curacion
+        // (Flags, AiVibeScore, SubmittedById, ReviewedById, RejectionReason, Embedding...).
+        // PlanStopResponseDto embebe PlaceDto (fotos sintetizadas por el proxy + sin campos
+        // internos), y PlaceDto replica el place al nivel superior para no romper el contrato.
+        var lang = LanguageAccessor.ResolveRequestLanguage(Request);
+        var publicBaseUrl = _config["Api:PublicBaseUrl"];
+
         return Ok(new
         {
             session,
-            currentStop = currentStop != null ? new { stop = currentStop, place = currentStop.Place } : null,
-            nextStop = nextStop != null ? new { stop = nextStop, place = nextStop.Place } : null,
+            currentStop = currentStop != null
+                ? new
+                {
+                    stop = PlanStopResponseDto.FromEntity(currentStop, lang, publicBaseUrl),
+                    place = currentStop.Place is null ? null : PlaceDto.FromEntity(currentStop.Place, lang, publicBaseUrl)
+                }
+                : null,
+            nextStop = nextStop != null
+                ? new
+                {
+                    stop = PlanStopResponseDto.FromEntity(nextStop, lang, publicBaseUrl),
+                    place = nextStop.Place is null ? null : PlaceDto.FromEntity(nextStop.Place, lang, publicBaseUrl)
+                }
+                : null,
             totalStopsToday = currentDayStops.Count,
             progress = new
             {

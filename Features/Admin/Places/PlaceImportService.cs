@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Shared.AI.Services;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
+using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Taxonomy;
 using ITaxonomySvc = LocalList.API.NET.Shared.Taxonomy.ITaxonomyService;
 
@@ -190,7 +192,11 @@ public class PlaceImportService
                 GoogleRating = details.Rating,
                 GoogleReviewCount = details.ReviewCount,
                 PriceRange = details.PriceLevel,
-                Photos = details.Photos.Count > 0 ? details.Photos : null,
+                // T3: runtime-only. details.Photos son referencias al preview admin-authed
+                // (GooglePlacesService.ResolvePhotos), NUNCA servibles por un cliente público:
+                // nunca se persisten. GooglePlaceId (seteado arriba) basta, PlaceDto sintetiza
+                // el proxy (T1+T2). Place.Photos solo guarda URLs externas no-Google.
+                Photos = null,
                 Source = request.Source,
                 Status = request.DefaultStatus,
                 OpeningHours = details.OpeningHours,
@@ -266,6 +272,22 @@ public class PlaceImportService
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Normaliza el rango de precio de un import a su forma canónica. A diferencia de las
+    /// rutas admin CRUD (que devuelven 400), un import no debe reventar un batch por una
+    /// fila sucia: si el valor no es canónico tras normalizar se descarta a null y se loguea.
+    /// </summary>
+    private string? NormalizePriceOrNull(string? raw, string placeName)
+    {
+        if (PriceRanges.TryNormalize(raw, out var normalized))
+            return normalized;
+
+        _logger.LogWarning(
+            "Import: descartado PriceRange no canónico '{Raw}' para '{Place}'; se guarda null.",
+            raw, placeName);
+        return null;
+    }
 
     /// <summary>
     /// Returns true when the request should be skipped due to matching an existing Name+City
@@ -346,8 +368,13 @@ public class PlaceImportService
                 BestFor = req.BestFor,
                 SuitableFor = req.SuitableFor,
                 BestTimes = req.BestTimes,
-                PriceRange = req.PriceRange?.Trim(),
-                Photos = req.Photos,
+                // Import tolerante: normaliza el rango; si tras normalizar sigue sucio se
+                // guarda null (+ log warn) en vez de reventar el batch entero por una fila.
+                PriceRange = NormalizePriceOrNull(req.PriceRange, req.Name),
+                // T3: barrido, nunca persistir una URL de Google (key) ni el preview
+                // admin-authed, venga de donde venga la request (p.ej. bulk import pegado a
+                // mano por un curador desde una respuesta de otro endpoint).
+                Photos = PlacePhotoUrls.SanitizeForStorage(req.Photos),
                 GooglePlaceId = req.GooglePlaceId?.Trim(),
                 GoogleRating = req.GoogleRating,
                 GoogleReviewCount = req.GoogleReviewCount,

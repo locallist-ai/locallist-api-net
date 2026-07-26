@@ -1,10 +1,12 @@
 using LocalList.API.NET.Features.Admin.Places;
+using LocalList.API.NET.Features.Billing;
 using LocalList.API.NET.Features.Builder.Services;
 using LocalList.API.NET.Features.Chat.Services;
 using LocalList.API.NET.Features.Cities;
 using LocalList.API.NET.Features.Import;
 using LocalList.API.NET.Features.Routing;
 using LocalList.API.NET.Features.Waitlist;
+using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.AI.Llm;
 using LocalList.API.NET.Shared.AI.Services;
@@ -27,6 +29,10 @@ public static class DomainServiceExtensions
         this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton(TimeProvider.System);
+
+        // Social foundation (S0): servicio central de autorizacion de planes. Punto UNICO que
+        // consumen PlansController.GetPlan, PlanEditController y FollowController (y S1+/favoritos).
+        services.AddScoped<IPlanAccessService, PlanAccessService>();
         // Gemini services share the same resilience configuration — 25s total timeout,
         // 1 retry on transient network errors only (5xx errors are treated as hard failures).
         Action<HttpStandardResilienceOptions> geminiResilienceOpts = options =>
@@ -62,11 +68,31 @@ public static class DomainServiceExtensions
         services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
         services.AddHttpClient<IGooglePlacesService, GooglePlacesService>(c => c.Timeout = TimeSpan.FromSeconds(15))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+
+        // Photo proxy (runtime-only, ToS-compliant): Place Details (FieldMask=photos, gratis)
+        // + /media (skipHttpRedirect, key en header) → photoUri efímero. El breaker de
+        // presupuesto diario es singleton (estado global in-process, ver Scaling invariants).
+        services.AddSingleton<LocalList.API.NET.Features.Places.Photos.PhotoBudgetCounter>();
+        services.AddHttpClient<LocalList.API.NET.Features.Places.Photos.IPlacePhotoService,
+                               LocalList.API.NET.Features.Places.Photos.PlacePhotoService>(
+            c => c.Timeout = TimeSpan.FromSeconds(10))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         services.AddScoped<RouteResolver>();
         services.AddScoped<PlaceImportService>();
         services.AddScoped<ISegmentResolver>(sp => sp.GetRequiredService<RouteResolver>());
         services.AddHttpClient<KlaviyoService>(c => c.Timeout = TimeSpan.FromSeconds(8));
         services.AddScoped<IEmailMarketingService, KlaviyoService>();
+
+        // Billing — RevenueCat webhook → User.Tier writer (scoped: uses the request DbContext).
+        // The processor derives the tier from RevenueCat's authoritative REST state, not the
+        // (untrusted) webhook payload, via IRevenueCatClient.
+        services.AddHttpClient<IRevenueCatClient, RevenueCatClient>(c => c.Timeout = TimeSpan.FromSeconds(8));
+        services.AddScoped<BillingEventProcessor>();
+
+        // F4 — gates del catálogo Plus: contador atómico de uso + gate de generación
+        // (3 planes IA/mes free, cap 50/día Plus, duración por tier, cupo de guardados).
+        services.AddScoped<Shared.Usage.IUsageCounterService, Shared.Usage.UsageCounterService>();
+        services.AddScoped<Shared.Usage.IPlanGenerationGateService, Shared.Usage.PlanGenerationGateService>();
 
         // LLM fallback chain (camino crítico: chat slot-filling + builder preferences).
         // Timeouts cortos por provider: con varios providers en cadena el peor caso debe
