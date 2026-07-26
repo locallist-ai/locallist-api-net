@@ -25,6 +25,7 @@ public class LocalListDbContext : DbContext
     public DbSet<BillingEvent> BillingEvents { get; set; } = null!;
     public DbSet<UsageCounter> UsageCounters { get; set; } = null!;
     public DbSet<CityRequest> CityRequests { get; set; } = null!;
+    public DbSet<Favorite> Favorites { get; set; } = null!;
 
     // ── Social foundation (S0) ──
     public DbSet<UserPublicProfile> UserPublicProfiles { get; set; } = null!;
@@ -286,6 +287,26 @@ public class LocalListDbContext : DbContext
             .WithMany()
             .HasForeignKey(uc => uc.UserId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // Favoritos (F-BE). PK compuesta (user_id, place_id) = índice único que hace idempotente
+        // el favoritar (el segundo del mismo par choca con el 23505, tragado por el controller).
+        // Ambos FK CASCADE: borrar cuenta (GDPR) o place arrastra los favoritos. Índice
+        // (user_id, created_at DESC) para el listado paginado ordenado por recencia.
+        modelBuilder.Entity<Favorite>()
+            .HasKey(f => new { f.UserId, f.PlaceId });
+        modelBuilder.Entity<Favorite>()
+            .HasOne<User>()
+            .WithMany()
+            .HasForeignKey(f => f.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<Favorite>()
+            .HasOne<Place>()
+            .WithMany()
+            .HasForeignKey(f => f.PlaceId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<Favorite>()
+            .HasIndex(f => new { f.UserId, f.CreatedAt })
+            .IsDescending(false, true);
     }
 
     /// <summary>
