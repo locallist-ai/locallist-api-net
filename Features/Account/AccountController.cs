@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using LocalList.API.NET.Features.Import;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Usage;
@@ -16,17 +18,20 @@ public class AccountController : ControllerBase
     private readonly ILogger<AccountController> _logger;
     private readonly IUsageCounterService _counters;
     private readonly TimeProvider _time;
+    private readonly ImportOptions _importOptions;
 
     public AccountController(
         LocalListDbContext db,
         ILogger<AccountController> logger,
         IUsageCounterService counters,
-        TimeProvider time)
+        TimeProvider time,
+        IOptions<ImportOptions> importOptions)
     {
         _db = db;
         _logger = logger;
         _counters = counters;
         _time = time;
+        _importOptions = importOptions.Value;
     }
 
     [HttpGet]
@@ -77,7 +82,12 @@ public class AccountController : ControllerBase
             resetsAt,
         };
 
-        return Ok(new { user, aiPlansMonth });
+        // Capability del import de vídeo (F2): la app pinta u oculta la opción "importar de
+        // TikTok/IG" según este flag. En v1 el import de TERCEROS está apagado (solo contenido
+        // propio); cuando se habilite, este campo pasa a true sin cambiar el cliente.
+        var importThirdPartyEnabled = _importOptions.ThirdPartyEnabled;
+
+        return Ok(new { user, aiPlansMonth, importThirdPartyEnabled });
     }
 
     // Apple Guideline 5.1.1(v) - Account deletion

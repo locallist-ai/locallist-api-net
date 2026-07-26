@@ -38,4 +38,13 @@ public sealed class ImportOptions
 
     /// <summary>Máximo de polls antes de rendirse (ExtractionUnavailable). 60 × 1s = 60s.</summary>
     public int FilePollMaxAttempts { get; set; } = 60;
+
+    /// <summary>
+    /// Gating del camino de TERCEROS (URL de TikTok/IG en vez de contenido propio del usuario).
+    /// Default <b>false</b>: en v1 el import solo acepta contenido PROPIO (<c>platform=self</c>);
+    /// una request con <c>platform</c> distinto de <c>self</c> se rechaza con
+    /// <c>403 third_party_import_disabled</c> mientras esté apagado. La capability se expone en
+    /// <c>GET /account</c> (<c>importThirdPartyEnabled</c>) para que la app oculte la opción.
+    /// </summary>
+    public bool ThirdPartyEnabled { get; set; } = false;
 }
