@@ -35,6 +35,20 @@ public class UsageCounterService : IUsageCounterService
         return affected == 1;
     }
 
+    public async Task ReleaseAsync(
+        Guid userId, string feature, DateOnly periodStart, CancellationToken ct)
+    {
+        // Decrement atómico con suelo: el WHERE count > 0 impide bajar de cero (un doble
+        // release nunca deja el contador negativo) y el row-lock serializa con los consumes
+        // concurrentes, así que el par consume/release no puede corromper el total.
+        await _db.Database.ExecuteSqlAsync($"""
+            UPDATE usage_counters
+            SET count = count - 1
+            WHERE user_id = {userId} AND feature = {feature}
+              AND period_start = {periodStart} AND count > 0
+            """, ct);
+    }
+
     public Task<int> GetUsedAsync(Guid userId, string feature, DateOnly periodStart, CancellationToken ct) =>
         _db.UsageCounters
             .Where(uc => uc.UserId == userId && uc.Feature == feature && uc.PeriodStart == periodStart)
