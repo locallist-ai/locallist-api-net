@@ -20,9 +20,9 @@ namespace LocalList.API.NET.Shared.Usage;
 ///     un free con 5 planes manuales puede seguir generando sus 3 planes IA/mes (y viceversa).
 ///     Antes vivía en este gate y contaminaba la generación (un free con 5 planes recibía
 ///     <c>saved_plans_limit_reached</c> al generar aunque tuviera 0/3 del mes).
-///   - Favoritos: free 50 · Plus ilimitado. HUECO DOCUMENTADO: el backend no tiene modelo de
-///     favoritos todavía (solo UserProfile.FavoriteCity, que es otra cosa) — el límite se
-///     implementará con el modelo. No se inventa aquí.
+///   - Favoritos: free 50 · Plus ilimitado. Implementado en <c>FavoritesController</c>
+///     (Features/Favorites) con su propio modelo <c>Favorite</c> — NO vive en este gate. El cap
+///     se aplica atómicamente allí (pg_advisory_xact_lock por usuario), con tier fresco de DB.
 ///
 /// El tier se lee SIEMPRE fresco de DB (patrón RequireProAuthorizationFilter): el claim
 /// <c>tier</c> del JWT vive 15 min, se desincroniza tras upgrade/downgrade y es falsificable

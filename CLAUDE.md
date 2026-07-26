@@ -152,6 +152,8 @@ LocalList.API.NET/
 │   │   ├── CityRequestsController.cs   # POST /cities/request (anonymous; feedback "¿No ves tu ciudad?" → city_requests, texto inerte validado por dominio + dedup 24h)
 │   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
+│   ├── Favorites/
+│   │   └── FavoritesController.cs      # PUT/DELETE /favorites/:placeId (idempotentes), GET /favorites (paginado), GET /favorites/ids. [Authorize] AppScheme. Cap 50 free / ∞ Plus con tier FRESCO de DB; atomicidad del cap vía pg_advisory_xact_lock por usuario (no hay fila-contador única como usage_counters)
 │   ├── Follow/
 │   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
@@ -245,6 +247,7 @@ LocalList.API.NET/
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
     │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
     │       ├── UsageCounter.cs          # Contador de uso (user, feature, period_start) — increment atómico vía UsageCounterService
+    │       ├── Favorite.cs              # Favorito de sitio (user_id, place_id) PK compuesta = índice único (idempotencia vía 23505); ambos FK CASCADE (GDPR + borrado de place); índice (user_id, created_at DESC) para el listado
     │       └── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
     ├── I18n/
     │   └── LanguageAccessor.cs         # Resolución de idioma por Accept-Language / query param
@@ -312,6 +315,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Builder | `POST /builder/chat` (auth requerida desde F4; gates del catálogo Plus) |
 | Chat | `POST /chat/turn` (anonymous), `POST /chat/generate` (auth requerida desde F4; gates del catálogo Plus), `DELETE /chat/session/:id` |
 | Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities`, `POST /cities/request` (anonymous; feedback "¿No ves tu ciudad?", `CityRequestLimit`) |
+| Favorites | `PUT /favorites/:placeId` (favorita, idempotente; 404 opaco si el place no existe/no publicado; 403 `favorites_limit_reached` en free ≥50), `DELETE /favorites/:placeId` (desfavorita, idempotente → 204), `GET /favorites` (paginado `limit`/`offset`, PlaceDto ordenado `created_at DESC` + tiebreaker `place_id DESC`, solo publicados), `GET /favorites/ids` (ids ligeros para pintar corazones). Todos `[Authorize]` AppScheme (anónimo → 401) |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Places | `GET /places/`, `GET /places/:id`, `GET /places/:id/photos/:index` (anonymous; 302 al CDN de Google, key server-side, `PhotoLimit`) |
 | Plans | `GET /plans/`, `GET /plans/mine`, `GET /plans/:id`, `POST /plans` (crea plan de usuario; gate del cupo de guardados free = 5), `PUT /plans/:id/stops` (reemplazo atómico de stops, día ≤14), `DELETE /plans/:id` |
