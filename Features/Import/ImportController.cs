@@ -90,6 +90,7 @@ public class ImportController : ControllerBase
     private static readonly string[] AllowedPlatforms = { "self", "tiktok", "instagram", "other" };
 
     private readonly VideoExtractionService _extractor;
+    private readonly ImportMatchingService _matcher;
     private readonly IUsageCounterService _counters;
     private readonly LocalListDbContext _db;
     private readonly ImportOptions _options;
@@ -98,6 +99,7 @@ public class ImportController : ControllerBase
 
     public ImportController(
         VideoExtractionService extractor,
+        ImportMatchingService matcher,
         IUsageCounterService counters,
         LocalListDbContext db,
         IOptions<ImportOptions> options,
@@ -105,6 +107,7 @@ public class ImportController : ControllerBase
         ILogger<ImportController> logger)
     {
         _extractor = extractor;
+        _matcher = matcher;
         _counters = counters;
         _db = db;
         _options = options.Value;
@@ -241,11 +244,33 @@ public class ImportController : ControllerBase
                 var result = await _extractor.ExtractAsync(
                     videoStream, fileSize, fileMime!, normalizedPlatform, caption: null, ct);
 
-                _logger.LogInformation(
-                    "Import: ok user={UserId} platform={Platform} places={N} city={City}",
-                    userId, normalizedPlatform, result.Places.Count, result.City ?? "(null)");
+                // T3 — matching contra el catálogo curado de la ciudad detectada (una query, en
+                // memoria). No crea places (curación = admin); los no matcheados salen igual.
+                var matched = await _matcher.MatchAsync(result.City, result.Places, ct);
+                var numMatched = matched.Count(m => m.MatchedPlaceId is not null);
 
-                return Ok(ImportVideoResponseMapper.From(result, normalizedPlatform, sanitizedHandle));
+                // Anota la calidad del matching en la MISMA fila de diagnóstico escrita durante la
+                // extracción (un UPDATE por PK, fuera del camino caliente de Gemini). Best-effort:
+                // un fallo de métrica jamás debe tumbar el import.
+                if (result.MetricId is { } metricId)
+                {
+                    try
+                    {
+                        await _db.VideoImportMetrics
+                            .Where(m => m.Id == metricId)
+                            .ExecuteUpdateAsync(s => s.SetProperty(m => m.NumMatched, numMatched), ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Import: failed to persist num_matched for metric {MetricId}", metricId);
+                    }
+                }
+
+                _logger.LogInformation(
+                    "Import: ok user={UserId} platform={Platform} places={N} matched={M} city={City}",
+                    userId, normalizedPlatform, result.Places.Count, numMatched, result.City ?? "(null)");
+
+                return Ok(ImportVideoResponseMapper.From(result, matched, normalizedPlatform, sanitizedHandle));
             }
             catch (NoPlacesFoundException)
             {

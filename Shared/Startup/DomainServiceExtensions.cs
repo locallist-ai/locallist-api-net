@@ -121,6 +121,8 @@ public static class DomainServiceExtensions
         services.Configure<ImportOptions>(configuration.GetSection(ImportOptions.SectionName));
         services.AddHttpClient<IGeminiFileClient, GeminiFileClient>(c => c.Timeout = TimeSpan.FromSeconds(120));
         services.AddHttpClient<VideoExtractionService>(c => c.Timeout = TimeSpan.FromSeconds(120));
+        // T3 — matching determinista de candidatos contra el catálogo (una query, en memoria).
+        services.AddScoped<ImportMatchingService>();
 
         // Chat — slot-filling agent
         services.AddScoped<SlotExtractorService>();

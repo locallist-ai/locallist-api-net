@@ -71,6 +71,14 @@ public class VideoImportMetric
     [Column("num_places_dropped")]
     public int NumPlacesDropped { get; set; }
 
+    /// <summary>
+    /// F2 T3 — cuántos de los <see cref="NumPlaces"/> candidatos matchearon un place PUBLICADO del
+    /// catálogo (high o medium). Null hasta que el matching corre: los caminos de error (no places,
+    /// extracción caída) no matchean. Dato de calidad del matcher para iterar la estrategia.
+    /// </summary>
+    [Column("num_matched")]
+    public int? NumMatched { get; set; }
+
     [Column("confidence")]
     public double? Confidence { get; set; }
 

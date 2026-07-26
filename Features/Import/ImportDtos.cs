@@ -19,25 +19,39 @@ public sealed record ImportVideoResponse(
     string Platform,
     string? CreatorHandle);
 
-/// <summary>Un candidato extraído del vídeo (ya saneado por <see cref="VideoOutputSanitizer"/>).</summary>
+/// <summary>
+/// Un candidato extraído del vídeo (ya saneado por <see cref="VideoOutputSanitizer"/>), enriquecido
+/// por el matcher de T3. Los tres campos de match son ADITIVOS (no rompen el contrato de T1):
+/// <see cref="MatchedPlaceId"/> null = el sitio NO está en nuestro catálogo para esa ciudad (la app
+/// lo muestra como "no está en LocalList"). <see cref="MatchConfidence"/> = "high" | "medium" | null.
+/// </summary>
 public sealed record ImportPlaceDto(
     string Name,
     string? Descriptor,
     string? Category,
     string? Evidence,
-    int? TimestampSec);
+    int? TimestampSec,
+    Guid? MatchedPlaceId = null,
+    string? MatchedPlaceName = null,
+    string? MatchConfidence = null);
 
-/// <summary>Mapea el resultado del servicio al DTO público, sin filtrar diagnósticos.</summary>
+/// <summary>Mapea el resultado del servicio + el matching al DTO público, sin filtrar diagnósticos.</summary>
 public static class ImportVideoResponseMapper
 {
     public static ImportVideoResponse From(
-        VideoExtractionResult result, string platform, string? creatorHandle) =>
+        VideoExtractionResult result,
+        IReadOnlyList<MatchedImportPlace> matched,
+        string platform,
+        string? creatorHandle) =>
         new(
             result.City,
             result.Country,
             result.Language,
-            result.Places
-                .Select(p => new ImportPlaceDto(p.Name, p.Descriptor, p.Category, p.Evidence, p.TimestampSec))
+            matched
+                .Select(m => new ImportPlaceDto(
+                    m.Candidate.Name, m.Candidate.Descriptor, m.Candidate.Category,
+                    m.Candidate.Evidence, m.Candidate.TimestampSec,
+                    m.MatchedPlaceId, m.MatchedPlaceName, m.MatchConfidence))
                 .ToList(),
             result.Vibes,
             result.Confidence,
