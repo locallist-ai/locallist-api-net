@@ -167,9 +167,10 @@ public sealed class VideoExtractionService
                 throw new NoPlacesFoundException();
             }
 
-            PersistMetric(platform, mimeType, sizeBytes, file.DurationSec, caption, result,
+            var metricId = PersistMetric(platform, mimeType, sizeBytes, file.DurationSec, caption, result,
                 diag, errorCode: null, errorMessage: null, droppedOverride: sanitized.DroppedPlaces);
-            return result;
+            // El endpoint (T3) anota num_matched en esta misma fila tras el matching.
+            return result with { MetricId = metricId };
         }
         catch (VideoExtractionException)
         {
@@ -397,7 +398,8 @@ Output schema:
         }
     }
 
-    private void PersistMetric(
+    /// <summary>Persiste el diagnóstico. Devuelve el Id de la fila (para anotar num_matched en T3), o null si el insert falla.</summary>
+    private Guid? PersistMetric(
         string? platform, string? mimeType, long? sizeBytes, double? durationSec, string? caption,
         VideoExtractionResult? result, AiCallDiagnostics? diag,
         string? errorCode, string? errorMessage, int? droppedOverride = null)
@@ -435,11 +437,13 @@ Output schema:
             };
             _db.Set<VideoImportMetric>().Add(metric);
             _db.SaveChanges();
+            return metric.Id;
         }
         catch (Exception ex)
         {
             // La observabilidad no debe tumbar la extracción: si el insert falla, log y seguimos.
             _logger.LogError(ex, "Video import: failed to persist metric");
+            return null;
         }
     }
 
