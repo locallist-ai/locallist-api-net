@@ -6,7 +6,9 @@ namespace LocalList.API.NET.Shared.Auth;
 public static class AdminClaimsExtensions
 {
     private const string FirebaseIssuerPrefix = "https://securetoken.google.com/";
-    private const string AdminDomain = "@locallist.ai";
+
+    /// <summary>Dominio de correo interno del equipo. Fuente única del literal <c>@locallist.ai</c>.</summary>
+    public const string InternalDomain = "@locallist.ai";
 
     /// <summary>
     /// Returns true only for Firebase RS256 tokens with a verified @locallist.ai email.
@@ -22,10 +24,20 @@ public static class AdminClaimsExtensions
         var email = user.GetEmail();
         return !string.IsNullOrEmpty(issuer)
             && issuer.StartsWith(FirebaseIssuerPrefix, StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrEmpty(email)
-            && email.EndsWith(AdminDomain, StringComparison.OrdinalIgnoreCase)
+            && IsInternalDomainEmail(email)
             && user.HasVerifiedEmail();
     }
+
+    /// <summary>
+    /// True cuando <paramref name="email"/> pertenece al dominio interno <see cref="InternalDomain"/>.
+    /// Comprobación de DOMINIO pura (sin issuer ni email_verified): la usa el override de tier
+    /// dev-only sobre el usuario AppScheme, donde la fuente de verdad del email es la fila de la DB
+    /// del propio usuario. NO es un chequeo de admin — no confundir con <see cref="IsAdminCaller"/>,
+    /// que además exige token Firebase RS256 + email verificado.
+    /// </summary>
+    public static bool IsInternalDomainEmail(string? email) =>
+        !string.IsNullOrEmpty(email)
+        && email.EndsWith(InternalDomain, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// True when the Firebase token carries email_verified == true. The claim value is a JSON
