@@ -1,6 +1,5 @@
 using System.Text.Json;
 using LocalList.API.NET.Shared.Data.Entities;
-using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace LocalList.API.Tests.Features;
