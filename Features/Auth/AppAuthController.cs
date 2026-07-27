@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using LocalList.API.NET.Features.Auth.Services;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.PostHog;
@@ -78,18 +79,21 @@ public class AppAuthController : ControllerBase
         if (!claims.EmailVerified)
             return Unauthorized(new { error = "Email address is not verified by identity provider" });
         var providerSub = claims.Sub;
+        // El provider SSO devuelve el email crudo del claim; normalizar antes de comparar/crear
+        // para que el LINK por email de una cuenta legada encuentre al usuario (evita duplicado).
+        var email = EmailNormalizer.Normalize(claims.Email);
         var user = request.Provider == "apple"
             ? await _db.Users.FirstOrDefaultAsync(
-                u => u.AppleUserId == providerSub || u.Email == claims.Email, ct)
+                u => u.AppleUserId == providerSub || u.Email == email, ct)
             : await _db.Users.FirstOrDefaultAsync(
-                u => u.GoogleUserId == providerSub || u.Email == claims.Email, ct);
+                u => u.GoogleUserId == providerSub || u.Email == email, ct);
 
         bool isNewUser = user is null;
         if (user is null)
         {
             user = new User
             {
-                Email = claims.Email,
+                Email = email,
                 Name = request.Name ?? claims.Name,
                 Image = claims.Picture,
                 Role = "user"
@@ -135,12 +139,13 @@ public class AppAuthController : ControllerBase
     {
         if (!ModelState.IsValid) return BadRequest(new { error = "Invalid request" });
 
-        var existing = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
+        var email = EmailNormalizer.Normalize(request.Email);
+        var existing = await _db.Users.FirstOrDefaultAsync(u => u.Email == email, ct);
         if (existing is not null) return Conflict(new { error = "Email already registered" });
 
         var user = new User
         {
-            Email = request.Email,
+            Email = email,
             Name = request.Name,
             PasswordHash = _hasher.Hash(request.Password),
             Role = "user"
@@ -163,7 +168,8 @@ public class AppAuthController : ControllerBase
     {
         if (!ModelState.IsValid) return BadRequest(new { error = "Invalid credentials" });
 
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email, ct);
+        var email = EmailNormalizer.Normalize(request.Email);
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email, ct);
 
         // Unified error flow (anti-enumeration + anti-timing):
         //   * All three failure branches return exactly the same JSON body.

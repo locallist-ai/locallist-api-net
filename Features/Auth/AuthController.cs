@@ -38,7 +38,9 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         var firebaseUid = User.GetFirebaseUid();
-        var email = User.GetEmail();
+        // Normalizar el email del claim: enlaza cuentas legadas por email sin importar la caja
+        // y persiste la forma canónica (empty si el claim falta → el guard de abajo lo caza).
+        var email = EmailNormalizer.Normalize(User.GetEmail());
 
         if (string.IsNullOrEmpty(firebaseUid) || string.IsNullOrEmpty(email))
             return BadRequest(new { error = "Token missing required claims (sub, email)" });
