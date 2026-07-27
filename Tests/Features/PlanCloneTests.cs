@@ -50,7 +50,8 @@ public class PlanCloneTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         string name, string visibility, bool isShowcase, string source = "curated",
         Guid? ownerId = null, int stopCount = 3,
         JsonDocument? nameI18n = null, JsonDocument? descriptionI18n = null,
-        JsonDocument? translationStatus = null)
+        JsonDocument? translationStatus = null,
+        string? imageUrl = null, DateOnly? startDate = null, string? tripContextJson = null)
     {
         var db = fixture.GetDbContext();
         var plan = new Plan
@@ -67,6 +68,9 @@ public class PlanCloneTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             NameI18n = nameI18n,
             DescriptionI18n = descriptionI18n,
             TranslationStatus = translationStatus,
+            ImageUrl = imageUrl,
+            StartDate = startDate,
+            TripContext = tripContextJson is null ? null : JsonDocument.Parse(tripContextJson),
         };
         db.Plans.Add(plan);
 
@@ -385,5 +389,171 @@ public class PlanCloneTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(caller, clone.CreatedById);
         Assert.Equal("private", clone.Visibility);
         Assert.Equal(source.Id, clone.ClonedFrom);
+    }
+
+    // ── MINOR ImageUrl: el clon conserva la imagen del plan origen ──
+    [Fact]
+    public async Task Clone_Showcase_PreservesImageUrl()
+    {
+        var caller = await SeedUser("cl-img");
+        var (source, _) = await SeedPlan(
+            "Showcase Image", "public", isShowcase: true, stopCount: 1,
+            imageUrl: "https://example.com/hero.jpg");
+        var client = await AppClient(caller, "cl-img-c");
+
+        var res = await client.PostAsync($"/plans/{source.Id}/clone", null);
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+        var cloneId = (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+
+        var db = fixture.GetDbContext();
+        var clone = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == cloneId);
+        Assert.Equal("https://example.com/hero.jpg", clone.ImageUrl);
+    }
+
+    // ── MINOR TripContext (privacidad): showcase curado → se copia; plan público ajeno → null ──
+    [Fact]
+    public async Task Clone_Showcase_KeepsTripContext()
+    {
+        var caller = await SeedUser("cl-tc-show");
+        var (source, _) = await SeedPlan(
+            "Showcase TC", "public", isShowcase: true, stopCount: 1,
+            tripContextJson: """{"budget":"mid","groupType":"couple"}""");
+        var client = await AppClient(caller, "cl-tc-show-c");
+
+        var res = await client.PostAsync($"/plans/{source.Id}/clone", null);
+        var cloneId = (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+
+        var db = fixture.GetDbContext();
+        var clone = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == cloneId);
+        Assert.NotNull(clone.TripContext);
+        Assert.Equal("mid", clone.TripContext!.RootElement.GetProperty("budget").GetString());
+    }
+
+    [Fact]
+    public async Task Clone_PublicUserPlan_DropsTripContext_ForPrivacy()
+    {
+        var otherOwner = await SeedUser("cl-tc-owner");
+        var caller = await SeedUser("cl-tc-caller");
+        var (source, _) = await SeedPlan(
+            "Public TC", "public", isShowcase: false, source: "user", ownerId: otherOwner, stopCount: 1,
+            tripContextJson: """{"diet":"vegan","budget":"low","exclusions":["nightlife"]}""");
+        var client = await AppClient(caller, "cl-tc-caller-c");
+
+        var res = await client.PostAsync($"/plans/{source.Id}/clone", null);
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+        var cloneId = (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+
+        // Los datos personales del dueño (dieta/presupuesto/exclusiones) NO se persisten bajo el cloner.
+        var db = fixture.GetDbContext();
+        var clone = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == cloneId);
+        Assert.Null(clone.TripContext);
+    }
+
+    // ── MINOR StartDate: NO se hereda la fecha del origen ──
+    [Fact]
+    public async Task Clone_DoesNotInheritStartDate()
+    {
+        var caller = await SeedUser("cl-sd");
+        var (source, _) = await SeedPlan(
+            "Showcase Dated", "public", isShowcase: true, stopCount: 1,
+            startDate: new DateOnly(2020, 1, 1));
+        var client = await AppClient(caller, "cl-sd-c");
+
+        var res = await client.PostAsync($"/plans/{source.Id}/clone", null);
+        var cloneId = (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+
+        var db = fixture.GetDbContext();
+        var clone = await db.Plans.AsNoTracking().FirstAsync(p => p.Id == cloneId);
+        Assert.Null(clone.StartDate);
+    }
+
+    // ── Test gap: bloqueo owner↔caller sobre un plan PÚBLICO → 404 (honra IPlanAccessService) ──
+    [Fact]
+    public async Task Clone_PublicPlan_OwnerBlockedCaller_Returns404()
+    {
+        var owner = await SeedUser("cl-blk-owner");
+        var caller = await SeedUser("cl-blk-caller");
+        var (source, _) = await SeedPlan(
+            "Public Blocked", "public", isShowcase: false, source: "user", ownerId: owner, stopCount: 1);
+
+        var db = fixture.GetDbContext();
+        db.UserBlocks.Add(new UserBlock { BlockerId = owner, BlockedId = caller });
+        await db.SaveChangesAsync();
+
+        var client = await AppClient(caller, "cl-blk-caller-c");
+        var res = await client.PostAsync($"/plans/{source.Id}/clone", null);
+        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+
+        Assert.False(await fixture.GetDbContext().Plans
+            .AnyAsync(p => p.CreatedById == caller && p.ClonedFrom == source.Id));
+    }
+
+    // ── Test gap: aislamiento BIDIRECCIONAL (editar clon no toca origen; editar origen no toca clon) ──
+    [Fact]
+    public async Task Clone_Edits_AreIsolated_Bidirectionally()
+    {
+        var owner = await SeedUser("cl-iso-owner");
+        var caller = await SeedUser("cl-iso-caller");
+        var (source, srcPlaceIds) = await SeedPlan(
+            "Public Iso", "public", isShowcase: false, source: "user", ownerId: owner, stopCount: 2);
+        var callerClient = await AppClient(caller, "cl-iso-caller-c");
+        var ownerClient = await AppClient(owner, "cl-iso-owner-c");
+
+        var cloneId = (await (await callerClient.PostAsync($"/plans/{source.Id}/clone", null))
+            .Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+
+        // El caller edita SU clon → el origen NO cambia.
+        var callerPlace = await SeedPlace("Caller Edit Place");
+        var editClone = await callerClient.PutAsJsonAsync($"/plans/{cloneId}/stops", new
+        {
+            stops = new[] { new { placeId = callerPlace.Id, dayNumber = 1, orderIndex = 0, timeBlock = "morning" } }
+        });
+        Assert.Equal(HttpStatusCode.OK, editClone.StatusCode);
+
+        var db1 = fixture.GetDbContext();
+        var srcStopsAfterCloneEdit = await db1.PlanStops.AsNoTracking()
+            .Where(s => s.PlanId == source.Id).Select(s => s.PlaceId).ToListAsync();
+        Assert.Equal(srcPlaceIds.OrderBy(x => x), srcStopsAfterCloneEdit.OrderBy(x => x)); // origen intacto
+
+        // El owner edita el ORIGEN → el clon NO cambia (sigue con el place del caller).
+        var ownerPlace = await SeedPlace("Owner Edit Place");
+        var editSource = await ownerClient.PutAsJsonAsync($"/plans/{source.Id}/stops", new
+        {
+            stops = new[] { new { placeId = ownerPlace.Id, dayNumber = 1, orderIndex = 0, timeBlock = "morning" } }
+        });
+        Assert.Equal(HttpStatusCode.OK, editSource.StatusCode);
+
+        var db2 = fixture.GetDbContext();
+        var cloneStops = await db2.PlanStops.AsNoTracking()
+            .Where(s => s.PlanId == cloneId).Select(s => s.PlaceId).ToListAsync();
+        Assert.Equal(new[] { callerPlace.Id }, cloneStops); // clon intacto
+    }
+
+    // ── MAJOR (invertido a verde): N clones CONCURRENTES del mismo origen → exactamente 1 plan ──
+    [Fact]
+    public async Task Clone_ConcurrentSameSource_CreatesExactlyOnePlan()
+    {
+        var caller = await SeedUser("cl-race");
+        var (source, _) = await SeedPlan("Showcase Race", "public", isShowcase: true, stopCount: 2);
+        var client = await AppClient(caller, "cl-race-c");
+
+        // 8 clones concurrentes del MISMO origen por el MISMO free user (repro del reviewer).
+        var tasks = Enumerable.Range(0, 8)
+            .Select(_ => client.PostAsync($"/plans/{source.Id}/clone", null))
+            .ToArray();
+        var responses = await Task.WhenAll(tasks);
+
+        // Todas 2xx (el ganador 201; los perdedores 200 con el ganador tras 23505).
+        Assert.All(responses, r => Assert.True(r.IsSuccessStatusCode, $"status={(int)r.StatusCode}"));
+
+        // Todas apuntan al MISMO plan.
+        var ids = new List<Guid>();
+        foreach (var r in responses)
+            ids.Add((await r.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid());
+        Assert.Single(ids.Distinct());
+
+        // Y la DB tiene EXACTAMENTE un clon de ese origen para el caller.
+        var db = fixture.GetDbContext();
+        Assert.Equal(1, await db.Plans.CountAsync(p => p.CreatedById == caller && p.ClonedFrom == source.Id));
     }
 }

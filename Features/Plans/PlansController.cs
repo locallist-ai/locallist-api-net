@@ -150,15 +150,13 @@ public class PlansController : ControllerBase
             }
         }
 
-        // 2. Idempotencia (evita duplicados por doble-tap): si el caller ya tiene un plan activo
-        //    clonado de ESTE origen, se devuelve ese (200) en vez de crear otro. DELETE es hard, así
-        //    que "activo" == "existe en DB". Se comprueba ANTES del cap para que un re-clone en el
-        //    tope no reciba un 403 espurio (no crea nada nuevo).
-        var existing = await _db.Plans.AsNoTracking()
-            .Where(p => p.CreatedById == userId.Value && p.ClonedFrom == id)
-            .OrderBy(p => p.CreatedAt)
-            .Select(p => p.Id)
-            .FirstOrDefaultAsync(ct);
+        // 2. Idempotencia — fast-path: si el caller YA tiene un clon activo de ESTE origen, se
+        //    devuelve ese (200) en vez de crear otro. DELETE es hard, así que "activo" == "existe en
+        //    DB". Se comprueba ANTES del cap para que un re-clone en el tope no reciba un 403 espurio.
+        //    OJO: este SELECT es solo la vía rápida del doble-tap NO concurrente; la garantía dura
+        //    contra N clones concurrentes la da el índice único parcial (created_by, cloned_from) +
+        //    el catch de 23505 más abajo (el SELECT-then-INSERT no es atómico por sí solo).
+        var existing = await FindExistingCloneAsync(userId.Value, id, ct);
         if (existing != Guid.Empty)
         {
             _logger.LogInformation(
@@ -190,6 +188,12 @@ public class PlansController : ControllerBase
         //    usuario NORMAL: nunca showcase ni curated — isCurated mira Source=="curated"). i18n se
         //    copia tal cual: como source!="curated", el DTO sirve el idioma existente sin exigir
         //    translation_status approved, así que el ES del showcase se conserva.
+        //    Decisiones del hub 2026-07-27:
+        //     · StartDate NO se hereda: un showcase con fecha fija/pasada daría un clon fechado en el
+        //       pasado (y chocaría con la viabilidad por fecha); el usuario pone su fecha al seguir/editar.
+        //     · TripContext solo se copia de un SHOWCASE curado (contexto de diseño del itinerario, no
+        //       personal). De un plan PÚBLICO de usuario NO se copia: son datos personales de un extraño
+        //       (dieta/presupuesto/grupo/exclusiones) que no deben persistir bajo el cloner.
         var now = DateTimeOffset.UtcNow;
         var newPlanId = Guid.NewGuid();
         var clone = new Plan
@@ -200,8 +204,9 @@ public class PlansController : ControllerBase
             City = source.City,
             Type = source.Type,
             DurationDays = source.DurationDays,
-            StartDate = source.StartDate,
-            TripContext = CloneJson(source.TripContext),
+            ImageUrl = source.ImageUrl,
+            StartDate = null,
+            TripContext = source.IsShowcase ? CloneJson(source.TripContext) : null,
             NameI18n = CloneJson(source.NameI18n),
             DescriptionI18n = CloneJson(source.DescriptionI18n),
             Visibility = "private",
@@ -231,7 +236,22 @@ public class PlansController : ControllerBase
             });
         }
 
-        await _db.SaveChangesAsync(ct);
+        // El SELECT-then-INSERT del paso 2 no es atómico: N clones concurrentes del MISMO origen
+        // pasarían todos el pre-check y crearían duplicados (+ ráfaga sobre el cap). El índice único
+        // parcial (created_by, cloned_from) los reduce a UNO: el que pierde la carrera recibe 23505,
+        // re-lee el ganador y devuelve ESE (200) — mismo patrón que el índice único de Favorites.
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (PostgresErrorPredicates.IsUniqueViolation(ex))
+        {
+            var winner = await FindExistingCloneAsync(userId.Value, id, ct);
+            if (winner == Guid.Empty) throw; // no debería ocurrir: el 23505 es del índice de clone.
+            _logger.LogInformation(
+                "User {UserId} lost clone race on plan {PlanId}; returning winner {CloneId}", userId, id, winner);
+            return Ok(await LoadPlanDetailAsync(winner, ct));
+        }
 
         _logger.LogInformation(
             "User {UserId} cloned plan {SourceId} into {CloneId} ({StopCount} stops)",
@@ -258,6 +278,15 @@ public class PlansController : ControllerBase
         var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
         return PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments, _config["Api:PublicBaseUrl"]);
     }
+
+    // Id del clon ACTIVO del caller para un origen dado (Guid.Empty si no hay). "activo" == existe
+    // (DELETE es hard). Fuente única para el pre-check idempotente y para re-leer el ganador tras 23505.
+    private Task<Guid> FindExistingCloneAsync(Guid userId, Guid sourceId, CancellationToken ct) =>
+        _db.Plans.AsNoTracking()
+            .Where(p => p.CreatedById == userId && p.ClonedFrom == sourceId)
+            .OrderBy(p => p.CreatedAt)
+            .Select(p => p.Id)
+            .FirstOrDefaultAsync(ct);
 
     // Deep-clone de un jsonb: re-parsea el texto crudo para NO compartir el JsonDocument del origen
     // (evita disposal compartido y acopla la copia al ciclo de vida de la nueva entidad).

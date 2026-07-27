@@ -136,6 +136,17 @@ public class LocalListDbContext : DbContext
             .WithMany()
             .HasForeignKey(p => p.ClonedFrom)
             .OnDelete(DeleteBehavior.SetNull);
+        // Clone de plan: un usuario tiene A LO SUMO un clon activo por origen. Índice único
+        // PARCIAL (created_by, cloned_from) WHERE cloned_from IS NOT NULL — hace la idempotencia
+        // de POST /plans/:id/clone ATÓMICA a nivel de DB (el pre-check SELECT no basta contra N
+        // clones concurrentes del mismo origen: la carrera daría duplicados + ráfaga sobre el cap).
+        // El INSERT que pierde la carrera recibe 23505 y re-lee el ganador (mismo patrón que el
+        // índice único de Favorites). Parcial porque NULL en cloned_from (planes no clonados) no
+        // debe colisionar — múltiples planes normales del mismo usuario conviven.
+        modelBuilder.Entity<Plan>()
+            .HasIndex(p => new { p.CreatedById, p.ClonedFrom })
+            .IsUnique()
+            .HasFilter("cloned_from IS NOT NULL");
 
         ConfigureSocial(modelBuilder);
 
