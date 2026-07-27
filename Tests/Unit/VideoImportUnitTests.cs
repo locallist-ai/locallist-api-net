@@ -116,6 +116,19 @@ public class VideoImportUnitTests
         Assert.Equal(0, VideoCostEstimator.EstimateMediaTokens(-100).TotalMediaTokens);
         Assert.Equal(0, VideoCostEstimator.EstimateMediaTokens(double.NaN).TotalMediaTokens);
     }
+
+    // ── Imagen: coste FIJO por tile, sin componente de duración (no hay 258 tok/s de vídeo) ──
+    [Fact]
+    public void EstimateImageTokens_IsFixedPerTile_NoDurationComponent()
+    {
+        Assert.Equal(VideoCostEstimator.ImageTokensPerTile, VideoCostEstimator.EstimateImageTokens());
+        Assert.Equal(258, VideoCostEstimator.EstimateImageTokens());
+        // Escala por número de tiles si se conocen las dimensiones.
+        Assert.Equal(258 * 3, VideoCostEstimator.EstimateImageTokens(3));
+        // Suelo de 1 tile aunque se pida 0 o negativo (nunca 0 tokens para una imagen presente).
+        Assert.Equal(258, VideoCostEstimator.EstimateImageTokens(0));
+        Assert.Equal(258, VideoCostEstimator.EstimateImageTokens(-5));
+    }
 }
 
 /// <summary>m-1: HasDrift endurecido contra imperativos de injection sin nombre de LLM.</summary>

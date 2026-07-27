@@ -359,4 +359,60 @@ public class VideoExtractionTests(ApiFixture fixture) : IClassFixture<ApiFixture
         Assert.True(fixture.FakeVideoImport.DeleteAttempts >= 3);
         Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
     }
+
+    // ── IMG-1. Imagen aceptada; el check de duración se SALTA (no aplica a imagen) ──
+    // Duración autoritativa 700s (> 600) que HARÍA fallar a un vídeo con VideoTooLong; para una
+    // imagen el bloque de duración no se ejecuta, así que procesa con normalidad.
+    [Fact]
+    public async Task Extraction_ImageJpeg_SkipsDurationCheck_ExtractsOk_DeletesFile()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.DurationSec = 700; // superaría el límite de VÍDEO, pero es imagen
+
+        VideoExtractionResult result;
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            result = await svc.ExtractAsync(
+                Bytes(), 1024, "image/jpeg", "self", caption: "my saved list", CancellationToken.None);
+        }
+
+        Assert.Single(result.Places);
+        Assert.Equal("Sunny Rooftop", result.Places[0].Name);
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled); // no se abortó por duración
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Null(metric.ErrorCode);                 // NO video_too_long
+        Assert.Equal("image/jpeg", metric.MimeType);
+        Assert.Equal(1, metric.NumPlaces);
+        // Coste de imagen = tokens fijos por tile (sin componente de duración).
+        Assert.Equal(VideoCostEstimator.ImageTokensPerTile, metric.EstimatedMediaTokens);
+    }
+
+    // ── IMG-2. Imagen con duración null → NO duration_unknown (legítimo, procesa) ──
+    [Fact]
+    public async Task Extraction_ImageNullDuration_DoesNotFailClosed_ExtractsOk()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.OmitDurationOnActive = true; // el File API no reporta duración
+
+        VideoExtractionResult result;
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            result = await svc.ExtractAsync(
+                Bytes(), 1024, "image/png", "self", caption: null, CancellationToken.None);
+        }
+
+        Assert.Single(result.Places);
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Null(metric.ErrorCode);                 // NO duration_unknown
+        Assert.Null(metric.DurationSec);               // null es normal para imagen
+        Assert.Equal("image/png", metric.MimeType);
+    }
 }

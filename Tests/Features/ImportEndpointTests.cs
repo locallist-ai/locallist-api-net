@@ -447,6 +447,63 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.True(body.TryGetProperty("importThirdPartyEnabled", out var flag));
         Assert.False(flag.GetBoolean());
     }
+
+    // ── (img) imagen (image/jpeg) aceptada → 200, sin check de duración, cuota consumida ──
+    [Fact]
+    public async Task ImageUpload_Accepted_Returns200_ConsumesQuota()
+    {
+        var (client, userId) = await PlusClient("imp-img");
+        // Imagen real: el File API no reporta videoDuration → el camino de imagen NO lo trata como
+        // fallo (a diferencia del vídeo, que daría duration_unknown).
+        fixture.FakeVideoImport.OmitDurationOnActive = true;
+        var city = "ImpImgCity" + Guid.NewGuid().ToString("N")[..10];
+        fixture.FakeVideoImport.GenerateContentResponder = _ =>
+            fixture.FakeVideoImport.GenerateContentOk($$"""
+                {
+                  "city": "{{city}}",
+                  "country": "USA",
+                  "language": "en",
+                  "places": [
+                    { "name": "Corner Cafe", "descriptor": "cafe en la lista", "category": "coffee", "evidence": "ocr", "timestampSec": 0 }
+                  ],
+                  "vibes": ["cozy"],
+                  "confidence": 0.6
+                }
+                """);
+
+        var res = await client.PostAsync(Url("self"), VideoForm(mime: "image/jpeg", fileName: "list.jpg"));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(city, body.GetProperty("city").GetString());
+        Assert.Equal(1, body.GetProperty("places").GetArrayLength());
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.SingleAsync(m => m.City == city);
+        Assert.Null(metric.ErrorCode);
+        Assert.Equal("image/jpeg", metric.MimeType);
+        Assert.Null(metric.DurationSec);
+
+        Assert.Equal(1, await Daily(userId));
+        Assert.Equal(1, await Monthly(userId));
+    }
+
+    // ── (c) MIME no permitido (application/pdf) → 400 import_unsupported_format, sin cuota ──
+    [Fact]
+    public async Task UnsupportedFormat_Pdf_Returns400_NoQuota_NoUpload()
+    {
+        var (client, userId) = await PlusClient("imp-pdf");
+
+        var res = await client.PostAsync(Url("self"),
+            VideoForm(mime: "application/pdf", fileName: "itinerary.pdf"));
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("import_unsupported_format", body.GetProperty("error").GetString());
+
+        Assert.Equal(0, await Daily(userId));
+        Assert.Equal(0, await Monthly(userId));
+        Assert.False(fixture.FakeVideoImport.UploadStarted);
+    }
 }
 
 /// <summary>
