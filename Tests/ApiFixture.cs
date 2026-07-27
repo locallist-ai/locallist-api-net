@@ -930,6 +930,16 @@ public class FakeGeminiFileApi : HttpMessageHandler
     private const string FileUri = "https://generativelanguage.googleapis.com/v1beta/files/test-video-abc";
 
     public double DurationSec { get; set; } = 12.0;
+
+    /// <summary>
+    /// MIME AUTORITATIVO que files.get devuelve en ACTIVE, DESACOPLADO del mime declarado en la
+    /// subida (la File API transcodifica y reporta el tipo real). Default <c>video/mp4</c> — así los
+    /// tests de vídeo quedan byte-idénticos. Los tests de IMAGEN HONESTA lo fijan al mime de imagen
+    /// (+ <see cref="OmitDurationOnActive"/>) para modelar la "verdad" de una imagen; un VÍDEO
+    /// DISFRAZADO se modela dejando <c>video/mp4</c> (y/o una duración) aunque la subida declare
+    /// <c>image/*</c>.
+    /// </summary>
+    public string ActiveMimeType { get; set; } = "video/mp4";
     public int PollActiveAfter { get; set; } = 0;
     public bool FailProcessing { get; set; } = false;
     public Func<HttpRequestMessage, HttpResponseMessage>? GenerateContentResponder { get; set; }
@@ -983,6 +993,7 @@ public class FakeGeminiFileApi : HttpMessageHandler
     public void Reset()
     {
         DurationSec = 12.0;
+        ActiveMimeType = "video/mp4";
         PollActiveAfter = 0;
         FailProcessing = false;
         GenerateContentResponder = null;
@@ -1070,7 +1081,7 @@ public class FakeGeminiFileApi : HttpMessageHandler
                 ? ", \"sizeBytes\": \"" + sz.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\""
                 : "";
             var body = $$"""
-                { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "video/mp4", "state": "{{state}}"{{sizeField}}{{durationField}} }
+                { "name": "{{FileName}}", "uri": "{{FileUri}}", "mimeType": "{{ActiveMimeType}}", "state": "{{state}}"{{sizeField}}{{durationField}} }
                 """;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {

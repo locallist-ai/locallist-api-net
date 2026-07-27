@@ -122,6 +122,28 @@ public sealed class VideoExtractionService
                     throw new VideoTooLongException(duration, _options.MaxDurationSeconds);
                 }
             }
+            else
+            {
+                // Camino IMAGEN: el bloque de duración (y con él el cap legal de 600s) NO se ejecuta
+                // porque una imagen no tiene duración. Pero `isImage` se decidió por el MIME
+                // DECLARADO por el caller en el multipart, 100% spoofeable. La metadata AUTORITATIVA
+                // del File API (la MISMA de la que sale file.DurationSec en el camino vídeo) delata un
+                // vídeo disfrazado de imagen: si reporta una duración O un mimeType `video/*`, es un
+                // vídeo que por esta vía se colaría SIN el cap legal → RECHAZO. Espejo exacto del
+                // re-check del tamaño autoritativo de abajo: fallo PRE-facturación (no llega a
+                // generateContent, sin `Billed`) → el endpoint reembolsa la cuota, sin gasto Gemini.
+                var authoritativeMime = file.MimeType.Trim().ToLowerInvariant();
+                if (file.DurationSec is not null ||
+                    authoritativeMime.StartsWith("video/", StringComparison.Ordinal))
+                {
+                    PersistMetric(platform, mimeType, sizeBytes, file.DurationSec, caption, result: null,
+                        diag: null, errorCode: "media_type_mismatch",
+                        errorMessage: $"declared {normalizedMime}, authoritative "
+                            + $"{(authoritativeMime.Length == 0 ? "(none)" : authoritativeMime)}"
+                            + (file.DurationSec is { } d ? $", duration {d:F0}s" : ""));
+                    throw new MediaTypeMismatchException(normalizedMime, authoritativeMime, file.DurationSec);
+                }
+            }
 
             // Tamaño AUTORITATIVO del File API: el caller pudo declarar un sizeBytes falso en el
             // rechazo pre-subida. Preferimos el reportado en ACTIVE; fallback al del finalize. El

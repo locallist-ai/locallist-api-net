@@ -328,6 +328,9 @@ public class ImportController : ControllerBase
         // El servicio revalida contra la metadata autoritativa del File API; estos casos son
         // defensa en profundidad sobre las validaciones baratas del endpoint.
         VideoUnsupportedFormatException => BadRequest(new { error = "import_unsupported_format" }),
+        // Vídeo disfrazado de imagen (mime declarado image/* pero metadata autoritativa video/* o
+        // con duración): rechazo 4xx claro. No es Billed → el catch de arriba ya reembolsó la cuota.
+        MediaTypeMismatchException => BadRequest(new { error = "import_media_type_mismatch" }),
         VideoTooLargeException tooLarge => BadRequest(new { error = "import_too_large", maxBytes = tooLarge.MaxBytes }),
         VideoTooLongException tooLong => BadRequest(new { error = "import_video_too_long", maxSeconds = tooLong.MaxSec }),
         // Fallo de infraestructura (Gemini caído, File API, truncado…). El usuario reintenta.
