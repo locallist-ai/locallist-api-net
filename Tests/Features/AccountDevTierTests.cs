@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,66 +9,105 @@ using LocalList.API.NET.Shared.Usage;
 namespace LocalList.API.Tests.Features;
 
 /// <summary>
-/// Fixture con <c>Dev:TierOverrideEnabled=true</c> — modela un entorno de test/dev donde el
-/// override de tier está ABIERTO. Container propio (config distinta del default, que lo tiene off).
+/// Fixture con <c>Dev:TierOverrideEnabled=true</c> Y un <c>Dev:AllowedEmails</c> concreto — modela un
+/// entorno (incl. PROD) donde el override está ABIERTO para un conjunto EXACTO de cuentas internas.
+/// Container propio (config distinta del default, que tiene el flag off y el allowlist vacío).
+///
+/// El allowlist inyectado incluye variantes a propósito para ejercitar el matching EXACTO:
+///   • <see cref="MixedCaseAllowlisted"/> — entrada con MAYÚS/minús mezclado; el usuario en DB va en
+///     minúsculas (<see cref="MixedCaseDbEmail"/>) → prueba el match case-insensitive.
+///   • <see cref="SpacedAllowlisted"/> — entrada CON espacios alrededor; el usuario en DB sin espacios
+///     (<see cref="SpacedDbEmail"/>) → prueba el trim.
+/// Los demás emails del camino "permitido" son EXACTOS (uno por test → sin colisión con el índice
+/// único de <c>users.email</c>). Un email interno NO listado (<see cref="NotAllowlistedInternal"/>)
+/// se deja FUERA a propósito para probar que el gate es exacto, no por dominio.
 /// </summary>
 public sealed class DevTierOverrideEnabledFixture : ApiFixture
 {
+    public const string AllowedFlip = "flip@locallist.ai";
+    public const string AllowedInvalidTier = "invalidtier@locallist.ai";
+    public const string AllowedMissingTier = "missingtier@locallist.ai";
+    public const string AllowedIgnoreBodyCaller = "ignorebody-caller@locallist.ai";
+    public const string AllowedIgnoreBodyVictim = "ignorebody-victim@locallist.ai";
+    public const string AllowedResetClear = "resetclear@locallist.ai";
+    public const string AllowedResetScope = "resetscope@locallist.ai";
+
+    // Match case-insensitive: el allowlist trae la forma con mayúsculas; el user en DB, minúsculas.
+    public const string MixedCaseAllowlisted = "MixedCase@LocalList.Ai";
+    public const string MixedCaseDbEmail = "mixedcase@locallist.ai";
+
+    // Trim: el allowlist trae la forma CON espacios alrededor; el user en DB, sin espacios.
+    public const string SpacedAllowlisted = "  spaced@locallist.ai  ";
+    public const string SpacedDbEmail = "spaced@locallist.ai";
+
+    // Interno (@locallist.ai) pero deliberadamente AUSENTE del allowlist → debe dar 404 (prueba de
+    // que el gate es EXACTO, no por dominio; es el objetivo de la mutación del check de allowlist).
+    public const string NotAllowlistedInternal = "notlisted@locallist.ai";
+
+    // Parecidos a AllowedFlip pero NO exactos → no matchean.
+    public const string SubdomainLookalike = "flip@locallist.ai.evil.com";
+    public const string PrefixLookalike = "xflip@locallist.ai";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Dev:TierOverrideEnabled", "true");
+        var allowlist = new[]
+        {
+            AllowedFlip, AllowedInvalidTier, AllowedMissingTier,
+            AllowedIgnoreBodyCaller, AllowedIgnoreBodyVictim,
+            AllowedResetClear, AllowedResetScope,
+            MixedCaseAllowlisted, SpacedAllowlisted,
+        };
+        for (var i = 0; i < allowlist.Length; i++)
+            builder.UseSetting($"Dev:AllowedEmails:{i}", allowlist[i]);
         base.ConfigureWebHost(builder);
     }
 }
 
 /// <summary>
-/// Fixture PEOR-CASO de misconfig de prod: flag <c>Dev:TierOverrideEnabled=true</c> Y entorno
-/// <c>Production</c> (lo que Railway pone). El gate 0 (entorno) debe ganar → 404 aunque el flag esté
-/// on y el email sea interno. Prueba que un flag mal puesto en prod sigue fail-closed.
-/// <c>UseEnvironment("Production")</c> va DESPUÉS de <c>base</c> (que fija Development) para que gane.
+/// Fixture con el flag ON pero el allowlist VACÍO (no se setea <c>Dev:AllowedEmails</c>). Modela el
+/// SEGUNDO fail-closed: aunque el override esté encendido, sin allowlist NADIE pasa → 404. Container
+/// propio.
 /// </summary>
-public sealed class DevTierOverrideProductionFixture : ApiFixture
+public sealed class DevTierFlagOnEmptyAllowlistFixture : ApiFixture
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Dev:TierOverrideEnabled", "true");
+        // Dev:AllowedEmails deliberadamente SIN setear → vacío (default) → fail-closed.
         base.ConfigureWebHost(builder);
-        builder.UseEnvironment("Production");
     }
 }
 
 /// <summary>
-/// Gate 0 (entorno) — el que hace que un misconfig del flag en prod no explote. Con flag ON +
-/// Production + email interno + tier válido → 404 y <c>User.Tier</c> intacto. Mutación: quitar el
-/// gate de entorno → devuelve 200 y flipa el tier (el test cae).
+/// Segundo fail-closed: flag ON + allowlist VACÍO → 404 para cualquier email (incluso interno), y sin
+/// efecto. Mutación: si el gate tratara el allowlist vacío como "todos permitidos", esto fliparía el
+/// tier / borraría cuotas y el test caería.
 /// </summary>
-public class AccountDevTierProductionTests(DevTierOverrideProductionFixture fixture)
-    : IClassFixture<DevTierOverrideProductionFixture>
+public class AccountDevTierEmptyAllowlistTests(DevTierFlagOnEmptyAllowlistFixture fixture)
+    : IClassFixture<DevTierFlagOnEmptyAllowlistFixture>
 {
     [Fact]
-    public async Task Production_FlagOn_InternalEmail_ValidTier_Returns404_NoFlip()
+    public async Task FlagOn_EmptyAllowlist_InternalEmail_Returns404_NoFlip()
     {
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-prod-{uid:N}@locallist.ai", tier: "free");
+            uid, $"empty-allow-{uid:N}@locallist.ai", tier: "free");
 
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
         Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
 
-        // El gate 0 corta antes de tocar la DB: tier intacto pese a flag on + email interno.
         var db = fixture.GetDbContext();
         var user = await db.Users.FirstAsync(u => u.Id == uid);
         Assert.Equal("free", user.Tier);
     }
 
     [Fact]
-    public async Task Production_FlagOn_InternalEmail_ResetQuota_Returns404_NoDelete()
+    public async Task FlagOn_EmptyAllowlist_ResetQuota_Returns404_NoDelete()
     {
-        // El gate 0 (entorno) también protege reset-quota: prod + flag on + email interno → 404,
-        // y las cuotas NO se borran. Mutación: quitar el gate de entorno → 200 y borra.
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-prod-reset-{uid:N}@locallist.ai", tier: "free");
+            uid, $"empty-allow-reset-{uid:N}@locallist.ai", tier: "free");
         var db = fixture.GetDbContext();
         db.UsageCounters.Add(new UsageCounter
         {
@@ -86,16 +127,26 @@ public class AccountDevTierProductionTests(DevTierOverrideProductionFixture fixt
 }
 
 /// <summary>
-/// F-dev — <c>POST /account/dev/tier</c> sobre DB real (ApiFixture = Testcontainers PostgreSQL).
-/// Verifica el triple gate FAIL-CLOSED del override de tier con el flag ENCENDIDO:
-/// email @locallist.ai → aplica el tier en la DB (no-vacuo: se relee la fila), email ajeno → 404
-/// opaco (mutación del gate de email), tier inválido → 400, y que el efecto va SIEMPRE al usuario
-/// del token (jamás a un id del body). El 404 con flag apagado vive en
-/// <see cref="AccountDevTierDisabledTests"/> (fixture con el default off).
+/// F-dev — <c>POST /account/dev/{tier,reset-quota}</c> sobre DB real (ApiFixture = Testcontainers
+/// PostgreSQL) con el flag ENCENDIDO y un allowlist EXACTO. Verifica el doble gate FAIL-CLOSED:
+/// email EN el allowlist → aplica el efecto en la DB (no-vacuo: se relee la fila); email NO listado
+/// (aunque sea @locallist.ai) o parecido-pero-no-exacto → 404 opaco; tier inválido → 400; y que el
+/// efecto va SIEMPRE al usuario del token (jamás a un id del body). El match es case-insensitive +
+/// trim. El 404 con flag apagado vive en <see cref="AccountDevTierDisabledTests"/>; el 404 con
+/// allowlist vacío en <see cref="AccountDevTierEmptyAllowlistTests"/>.
 /// </summary>
 public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     : IClassFixture<DevTierOverrideEnabledFixture>
 {
+    // Id estable derivado del email → repetidos seeds del MISMO email reutilizan el mismo usuario
+    // (CreateAppAuthenticatedClientWithUser hace FindAsync(uid) y no re-inserta), evitando chocar con
+    // el índice único de users.email cuando un [Theory] repite invocaciones sobre el mismo email.
+    private static Guid StableId(string email)
+    {
+        var hash = MD5.HashData(Encoding.UTF8.GetBytes(email));
+        return new Guid(hash);
+    }
+
     private static async Task<string> TierInDb(ApiFixture f, Guid userId)
     {
         var db = f.GetDbContext();
@@ -104,12 +155,11 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task FlagOn_InternalEmail_FlipsTierInDb_ProThenFree()
+    public async Task FlagOn_AllowlistedEmail_FlipsTierInDb_ProThenFree()
     {
-        var uid = Guid.NewGuid();
-        // Seed con tier free y email interno @locallist.ai.
+        var uid = StableId(DevTierOverrideEnabledFixture.AllowedFlip);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-tier-{uid:N}@locallist.ai", tier: "free");
+            uid, DevTierOverrideEnabledFixture.AllowedFlip, tier: "free");
 
         // free → pro
         var toPro = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
@@ -127,27 +177,69 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task FlagOn_NonInternalEmail_Returns404_EvenThoughFlagOn()
+    public async Task FlagOn_AllowlistedEmail_CaseInsensitive_Flips()
     {
-        // Gate de email: el flag está ON pero el email NO es @locallist.ai → 404 opaco.
-        // Mutación: si se quita el check de dominio, este 404 pasaría a 200 y el test cae.
-        var uid = Guid.NewGuid();
+        // El allowlist trae "MixedCase@LocalList.Ai"; el user en DB va en minúsculas. Match
+        // case-insensitive → 200 y flip. Mutación (quitar OrdinalIgnoreCase) → 404.
+        var uid = StableId(DevTierOverrideEnabledFixture.MixedCaseDbEmail);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-tier-{uid:N}@gmail.com", tier: "free");
+            uid, DevTierOverrideEnabledFixture.MixedCaseDbEmail, tier: "free");
+
+        var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("pro", await TierInDb(fixture, uid));
+    }
+
+    [Fact]
+    public async Task FlagOn_AllowlistedEmail_Trimmed_Flips()
+    {
+        // El allowlist trae "  spaced@locallist.ai  " (con espacios); el user en DB sin espacios.
+        // El gate hace trim en ambos lados → 200 y flip. Mutación (quitar el Trim) → 404.
+        var uid = StableId(DevTierOverrideEnabledFixture.SpacedDbEmail);
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(
+            uid, DevTierOverrideEnabledFixture.SpacedDbEmail, tier: "free");
+
+        var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("pro", await TierInDb(fixture, uid));
+    }
+
+    [Fact]
+    public async Task FlagOn_InternalDomainButNotAllowlisted_Returns404_NoFlip()
+    {
+        // Email @locallist.ai pero AUSENTE del allowlist → 404. Prueba clave de que el gate es
+        // EXACTO, no por dominio (el viejo gate de dominio SÍ lo habría dejado pasar).
+        // MUTACIÓN del check de allowlist: quitar IsAllowedEmail → esto pasa a 200 y flipa el tier.
+        var uid = StableId(DevTierOverrideEnabledFixture.NotAllowlistedInternal);
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(
+            uid, DevTierOverrideEnabledFixture.NotAllowlistedInternal, tier: "free");
 
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
         Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
         Assert.Equal("free", await TierInDb(fixture, uid)); // sin efecto en la DB
     }
 
-    [Fact]
-    public async Task FlagOn_LookalikeDomain_Returns404()
+    [Theory]
+    [InlineData(DevTierOverrideEnabledFixture.SubdomainLookalike)]
+    [InlineData(DevTierOverrideEnabledFixture.PrefixLookalike)]
+    public async Task FlagOn_SimilarButNotExactEmail_Returns404(string email)
     {
-        // Defensa del EndsWith: un dominio que solo CONTIENE @locallist.ai pero no termina en él
-        // (p. ej. @locallist.ai.evil.com) no debe pasar el gate → 404.
+        // Parecidos a "flip@locallist.ai" (subdominio evil / prefijo) pero NO exactos → no matchean.
+        var uid = StableId(email);
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(uid, email, tier: "free");
+
+        var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
+        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+        Assert.Equal("free", await TierInDb(fixture, uid));
+    }
+
+    [Fact]
+    public async Task FlagOn_NonInternalEmail_Returns404()
+    {
+        // Un email totalmente ajeno (gmail) tampoco está en el allowlist → 404.
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-tier-{uid:N}@locallist.ai.evil.com", tier: "free");
+            uid, $"outsider-{uid:N}@gmail.com", tier: "free");
 
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
         Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
@@ -159,12 +251,12 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     [InlineData("PRO")]
     [InlineData("")]
     [InlineData("admin")]
-    public async Task FlagOn_InternalEmail_InvalidTier_Returns400(string badTier)
+    public async Task FlagOn_AllowlistedEmail_InvalidTier_Returns400(string badTier)
     {
         // Gate 3: tier estricto {pro,free}. Otro valor → 400 (caller ya validado por gates 1+2).
-        var uid = Guid.NewGuid();
+        var uid = StableId(DevTierOverrideEnabledFixture.AllowedInvalidTier);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-tier-bad-{uid:N}@locallist.ai", tier: "free");
+            uid, DevTierOverrideEnabledFixture.AllowedInvalidTier, tier: "free");
 
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = badTier });
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
@@ -172,11 +264,11 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task FlagOn_MissingTier_Returns400()
+    public async Task FlagOn_AllowlistedEmail_MissingTier_Returns400()
     {
-        var uid = Guid.NewGuid();
+        var uid = StableId(DevTierOverrideEnabledFixture.AllowedMissingTier);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-tier-null-{uid:N}@locallist.ai", tier: "free");
+            uid, DevTierOverrideEnabledFixture.AllowedMissingTier, tier: "free");
 
         // Body sin campo tier → Tier=null → 400.
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { });
@@ -196,23 +288,24 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     [Fact]
     public async Task FlagOn_IgnoresBodyId_MutatesOnlyTokenUser()
     {
-        // El efecto va SIEMPRE al usuario del token, NUNCA a un id del body. Sembramos una víctima
-        // y mandamos su id en el body: la víctima NO debe cambiar; el caller SÍ.
-        var callerId = Guid.NewGuid();
-        var victimId = Guid.NewGuid();
+        // El efecto va SIEMPRE al usuario del token, NUNCA a un id del body. Ambos (caller y víctima)
+        // están allowlisteados para aislar el punto bajo prueba (el gate de email no es lo que salva a
+        // la víctima aquí): mandamos el id de la víctima en el body y NO debe cambiar; el caller SÍ.
+        var callerId = StableId(DevTierOverrideEnabledFixture.AllowedIgnoreBodyCaller);
+        var victimId = StableId(DevTierOverrideEnabledFixture.AllowedIgnoreBodyVictim);
 
         var db = fixture.GetDbContext();
         db.Users.Add(new User
         {
             Id = victimId,
-            Email = $"victim-{victimId:N}@locallist.ai",
+            Email = DevTierOverrideEnabledFixture.AllowedIgnoreBodyVictim,
             FirebaseUid = "app-" + victimId,
             Tier = "free",
         });
         await db.SaveChangesAsync();
 
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            callerId, $"caller-{callerId:N}@locallist.ai", tier: "free");
+            callerId, DevTierOverrideEnabledFixture.AllowedIgnoreBodyCaller, tier: "free");
 
         // Campos id/userId sobran en el DTO (solo se bindea Tier) — se ignoran a propósito.
         var res = await client.PostAsJsonAsync("/account/dev/tier",
@@ -245,12 +338,12 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task ResetQuota_FlagOn_InternalEmail_ClearsCallerCounters()
+    public async Task ResetQuota_FlagOn_AllowlistedEmail_ClearsCallerCounters()
     {
-        var uid = Guid.NewGuid();
+        var uid = StableId(DevTierOverrideEnabledFixture.AllowedResetClear);
         // El usuario debe existir antes de sembrar usage_counters (FK user_id).
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-reset-{uid:N}@locallist.ai", tier: "free");
+            uid, DevTierOverrideEnabledFixture.AllowedResetClear, tier: "free");
 
         // Consume cuota: contador mensual de planes (free = 3/mes) + una ventana de import.
         await SeedCounter(fixture, uid, PlanGenerationGateService.FeatureMonthly, 3);
@@ -274,13 +367,14 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     [Fact]
     public async Task ResetQuota_FlagOn_OnlyDeletesCallerRows_NotOthers()
     {
-        // El borrado es por el id del TOKEN: la cuota de otro usuario NO se toca.
-        var callerId = Guid.NewGuid();
+        // El borrado es por el id del TOKEN: la cuota de otro usuario NO se toca. El "otro" no
+        // necesita estar allowlisteado (nunca es el caller); usamos un email interno cualquiera.
+        var callerId = StableId(DevTierOverrideEnabledFixture.AllowedResetScope);
         var otherId = Guid.NewGuid();
 
         // Ambos usuarios deben existir antes de sembrar sus counters (FK user_id).
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            callerId, $"dev-reset-scope-{callerId:N}@locallist.ai", tier: "free");
+            callerId, DevTierOverrideEnabledFixture.AllowedResetScope, tier: "free");
         var db0 = fixture.GetDbContext();
         db0.Users.Add(new User
         {
@@ -301,16 +395,17 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task ResetQuota_FlagOn_NonInternalEmail_Returns404_NoDelete()
+    public async Task ResetQuota_FlagOn_NotAllowlistedInternalEmail_Returns404_NoDelete()
     {
+        // Interno pero no allowlisteado → 404 y las cuotas NO se borran (gate exacto, no dominio).
         var uid = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, $"dev-reset-{uid:N}@gmail.com", tier: "free");
+            uid, $"reset-notlisted-{uid:N}@locallist.ai", tier: "free");
         await SeedCounter(fixture, uid, PlanGenerationGateService.FeatureMonthly, 3);
 
         var res = await client.PostAsJsonAsync("/account/dev/reset-quota", new { });
         Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
-        Assert.Equal(1, await CounterRows(fixture, uid)); // gate de email cortó antes del DELETE
+        Assert.Equal(1, await CounterRows(fixture, uid)); // gate de allowlist cortó antes del DELETE
     }
 
     [Fact]
@@ -324,9 +419,9 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
 
 /// <summary>
 /// Prueba el gate PRIMARIO (config flag) con el DEFAULT de producción: <c>Dev:TierOverrideEnabled</c>
-/// ausente → false. Con el flag apagado el endpoint es 404 OPACO para TODOS, incluido un usuario
-/// @locallist.ai legítimo. Mutación: si se quita el check del flag, este 404 pasa a 200 (o 400/OK)
-/// y el test cae — es la prueba de que en PROD el override no existe para nadie.
+/// ausente → false (y allowlist vacío). Con el flag apagado el endpoint es 404 OPACO para TODOS,
+/// incluido un usuario @locallist.ai legítimo. Mutación: si se quita el check del flag, este 404
+/// pasa a 200 (o 400/OK) y el test cae — es la prueba de que con el flag off el override no existe.
 /// </summary>
 public class AccountDevTierDisabledTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {

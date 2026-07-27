@@ -1,8 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Constants;
@@ -19,21 +17,25 @@ namespace LocalList.API.NET.Features.Account;
 ///
 /// MODELO DE SEGURIDAD — AMBOS endpoints comparten EXACTAMENTE los mismos gates (helper
 /// <see cref="TryGateAsync"/>), FAIL-CLOSED y OPACOS (acceso denegado → 404, nunca 403: un 403
-/// revelaría que el endpoint existe; un usuario normal jamás debe siquiera intuirlo):
-///   0) Entorno: <c>IWebHostEnvironment.IsProduction()</c> → 404 SIEMPRE. Gate PRIMARIO ORTOGONAL
-///      al config: aunque alguien ponga <c>Dev:TierOverrideEnabled=true</c> por error en Railway
-///      (donde <c>ASPNETCORE_ENVIRONMENT=Production</c>), los endpoints siguen fail-closed. Este
-///      gate es el que hace que un misconfig del flag NO explote — no depende de config alguna.
-///   1) Config <c>Dev:TierOverrideEnabled</c> (default FALSE; solo true en test/dev). Off → 404.
-///   2) El email del usuario autenticado (fila de DB, no el claim) termina en <c>@locallist.ai</c>.
-///      No → 404. OJO: este gate por sí solo NO basta — <c>/auth/register</c> guarda el email
-///      verbatim sin verificar buzón, así que cualquiera puede registrar <c>x@locallist.ai</c> por
-///      email/password y pasarlo. Es defensa en capas, no la barrera dura; las barreras duras son
-///      los gates 0 (entorno) y 1 (flag).
+/// revelaría que el endpoint existe; un usuario normal jamás debe siquiera intuirlo). El gate NO
+/// depende ya del entorno (antes había un <c>IsProduction()→404</c> que hacía el endpoint inútil
+/// contra Railway prod, donde viven los datos que Pablo testea); lo reemplaza un allowlist de emails
+/// EXACTOS. Orden:
+///   1) Config <c>Dev:TierOverrideEnabled</c> (default FALSE). Off → 404.
+///   2) El email del usuario autenticado (fila de DB resuelta por el <c>User.Id</c> del TOKEN, nunca
+///      del body) ∈ <c>Dev:AllowedEmails</c> con match EXACTO (case-insensitive + trim). Allowlist
+///      VACÍO (default) o email no listado → 404. Es match EXACTO, no por dominio: un email
+///      allowlisteado pertenece a una cuenta interna REAL (tomado en <c>users.email</c>, índice
+///      único) y NO hay endpoint de cambio de email sin verificar, así que un atacante no puede
+///      apropiárselo registrándolo. Esto sustituye al viejo check de dominio <c>@locallist.ai</c>,
+///      que era INERTE (register no verifica buzón: cualquiera podía registrar <c>x@locallist.ai</c>).
+///
+/// DOBLE fail-closed: flag off O allowlist vacío → 404. En Railway prod se abre explícitamente con
+/// <c>Dev__TierOverrideEnabled=true</c> + <c>Dev__AllowedEmails__0=&lt;email exacto&gt;</c>.
 ///
 /// El efecto se aplica SIEMPRE al usuario del token (su propio <c>User.Id</c>), NUNCA a un id del
-/// body. Ninguno toca <c>rc_customer_id</c> ni la lógica de RevenueCat: en prod el webhook RC sigue
-/// siendo la verdad; estos overrides solo existen para test con el flag encendido en no-prod.
+/// body. Ninguno toca <c>rc_customer_id</c> ni la lógica de RevenueCat: el webhook RC sigue siendo
+/// la verdad; estos overrides solo existen para test con el flag + allowlist configurados.
 ///
 /// Pineado a AppScheme (usuario de la app, no admin Firebase); anónimo → 401. Sin policy de
 /// rate-limit propia: hereda el limitador global (100/min). Nota de opacidad: un body malformado da
@@ -48,18 +50,15 @@ public class AccountDevController : ControllerBase
 {
     private readonly LocalListDbContext _db;
     private readonly DevOptions _devOptions;
-    private readonly IWebHostEnvironment _env;
     private readonly ILogger<AccountDevController> _logger;
 
     public AccountDevController(
         LocalListDbContext db,
         IOptions<DevOptions> devOptions,
-        IWebHostEnvironment env,
         ILogger<AccountDevController> logger)
     {
         _db = db;
         _devOptions = devOptions.Value;
-        _env = env;
         _logger = logger;
     }
 
@@ -69,17 +68,13 @@ public class AccountDevController : ControllerBase
     }
 
     /// <summary>
-    /// Gates compartidos (0 entorno + 1 flag + 2 email interno) resolviendo el usuario por el id
+    /// Gates compartidos (1 flag + 2 allowlist de email exacto) resolviendo el usuario por el id
     /// del TOKEN, nunca del body. Devuelve <c>(user, null)</c> si pasa todos los gates, o
     /// <c>(null, 404)</c> fail-closed en el primero que falle. Cada rama del fallo es un 404
-    /// idéntico → opaco (no distingue "flag off" de "no eres interno" de "no existes").
+    /// idéntico → opaco (no distingue "flag off" de "no allowlisteado" de "no existes").
     /// </summary>
     private async Task<(LocalList.API.NET.Shared.Data.Entities.User? User, IActionResult? Failure)> TryGateAsync(CancellationToken ct)
     {
-        // ── Gate 0 (PRIMARIO, ortogonal al config): en Producción el endpoint NO existe.
-        if (_env.IsProduction())
-            return (null, NotFound());
-
         // ── Gate 1: config flag (fail-closed). Off → 404 opaco.
         if (!_devOptions.TierOverrideEnabled)
             return (null, NotFound());
@@ -93,11 +88,30 @@ public class AccountDevController : ControllerBase
         if (user == null)
             return (null, NotFound());
 
-        // ── Gate 2: dominio interno del email (fuente de verdad = fila de DB). No → 404 opaco.
-        if (!AdminClaimsExtensions.IsInternalDomainEmail(user.Email))
+        // ── Gate 2: allowlist de email EXACTO (fuente de verdad = fila de DB). Segundo fail-closed:
+        // allowlist vacío (default) O email no listado → 404 opaco. Match exacto case-insensitive +
+        // trim; NO por dominio (el dominio era inerte: register no verifica buzón).
+        if (!IsAllowedEmail(user.Email))
             return (null, NotFound());
 
         return (user, null);
+    }
+
+    /// <summary>
+    /// True solo si <paramref name="email"/> coincide EXACTAMENTE (case-insensitive, con trim en
+    /// ambos lados) con alguna entrada de <c>Dev:AllowedEmails</c>. Allowlist vacío → siempre false.
+    /// </summary>
+    private bool IsAllowedEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return false;
+        var candidate = email.Trim();
+        foreach (var allowed in _devOptions.AllowedEmails)
+        {
+            if (string.IsNullOrWhiteSpace(allowed)) continue;
+            if (string.Equals(allowed.Trim(), candidate, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     [HttpPost("tier")]
