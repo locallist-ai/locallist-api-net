@@ -121,6 +121,10 @@ public static class DomainServiceExtensions
         // la cadena de fallback (solo Gemini tiene el fichero). Timeouts holgados: subir 150MB
         // + transcodificado + generateContent multimodal tarda mucho más que un turno de chat.
         services.Configure<ImportOptions>(configuration.GetSection(ImportOptions.SectionName));
+
+        // Utilidades dev-only (override de tier para testear flujos Plus contra gates reales).
+        // Dev:TierOverrideEnabled default false → el endpoint POST /account/dev/tier es 404 en prod.
+        services.Configure<Features.Account.DevOptions>(configuration.GetSection(Features.Account.DevOptions.SectionName));
         services.AddHttpClient<IGeminiFileClient, GeminiFileClient>(c => c.Timeout = TimeSpan.FromSeconds(120));
         services.AddHttpClient<VideoExtractionService>(c => c.Timeout = TimeSpan.FromSeconds(120));
         // T3 — matching determinista de candidatos contra el catálogo (una query, en memoria).

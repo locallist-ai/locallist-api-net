@@ -97,7 +97,9 @@ LocalList.API.NET/
 ├── Program.cs                          # Composition root: pipeline + llama a las extensiones de Shared/Startup/
 ├── Features/
 │   ├── Account/
-│   │   └── AccountController.cs        # GET /account, DELETE /account
+│   │   ├── AccountController.cs        # GET /account, DELETE /account
+│   │   ├── AccountDevController.cs     # POST /account/dev/tier + /account/dev/reset-quota (DEV-ONLY; ambos comparten gates fail-closed vía TryGateAsync: IsProduction()→404 SIEMPRE (barrera dura, ortogonal al config) + Dev:TierOverrideEnabled + email @locallist.ai; efecto sobre el User.Id del token)
+│   │   └── DevOptions.cs               # Config "Dev" (TierOverrideEnabled default false; NUNCA true en Railway prod)
 │   ├── Admin/
 │   │   ├── Analytics/
 │   │   │   ├── AdminChatTurnsController.cs    # GET /admin/analytics/chat-turns, /stats
@@ -349,7 +351,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 
 | Feature | Endpoints |
 |---|---|
-| Account | `GET /account` (+ `aiPlansMonth` cuota mensual y `importThirdPartyEnabled` capability F2), `DELETE /account` |
+| Account | `GET /account` (+ `aiPlansMonth` cuota mensual y `importThirdPartyEnabled` capability F2), `DELETE /account`. **DEV-ONLY** (`[Authorize]` AppScheme; ambos comparten gates fail-closed vía `TryGateAsync`: **gate 0 `IWebHostEnvironment.IsProduction()` → 404 SIEMPRE** (barrera dura ORTOGONAL al config: aunque el flag se ponga true por error en Railway, `ASPNETCORE_ENVIRONMENT=Production` lo deja fail-closed) · `Dev:TierOverrideEnabled` default false → 404 · email del usuario `@locallist.ai` → si no 404 (defensa en capas, NO barrera dura: `/auth/register` no verifica buzón); efecto siempre sobre el id del token, nunca por el body): `POST /account/dev/tier` (flipa el `User.Tier` REAL para testear flujos Plus; `tier∈{pro,free}` estricto o 400; no toca `rc_customer_id`/RevenueCat) · `POST /account/dev/reset-quota` (borra las filas de `usage_counters` del caller — planes IA/mes + import mensual/diario → cuotas a 0; `{reset: nº filas}`) |
 | Billing | `POST /webhooks/revenuecat` (anonymous, verifica header `Authorization` vs secreto; escribe `User.Tier` idempotente + reorder-safe) |
 | Auth (admin / Firebase) | `POST /auth/sync` (Firebase token required) |
 | Auth (app / HS256) | `POST /auth/signin` (provider=apple\|google + idToken), `POST /auth/register` (email+password), `POST /auth/login` (email+password), `POST /auth/refresh` (refresh token rotation) |
