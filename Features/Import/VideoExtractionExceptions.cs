@@ -38,6 +38,27 @@ public sealed class VideoUnsupportedFormatException(string mimeType)
     public string MimeType { get; } = mimeType;
 }
 
+/// <summary>
+/// El caller declaró un MIME de IMAGEN pero la metadata AUTORITATIVA del File API delata un VÍDEO
+/// disfrazado: <c>mimeType</c> <c>video/*</c> o <c>videoDuration</c> presente. El <c>isImage</c>
+/// del servicio se decide por el MIME DECLARADO en el multipart (100% spoofeable) y el camino
+/// imagen SE SALTA el check de duración (una imagen no tiene) — procesar un vídeo por esta vía
+/// burlaría el cap legal de duración (<see cref="ImportOptions.MaxDurationSeconds"/>). Se rechaza
+/// tras la metadata autoritativa y ANTES de facturar generateContent (NO <c>Billed</c> → el
+/// endpoint reembolsa la cuota), espejo exacto del re-check del tamaño autoritativo.
+/// </summary>
+public sealed class MediaTypeMismatchException(string declaredMime, string authoritativeMime, double? authoritativeDurationSec)
+    : VideoExtractionException(
+        $"Declared image MIME '{declaredMime}' but the File API reports '{authoritativeMime}'"
+        + (authoritativeDurationSec is { } d ? $" with a {d:F0}s duration" : "")
+        + " — video disguised as image.")
+{
+    public override string Code => "media_type_mismatch";
+    public string DeclaredMime { get; } = declaredMime;
+    public string AuthoritativeMime { get; } = authoritativeMime;
+    public double? AuthoritativeDurationSec { get; } = authoritativeDurationSec;
+}
+
 /// <summary>El modelo procesó el vídeo pero no identificó ningún sitio (places vacío tras sanitizar).</summary>
 public sealed class NoPlacesFoundException()
     : VideoExtractionException("No identifiable places were extracted from the video.")

@@ -359,4 +359,156 @@ public class VideoExtractionTests(ApiFixture fixture) : IClassFixture<ApiFixture
         Assert.True(fixture.FakeVideoImport.DeleteAttempts >= 3);
         Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
     }
+
+    // ── IMG-1. Imagen HONESTA (autoritativo image/*, sin duración) → procesa OK ────
+    // El camino imagen se salta el bloque de duración; con la metadata autoritativa coherente
+    // (mime image/*, sin videoDuration) NO se dispara video_too_long, duration_unknown NI el
+    // nuevo media_type_mismatch. Es el caso legítimo de una captura/lista.
+    [Fact]
+    public async Task Extraction_ImageHonest_ExtractsOk_NoDurationOrMismatchError_DeletesFile()
+    {
+        await ClearMetricsAsync();
+        // "Verdad" autoritativa de una imagen: mime image/*, y el File API NO reporta duración.
+        fixture.FakeVideoImport.ActiveMimeType = "image/jpeg";
+        fixture.FakeVideoImport.OmitDurationOnActive = true;
+
+        VideoExtractionResult result;
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            result = await svc.ExtractAsync(
+                Bytes(), 1024, "image/jpeg", "self", caption: "my saved list", CancellationToken.None);
+        }
+
+        Assert.Single(result.Places);
+        Assert.Equal("Sunny Rooftop", result.Places[0].Name);
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled); // procesa, no se aborta
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Null(metric.ErrorCode);                 // NO video_too_long / duration_unknown / media_type_mismatch
+        Assert.Equal("image/jpeg", metric.MimeType);
+        Assert.Null(metric.DurationSec);               // null es normal para imagen
+        Assert.Equal(1, metric.NumPlaces);
+        // Coste de imagen = tokens fijos por tile (sin componente de duración).
+        Assert.Equal(VideoCostEstimator.ImageTokensPerTile, metric.EstimatedMediaTokens);
+    }
+
+    // ── IMG-2. Imagen HONESTA con duración null (mime autoritativo image/*) → OK ───
+    [Fact]
+    public async Task Extraction_ImageNullDuration_DoesNotFailClosed_ExtractsOk()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.ActiveMimeType = "image/png"; // verdad autoritativa: imagen
+        fixture.FakeVideoImport.OmitDurationOnActive = true;  // el File API no reporta duración
+
+        VideoExtractionResult result;
+        var svc = ResolveService(out var scope);
+        using (scope)
+        {
+            result = await svc.ExtractAsync(
+                Bytes(), 1024, "image/png", "self", caption: null, CancellationToken.None);
+        }
+
+        Assert.Single(result.Places);
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Null(metric.ErrorCode);                 // NO duration_unknown / media_type_mismatch
+        Assert.Null(metric.DurationSec);               // null es normal para imagen
+        Assert.Equal("image/png", metric.MimeType);
+    }
+
+    // ── SPOOF-1. Declara image/jpeg pero el autoritativo es un VÍDEO (mime video/* +
+    //    duración) → RECHAZO media_type_mismatch, SIN facturar (no llega a generate) ──
+    // Este es el caso que ANTES burlaba el cap legal de duración: un vídeo de 700s declarado
+    // image/jpeg se colaba porque el camino imagen se salta el check de duración. Ahora la
+    // metadata autoritativa del File API lo delata y se rechaza como cualquier rechazo
+    // pre-facturación (el endpoint reembolsa la cuota; ver ImportEndpointTests).
+    [Fact]
+    public async Task Extraction_ImageDeclared_ButAuthoritativeVideo_RejectedAndRefunded()
+    {
+        await ClearMetricsAsync();
+        // La subida declara image/jpeg, pero el File API reporta el tipo REAL: video/mp4 de 700s.
+        fixture.FakeVideoImport.ActiveMimeType = "video/mp4";
+        fixture.FakeVideoImport.DurationSec = 700;
+
+        var svc = ResolveService(out var scope);
+        MediaTypeMismatchException ex;
+        using (scope)
+        {
+            ex = await Assert.ThrowsAsync<MediaTypeMismatchException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "image/jpeg", "self", caption: null, CancellationToken.None));
+        }
+
+        // El fallo NO es Billed (no es ExtractionUnavailableException): el endpoint reembolsa la cuota.
+        Assert.IsNotType<ExtractionUnavailableException>(ex);
+        Assert.Equal("image/jpeg", ex.DeclaredMime);
+        Assert.Equal("video/mp4", ex.AuthoritativeMime);
+        Assert.True(fixture.FakeVideoImport.UploadStarted);
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled); // NO se facturó generateContent
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor); // sin retención
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("media_type_mismatch", metric.ErrorCode);
+    }
+
+    // ── SPOOF-2. Imagen declarada con file.DurationSec NO-null (aunque el mime autoritativo
+    //    parezca imagen) → RECHAZO por la señal de duración sola. Aísla la rama de duración. ──
+    [Fact]
+    public async Task Extraction_ImageDeclared_ButAuthoritativeDurationPresent_Rejected()
+    {
+        await ClearMetricsAsync();
+        // Mime autoritativo image/* (no delata por mime), pero el File API reporta una duración:
+        // solo un vídeo la tiene → media_type_mismatch por la señal de duración.
+        fixture.FakeVideoImport.ActiveMimeType = "image/jpeg";
+        fixture.FakeVideoImport.DurationSec = 30; // presente (OmitDurationOnActive=false por defecto)
+
+        var svc = ResolveService(out var scope);
+        MediaTypeMismatchException ex;
+        using (scope)
+        {
+            ex = await Assert.ThrowsAsync<MediaTypeMismatchException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "image/png", "self", caption: null, CancellationToken.None));
+        }
+
+        Assert.Equal(30, ex.AuthoritativeDurationSec);
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled); // pre-facturación
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("media_type_mismatch", metric.ErrorCode);
+    }
+
+    // ── SPOOF-3. Mime autoritativo AMBIGUO (ni image/ ni video/) SIN duración → RECHAZO. ──
+    // El check es un ALLOWLIST fail-CLOSED: procesar por la vía imagen EXIGE mime image/*. Un
+    // application/octet-stream (o mime vacío) con duración null NO cae en el blocklist video/*
+    // pero tampoco es imagen → se rechaza en vez de fail-OPEN (procesar saltándose el cap legal).
+    [Fact]
+    public async Task Extraction_ImageDeclared_ButAuthoritativeAmbiguousMime_Rejected()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.ActiveMimeType = "application/octet-stream"; // ni image/ ni video/
+        fixture.FakeVideoImport.OmitDurationOnActive = true;                 // y SIN duración
+
+        var svc = ResolveService(out var scope);
+        MediaTypeMismatchException ex;
+        using (scope)
+        {
+            ex = await Assert.ThrowsAsync<MediaTypeMismatchException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "image/jpeg", "self", caption: null, CancellationToken.None));
+        }
+
+        Assert.Equal("application/octet-stream", ex.AuthoritativeMime);
+        Assert.Null(ex.AuthoritativeDurationSec);
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled); // pre-facturación, no fail-OPEN
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("media_type_mismatch", metric.ErrorCode);
+    }
 }

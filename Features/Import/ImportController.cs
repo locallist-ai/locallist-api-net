@@ -182,18 +182,23 @@ public class ImportController : ControllerBase
                     if (tempPath is not null)
                         continue; // ya tenemos el fichero; ignoramos ficheros extra
 
-                    // Rechazo barato de MIME contra la allowlist ANTES de copiar un solo byte.
+                    // Rechazo barato de MIME contra la allowlist (vídeo O imagen) ANTES de copiar
+                    // un solo byte. Un MIME fuera de ambas listas (p.ej. application/pdf) → 400
+                    // import_unsupported_format sin gastar cuota ni subir nada.
                     fileMime = (section.ContentType ?? string.Empty).Trim().ToLowerInvariant();
-                    if (!_options.AllowedMimeTypes.Contains(fileMime))
+                    if (!_options.IsAllowedMime(fileMime))
                         return BadRequest(new { error = "import_unsupported_format", mimeType = fileMime });
 
+                    // El cap de tamaño depende del tipo de media: imagen 25 MB, vídeo 150 MB. Se
+                    // aplica durante la copia al temp file (sin bufferizar el fichero entero).
+                    var sizeCap = _options.SizeCapFor(fileMime);
                     tempPath = Path.Combine(Path.GetTempPath(), $"llimport-{Guid.NewGuid():N}.tmp");
                     await using var fs = new FileStream(
                         tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                         bufferSize: 81920, useAsync: true);
-                    fileSize = await CopyWithCapAsync(section.Body, fs, _options.MaxSizeBytes, ct);
+                    fileSize = await CopyWithCapAsync(section.Body, fs, sizeCap, ct);
                     if (fileSize < 0)
-                        return BadRequest(new { error = "import_too_large", maxBytes = _options.MaxSizeBytes });
+                        return BadRequest(new { error = "import_too_large", maxBytes = sizeCap });
                 }
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException)
@@ -323,6 +328,9 @@ public class ImportController : ControllerBase
         // El servicio revalida contra la metadata autoritativa del File API; estos casos son
         // defensa en profundidad sobre las validaciones baratas del endpoint.
         VideoUnsupportedFormatException => BadRequest(new { error = "import_unsupported_format" }),
+        // Vídeo disfrazado de imagen (mime declarado image/* pero metadata autoritativa video/* o
+        // con duración): rechazo 4xx claro. No es Billed → el catch de arriba ya reembolsó la cuota.
+        MediaTypeMismatchException => BadRequest(new { error = "import_media_type_mismatch" }),
         VideoTooLargeException tooLarge => BadRequest(new { error = "import_too_large", maxBytes = tooLarge.MaxBytes }),
         VideoTooLongException tooLong => BadRequest(new { error = "import_video_too_long", maxSeconds = tooLong.MaxSec }),
         // Fallo de infraestructura (Gemini caído, File API, truncado…). El usuario reintenta.

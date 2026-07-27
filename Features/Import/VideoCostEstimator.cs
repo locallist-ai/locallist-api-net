@@ -28,6 +28,14 @@ public static class VideoCostEstimator
     public const int VideoTokensPerSecond = 258;
     public const int AudioTokensPerSecond = 32;
 
+    /// <summary>
+    /// Tokens que factura Gemini por una IMAGEN, por tile de 768×768. A diferencia del vídeo NO hay
+    /// coste por duración: una imagen ≤384px en ambas dimensiones = 1 tile = 258 tokens; imágenes
+    /// mayores se trocean en tiles de 258 tokens cada uno (una foto a resolución alta ≈ 1290 tokens).
+    /// Verificado el 2026-07 contra ai.google.dev/gemini-api/docs/tokens (image understanding).
+    /// </summary>
+    public const int ImageTokensPerTile = 258;
+
     public sealed record MediaTokenEstimate(int VideoTokens, int AudioTokens, int TotalMediaTokens);
 
     /// <summary>Estima los tokens de media (vídeo + audio) para un vídeo de la duración dada.</summary>
@@ -41,6 +49,15 @@ public static class VideoCostEstimator
         var total = ClampToInt((double)video + audio);
         return new MediaTokenEstimate(video, audio, total);
     }
+
+    /// <summary>
+    /// Estima los tokens de una IMAGEN. Sin las dimensiones en píxeles no sabemos el número de
+    /// tiles a priori, así que devolvemos el SUELO de un tile (<see cref="ImageTokensPerTile"/>);
+    /// el coste real siempre sale del <c>usageMetadata.promptTokenCount</c>, igual que en vídeo.
+    /// El parámetro <paramref name="tiles"/> permite escalar si algún día se conocen las dimensiones.
+    /// </summary>
+    public static int EstimateImageTokens(int tiles = 1) =>
+        ImageTokensPerTile * Math.Max(1, tiles);
 
     private static int ClampToInt(double value)
     {
