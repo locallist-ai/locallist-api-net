@@ -12,7 +12,11 @@ public class User
     [Column("id")]
     public Guid Id { get; set; }
 
-    [Column("email")]
+    // citext: unicidad e igualdad case-insensitive a nivel de esquema (mismo patrón que
+    // UserPublicProfile.handle). El índice único IX_users_email pasa a ser case-insensitive,
+    // cerrando cuentas duplicadas por variante de caja. Las escrituras normalizan igual
+    // (EmailNormalizer) para persistir la forma canónica lower/trim.
+    [Column("email", TypeName = "citext")]
     [StringLength(255)]
     [Required]
     public string Email { get; set; } = string.Empty;

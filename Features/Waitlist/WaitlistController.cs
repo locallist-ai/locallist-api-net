@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.PostHog;
 
@@ -41,7 +42,7 @@ public partial class WaitlistController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Email))
             return BadRequest(new { error = "Email is required" });
 
-        var email = request.Email.Trim().ToLowerInvariant();
+        var email = EmailNormalizer.Normalize(request.Email);
 
         if (email.Length > 254 || !EmailRegex().IsMatch(email))
             return BadRequest(new { error = "Invalid email address" });

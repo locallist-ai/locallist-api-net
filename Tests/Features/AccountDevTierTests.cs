@@ -13,14 +13,21 @@ namespace LocalList.API.Tests.Features;
 /// entorno (incl. PROD) donde el override está ABIERTO para un conjunto EXACTO de cuentas internas.
 /// Container propio (config distinta del default, que tiene el flag off y el allowlist vacío).
 ///
-/// El match es EXACTO byte-a-byte (Ordinal, case-sensitive, SIN trim) para espejar la unicidad de
-/// <c>users.email</c> (varchar, case/whitespace-sensitive). El allowlist incluye bases con las que se
-/// ejercita el BLOCKER de bypass por variante:
-///   • <see cref="CaseBaseAllowlisted"/> — allowlisteado; una cuenta con SU MISMA caja pasa (200),
-///     pero <see cref="CaseVariantAttacker"/> (misma dirección, distinta CAJA — fila distinta en la
-///     DB case-sensitive) NO matchea → 404 (cierra el self-upgrade por <c>PABLO@…</c>).
-///   • <see cref="SpaceBaseAllowlisted"/> — allowlisteado; <see cref="SpaceVariantAttacker"/> (con un
-///     espacio inicial, fila distinta) NO matchea → 404 (cierra el bypass por espacios).
+/// El match es EXACTO byte-a-byte (Ordinal, case-sensitive, SIN trim). El gate sigue siendo la
+/// defensa-en-profundidad del self-upgrade por variante; desde la higiene de email <c>users.email</c>
+/// es <c>citext</c> (case-insensitive único) + normalización en escritura, así que una variante de
+/// caja ya NO puede ni materializarse como fila propia — el gate Ordinal la rechazaría igualmente si
+/// existiese (p.ej. dato legado sin normalizar). El allowlist incluye bases con las que se ejercita
+/// el BLOCKER de bypass por variante:
+///   • <see cref="CaseBaseAllowlisted"/> — allowlisteado y sembrado EN SU MISMA caja → pasa (200).
+///   • <see cref="CaseVariantBaseAllowlisted"/> — allowlisteado pero NUNCA sembrado en minúsculas;
+///     el atacante siembra su VARIANTE en mayúsculas (<see cref="CaseVariantAttacker"/>): como la
+///     base no se materializa, la variante entra como fila propia (no choca con el índice único
+///     citext) y el gate Ordinal NO la matchea → 404 (cierra el self-upgrade por <c>PABLO@…</c>).
+///     Se usa una base DISTINTA de <see cref="CaseBaseAllowlisted"/> justamente porque bajo citext
+///     una variante de caja de la MISMA base colisionaría con ella en el índice único.
+///   • <see cref="SpaceBaseAllowlisted"/> — allowlisteado (nunca sembrado); <see cref="SpaceVariantAttacker"/>
+///     (espacio inicial, fila distinta — citext no recorta espacios) NO matchea → 404.
 /// Los demás emails del camino "permitido" son EXACTOS (uno por test → sin colisión con el índice
 /// único de <c>users.email</c>). Un email interno NO listado (<see cref="NotAllowlistedInternal"/>)
 /// se deja FUERA a propósito para probar que el gate es exacto, no por dominio.
@@ -35,10 +42,16 @@ public sealed class DevTierOverrideEnabledFixture : ApiFixture
     public const string AllowedResetClear = "resetclear@locallist.ai";
     public const string AllowedResetScope = "resetscope@locallist.ai";
 
-    // BLOCKER de caja: la base allowlisteada (minúsculas). El atacante registra la MISMA dirección en
-    // otra CAJA → fila distinta (users.email es case-sensitive) → NO matchea con Ordinal → 404.
+    // Control POSITIVO del BLOCKER de caja: base allowlisteada, sembrada en su misma caja → 200.
     public const string CaseBaseAllowlisted = "casebase@locallist.ai";
-    public const string CaseVariantAttacker = "CASEBASE@locallist.ai";
+
+    // BLOCKER de caja: base allowlisteada (minúsculas) que NINGÚN test siembra como fila. El atacante
+    // siembra la VARIANTE en mayúsculas → bajo citext, como la base no existe, la variante entra como
+    // su propia fila (no colisiona con el índice único) y el gate Ordinal NO la matchea → 404. Base
+    // separada de CaseBaseAllowlisted a propósito: una variante de caja de una base YA sembrada
+    // chocaría con ella en el índice único citext (email case-insensitive).
+    public const string CaseVariantBaseAllowlisted = "casevariant@locallist.ai";
+    public const string CaseVariantAttacker = "CASEVARIANT@locallist.ai";
 
     // BLOCKER de espacios: la base allowlisteada (sin espacios). El atacante registra con un espacio
     // inicial → fila distinta (whitespace-sensitive) → NO matchea sin trim → 404.
@@ -65,7 +78,7 @@ public sealed class DevTierOverrideEnabledFixture : ApiFixture
             AllowedFlip, AllowedInvalidTier, AllowedMissingTier,
             AllowedIgnoreBodyCaller, AllowedIgnoreBodyVictim,
             AllowedResetClear, AllowedResetScope,
-            CaseBaseAllowlisted, SpaceBaseAllowlisted, ResetCaseBaseAllowlisted,
+            CaseBaseAllowlisted, CaseVariantBaseAllowlisted, SpaceBaseAllowlisted, ResetCaseBaseAllowlisted,
         };
         for (var i = 0; i < allowlist.Length; i++)
             builder.UseSetting($"Dev:AllowedEmails:{i}", allowlist[i]);
@@ -202,10 +215,12 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     [Fact]
     public async Task FlagOn_CaseVariantOfAllowlistedEmail_Returns404_NoFlip()
     {
-        // BLOCKER: el allowlist trae "casebase@locallist.ai" (minúsculas). Un atacante registra la
-        // MISMA dirección en otra CAJA ("CASEBASE@locallist.ai") — como users.email es case-sensitive
-        // es una FILA DISTINTA, NO colisiona con el índice único, obtiene token AppScheme. El gate
-        // Ordinal NO lo matchea → 404, sin self-upgrade. MUTACIÓN: volver a OrdinalIgnoreCase → 200.
+        // BLOCKER: el allowlist trae "casevariant@locallist.ai" (minúsculas, NUNCA sembrado). El
+        // atacante siembra la variante en mayúsculas ("CASEVARIANT@locallist.ai"): bajo citext, como
+        // la base no se materializa, entra como fila propia y obtiene token AppScheme. El gate Ordinal
+        // NO lo matchea → 404, sin self-upgrade. MUTACIÓN: volver a OrdinalIgnoreCase → 200.
+        // (Nota: citext + normalización ya impedirían crear la variante junto a su base; el gate
+        // Ordinal es la defensa-en-profundidad que además cubre datos legados sin normalizar.)
         var uid = StableId(DevTierOverrideEnabledFixture.CaseVariantAttacker);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
             uid, DevTierOverrideEnabledFixture.CaseVariantAttacker, tier: "free");
