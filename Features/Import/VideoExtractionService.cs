@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;

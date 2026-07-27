@@ -1,7 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Features.Social.Entities;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 /// <summary>
 /// Reporte de contenido para moderacion (S1+). reporter_id FK users SET NULL (el reporte sobrevive

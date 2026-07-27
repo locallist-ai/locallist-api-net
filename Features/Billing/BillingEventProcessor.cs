@@ -1,3 +1,4 @@
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -62,8 +63,6 @@ public enum BillingEventOutcome
 /// </summary>
 public class BillingEventProcessor
 {
-    private const string TierPro = "pro";
-    private const string TierFree = "free";
     private const string RcEventIdIndexName = "IX_billing_events_rc_event_id";
 
     // Defense-in-depth: an absurdly-future event_timestamp_ms is stored clamped so it can never
@@ -145,13 +144,13 @@ public class BillingEventProcessor
 
             if (status == RevenueCatEntitlementStatus.Active)
             {
-                if (user.Tier != TierPro) user.Tier = TierPro;
+                if (user.Tier != Tiers.Pro) user.Tier = Tiers.Pro;
                 user.UpdatedAt = _clock.GetUtcNow();
                 outcome = BillingEventOutcome.GrantedPro;
             }
             else
             {
-                if (user.Tier != TierFree) user.Tier = TierFree;
+                if (user.Tier != Tiers.Free) user.Tier = Tiers.Free;
                 user.UpdatedAt = _clock.GetUtcNow();
                 outcome = BillingEventOutcome.RevokedToFree;
             }
@@ -231,7 +230,7 @@ public class BillingEventProcessor
         // All affected users verified — now apply the RC-derived tiers.
         foreach (var (user, status) in verified)
         {
-            var desired = status == RevenueCatEntitlementStatus.Active ? TierPro : TierFree;
+            var desired = status == RevenueCatEntitlementStatus.Active ? Tiers.Pro : Tiers.Free;
             if (user.Tier != desired) user.Tier = desired;
             user.UpdatedAt = _clock.GetUtcNow();
         }

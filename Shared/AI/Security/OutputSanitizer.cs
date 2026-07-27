@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace LocalList.API.NET.Features.Chat.Services;
+namespace LocalList.API.NET.Shared.AI.Security;
 
 /// <summary>
 /// Layer 6 guardrail: sanitizes Gemini's aiMessage before returning to client.

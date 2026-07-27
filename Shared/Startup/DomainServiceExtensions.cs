@@ -63,6 +63,8 @@ public static class DomainServiceExtensions
         services.AddScoped<LanguageAccessor>();
         services.AddScoped<PlaceRankingService>();
         services.AddScoped<SchedulingService>();
+        services.AddScoped<ISchedulingService>(sp => sp.GetRequiredService<SchedulingService>());
+        services.AddScoped<IPlanNamingService, PlanNamingProvider>();
         services.AddScoped<PlanGenerationService>();
         services.AddScoped<IPlanGenerationService>(sp => sp.GetRequiredService<PlanGenerationService>());
         services.AddHttpClient<IRoutingService, MapboxRoutingService>(c => c.Timeout = TimeSpan.FromSeconds(8));
@@ -123,6 +125,8 @@ public static class DomainServiceExtensions
         services.AddHttpClient<VideoExtractionService>(c => c.Timeout = TimeSpan.FromSeconds(120));
         // T3 — matching determinista de candidatos contra el catálogo (una query, en memoria).
         services.AddScoped<ImportMatchingService>();
+        // T4 — materialización del plan importado (validación atómica + scheduling + reconcile no-loss).
+        services.AddScoped<ImportPlanService>();
 
         // Chat — slot-filling agent
         services.AddScoped<SlotExtractorService>();

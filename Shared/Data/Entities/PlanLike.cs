@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Features.Social.Entities;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 /// <summary>
 /// Like de un usuario a un plan (S1+). PK compuesta (plan_id, user_id). Ambos FK CASCADE.

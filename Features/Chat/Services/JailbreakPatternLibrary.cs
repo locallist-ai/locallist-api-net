@@ -1,3 +1,4 @@
+using LocalList.API.NET.Shared.AI.Security;
 using System.Text.RegularExpressions;
 
 namespace LocalList.API.NET.Features.Chat.Services;

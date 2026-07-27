@@ -1,7 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Features.Social.Entities;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 /// <summary>
 /// Colaborador de un plan (co-edicion, S1+). El OWNER no es fila aqui (sigue en plans.created_by).

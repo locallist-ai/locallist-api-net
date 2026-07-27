@@ -1,12 +1,12 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.I18n;
+using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Favorites;
 
@@ -27,13 +27,11 @@ namespace LocalList.API.NET.Features.Favorites;
 /// </summary>
 [ApiController]
 [Route("favorites")]
-[Authorize]
+[Authorize(AuthenticationSchemes = AuthSchemes.App)]
 public class FavoritesController : ControllerBase
 {
     /// <summary>Cap de favoritos para tier free. Plus/pro = ilimitado.</summary>
     public const int FreeFavoritesLimit = 50;
-
-    private const string TierPro = "pro";
 
     private readonly LocalListDbContext _db;
     private readonly TimeProvider _clock;
@@ -83,10 +81,7 @@ public class FavoritesController : ControllerBase
 
         // Tier FRESCO de DB (dentro del lock). tier null = identidad muerta (token válido de un
         // user ya borrado) → mismo 401 que el resto de gates, no un 403 de catálogo.
-        var tier = await _db.Users
-            .Where(u => u.Id == userId.Value)
-            .Select(u => u.Tier)
-            .FirstOrDefaultAsync(ct);
+        var tier = await TierGate.GetFreshTierAsync(_db, userId.Value, ct);
         if (tier is null)
         {
             await tx.RollbackAsync(ct);
@@ -102,7 +97,7 @@ public class FavoritesController : ControllerBase
             return Ok(new { favorited = true });
         }
 
-        var isPro = string.Equals(tier, TierPro, StringComparison.Ordinal);
+        var isPro = TierGate.IsPro(tier);
         if (!isPro)
         {
             // El cap cuenta SOLO favoritos de places PUBLICADOS — la MISMA semántica que el
@@ -140,7 +135,7 @@ public class FavoritesController : ControllerBase
         {
             await _db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        catch (DbUpdateException ex) when (PostgresErrorPredicates.IsUniqueViolation(ex))
         {
             // Defensa en profundidad: aunque el lock serializa a este usuario, tragamos el 23505
             // del índice único (user_id, place_id) para que un favoritar duplicado siga siendo
@@ -148,7 +143,7 @@ public class FavoritesController : ControllerBase
             await tx.CommitAsync(ct);
             return Ok(new { favorited = true });
         }
-        catch (DbUpdateException ex) when (IsForeignKeyViolation(ex))
+        catch (DbUpdateException ex) when (PostgresErrorPredicates.IsForeignKeyViolation(ex))
         {
             // Carrera con un hard-delete (admin) del place: el check de published pasó pero el
             // insert choca con el FK a places (23503) porque el place ya no existe. Mismo 404
@@ -242,17 +237,4 @@ public class FavoritesController : ControllerBase
 
     /// <summary>Semilla del lock consultivo por usuario — namespacea el hash contra otros usos de advisory locks.</summary>
     private const long AdvisoryLockSeed = 0x_FA_00_71_7E; // "FA…RITE"
-
-    /// <summary>Detecta la violación del índice único (user_id, place_id) en Postgres (SqlState "23505").</summary>
-    internal static bool IsUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation;
-
-    /// <summary>
-    /// Detecta la violación del FK a places en Postgres (SqlState "23503") — carrera con un
-    /// hard-delete del place entre el check de published y el insert. Internal para el test
-    /// unitario del catch (la carrera real no es reproducible determinísticamente vía ApiFixture:
-    /// exigiría pausar la request entre el check y el SaveChanges).
-    /// </summary>
-    internal static bool IsForeignKeyViolation(DbUpdateException ex) =>
-        ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.ForeignKeyViolation;
 }

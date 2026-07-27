@@ -1,3 +1,5 @@
+using LocalList.API.NET.Shared.AI.Security;
+
 namespace LocalList.API.NET.Features.Chat.Services;
 
 /// <summary>

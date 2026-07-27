@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace LocalList.API.NET.Features.Chat.Services;
+namespace LocalList.API.NET.Shared.AI.Security;
 
 /// <summary>
 /// Layer 2 guardrail: normalizes and sanitizes raw user input before any pattern

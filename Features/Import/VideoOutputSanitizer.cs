@@ -1,5 +1,5 @@
 using System.Text.Json;
-using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.Taxonomy;
 
 namespace LocalList.API.NET.Features.Import;

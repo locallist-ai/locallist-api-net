@@ -1,4 +1,5 @@
 using LocalList.API.NET.Features.Builder.Shared;
+using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Dtos;
 using LocalList.API.NET.Shared.Routing;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -14,7 +15,7 @@ namespace LocalList.API.NET.Features.Builder.Services;
 //   • SchedulingService.DayWalk.cs     — day orchestration, segment prefetch, viability clock walk
 //   • SchedulingService.Refinements.cs — refinements, time-block matching, stop resolution
 //   • SchedulingService.Helpers.cs     — small shared pure helpers (Haversine, durations, blocks)
-public partial class SchedulingService
+public partial class SchedulingService : ISchedulingService
 {
     private readonly ILogger<SchedulingService> _logger;
     private readonly ISegmentResolver? _resolver;

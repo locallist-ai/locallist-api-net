@@ -51,11 +51,7 @@ public class PlansController : ControllerBase
         // JWT es rancio/falsificable). Carrera residual aceptada: count-then-insert sin
         // serialización por usuario puede dejar 5+N-1 bajo N POSTs simultáneos; es un hueco de
         // almacenamiento, no un bypass de los gates de dinero.
-        var tier = await _db.Users
-            .Where(u => u.Id == userId.Value)
-            .Select(u => u.Tier)
-            .FirstOrDefaultAsync(ct);
-        var isPro = string.Equals(tier, PlanGenerationGateService.TierPro, StringComparison.Ordinal);
+        var isPro = await TierGate.IsProAsync(_db, userId.Value, ct);
         if (!isPro)
         {
             var saved = await _db.Plans.CountAsync(p => p.CreatedById == userId.Value, ct);

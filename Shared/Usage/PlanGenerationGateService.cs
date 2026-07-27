@@ -36,8 +36,6 @@ namespace LocalList.API.NET.Shared.Usage;
 /// </summary>
 public class PlanGenerationGateService : IPlanGenerationGateService
 {
-    public const string TierPro = "pro";
-
     public const int FreeMaxDays = 3;
 
     /// <summary>Plus duration ceiling = global hard cap. Single source of truth in
@@ -92,7 +90,7 @@ public class PlanGenerationGateService : IPlanGenerationGateService
             return PlanGateResult.Reject("none", 0, StatusCodes.Status401Unauthorized,
                 new { error = "Invalid token claims." });
 
-        var isPro = string.Equals(tier, TierPro, StringComparison.Ordinal);
+        var isPro = string.Equals(tier, Tiers.Pro, StringComparison.Ordinal);
         var maxDays = isPro ? PlusMaxDays : FreeMaxDays;
 
         // 2. Duración pedida explícitamente. El hard cap global (14) lo corta también la
