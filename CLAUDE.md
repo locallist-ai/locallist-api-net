@@ -134,8 +134,9 @@ LocalList.API.NET/
 │   │   │   ├── PreferenceExtractorService.cs   # Gemini → ExtractedPreferences
 │   │   │   ├── PlaceRankingService.cs          # Reranking determinista ponderado
 │   │   │   ├── PlanGenerationService.cs        # Orquesta RAG + prefs + scheduler
-│   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan
-│   │   │   └── SchedulingService.*.cs          # Scheduler determinista por semilla (partial: .cs API, .Constants, .Selection, .Ordering, .DayWalk, .Refinements, .Helpers)
+│   │   │   ├── PlanNamingService.cs            # Genera nombre y descripción del plan (helper estático; usado dentro de Builder)
+│   │   │   ├── PlanNamingProvider.cs           # IPlanNamingService (Shared) → delega en PlanNamingService, para que Import consuma el naming por interfaz
+│   │   │   └── SchedulingService.*.cs          # Scheduler determinista por semilla; implementa ISchedulingService (Shared). (partial: .cs API, .Constants, .Selection, .Ordering, .DayWalk, .Refinements, .Helpers)
 │   │   └── Shared/
 │   │       └── GroupTypePolicy.cs       # Reglas de capacidad por tipo de grupo
 │   ├── Chat/
@@ -145,10 +146,7 @@ LocalList.API.NET/
 │   │   │   └── ChatStrings.cs
 │   │   └── Services/
 │   │       ├── ChatAgentService.*.cs        # Orquesta slot-filling + sesión + generación (partial: .cs orquestación ProcessTurnAsync, .Constants, .Responses, .Session, .Slots, .Generation, .Helpers)
-│   │       ├── SlotExtractorService.cs     # Gemini → extrae slots de texto libre
-│   │       ├── InputNormalizer.cs          # Normaliza input antes de slot extraction
-│   │       ├── OutputSanitizer.cs          # Sanitiza respuesta AI
-│   │       ├── OutputValidator.cs          # Valida estructura de respuesta AI
+│   │       ├── SlotExtractorService.cs     # Gemini → extrae slots de texto libre (sanitizadores IA en Shared/AI/Security/)
 │   │       ├── PromptInjectionDetector.cs  # Detecta prompt injection en input
 │   │       ├── JailbreakPatternLibrary.cs  # Patrones de jailbreak conocidos
 │   │       ├── ResponseDriftDetector.cs    # Detecta drift off-topic en respuestas AI
@@ -165,16 +163,18 @@ LocalList.API.NET/
 │   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
 │   ├── Import/                         # F2 — import de vídeo
-│   │   ├── ImportController.cs         # T1 — POST /import/video: [Authorize]+gate Plus, multipart streaming a temp file, gating terceros, cuota 30/mes·10/día, mapea el resultado a DTO
-│   │   ├── ImportPlanController.cs     # T4 — POST /import/plan: crea el plan desde un import confirmado (gate Plus, sin cuota nueva; scheduler determinista sobre set fijo + reconcile no-loss; source=imported, private; atribución de creador)
+│   │   ├── ImportController.cs         # T1 — POST /import/video: [Authorize(App)]+gate Plus (TierGate), multipart streaming a temp file, gating terceros, cuota 30/mes·10/día, mapea el resultado a DTO
+│   │   ├── ImportPlanController.cs     # T4 — POST /import/plan: SOLO gates + mapping (Plus vía TierGate, terceros, coverage, days-clamp, cap); delega la materialización en ImportPlanService. [Authorize(App)]
+│   │   ├── ImportPlanService.cs        # T4 núcleo (extraído del controller): validación atómica/opaca de places, seed FNV, scheduling (ISchedulingService) + reconcile no-loss (BuildStops internal, testeable sin HTTP), persistencia atómica
+│   │   ├── ImportAttribution.cs        # Helpers atribución compartidos T1/T4: NormalizePlatform (default self) + SanitizeCreatorHandle (regex estricta, sin '@') — semántica unificada
 │   │   ├── ImportDtos.cs               # ImportVideoResponse/ImportPlaceDto (proyección T1+match T3) + CreateImportPlanRequest (body T4)
 │   │   ├── ImportMatchingService.cs    # T3 — matching determinista de candidatos vs catálogo published de la ciudad (1 query, en memoria); high/medium/null
 │   │   ├── VideoExtractionService.cs   # T2 — bytes vídeo + caption → JSON estricto de sitios (sube/extrae/borra)
-│   │   ├── VideoOutputSanitizer.cs     # Sanea el JSON hostil (reusa OutputValidator/OutputSanitizer del slice Chat)
+│   │   ├── VideoOutputSanitizer.cs     # Sanea el JSON hostil (reusa OutputValidator/OutputSanitizer de Shared/AI/Security/)
 │   │   ├── VideoCostEstimator.cs       # Estimación de tokens de media (258/s vídeo + 32/s audio, verificado)
 │   │   ├── VideoExtractionModels.cs    # ExtractedVideoPlace, VideoExtractionResult
-│   │   ├── VideoExtractionExceptions.cs # VideoTooLong/TooLarge/UnsupportedFormat/NoPlacesFound/ExtractionUnavailable
-│   │   └── ImportOptions.cs            # Config "Import" (modelo, límites, poll, ThirdPartyEnabled)
+│   │   └── VideoExtractionExceptions.cs # VideoTooLong/TooLarge/UnsupportedFormat/NoPlacesFound/ExtractionUnavailable
+│   │   # (ImportOptions.cs movido a Shared/AI/ — lo consume GeminiFileClient, no debe vivir en un slice)
 │   ├── Places/
 │   │   ├── PlacesController.cs         # GET /places, GET /places/:id
 │   │   └── Photos/                     # Proxy de fotos de Google (runtime-only, ToS-compliant)
@@ -193,16 +193,8 @@ LocalList.API.NET/
 │   ├── Routing/                        # Implementaciones (contratos en Shared/Routing/)
 │   │   ├── MapboxRoutingService.cs     # Mapbox Directions API (IRoutingService)
 │   │   └── RouteResolver.cs            # ISegmentResolver — caché de segmentos en RouteSegmentCache
-│   ├── Social/                         # Cimiento del modelo de datos social (S0). Solo entidades
-│   │   └── Entities/                   # (aún sin endpoints; S1+ añade pilares favoritos/follow/co-edición)
-│   │       ├── UserPublicProfile.cs    # Perfil PÚBLICO (handle citext único, avatar, contadores). SEPARADO de UserProfile (privado). Creación LAZY (fila no existe hasta reclamar handle)
-│   │       ├── UserFollow.cs           # Grafo de follows. PK (follower_id, followee_id), CHECK no-self. NUNCA "Follow" (colisiona con Follow Mode)
-│   │       ├── PlanCollaborator.cs     # Co-edición. PK (plan_id, user_id), role editor|viewer. Owner NO es fila (sigue en plans.created_by)
-│   │       ├── PlanInvite.cs           # Invitación por token a colaborar (expira, max_uses, revocable)
-│   │       ├── ActivityEvent.cs        # Feed append-only. object_id polimórfico (sin FK), UNIQUE (actor, verb, object) idempotente
-│   │       ├── PlanLike.cs             # Like. PK (plan_id, user_id). Contador denormalizado en plans.likes_count
-│   │       ├── ContentReport.cs        # Reporte de moderación. reporter_id FK SET NULL (sobrevive borrado de cuenta)
-│   │       └── UserBlock.cs            # Bloqueo. PK (blocker_id, blocked_id). Consumido por PlanAccessService (bloqueo ↔ owner niega CanView)
+│   │   # (Features/Social/ eliminado: las entidades sociales S0 viven ahora en Shared/Data/Entities/
+│   │   #  junto al resto del modelo — Shared no debe depender de un slice. Aún sin endpoints)
 │   ├── Taxonomy/
 │   │   └── TaxonomyController.cs       # GET /taxonomy (categories + subcategories)
 │   └── Waitlist/
@@ -217,6 +209,11 @@ LocalList.API.NET/
     │   └── PlanAccess.cs                # readonly record struct: PlanExists, CanView, CanEdit, IsOwner, Role
     ├── AI/
     │   ├── GeminiFileClient.cs                 # Gemini File API (subida resumable + poll ACTIVE + delete) para el import de vídeo
+    │   ├── ImportOptions.cs                    # Config "Import" (modelo, límites, poll, ThirdPartyEnabled). Movido de Features/Import (lo consume GeminiFileClient, que vive aquí)
+    │   ├── Security/                           # Infra de seguridad IA COMPARTIDA (Chat + Import). Movida de Features/Chat/Services (2 slices la usan)
+    │   │   ├── InputNormalizer.cs              # Normaliza input hostil (homoglyph/zero-width/control tokens) antes de slot extraction / caption import
+    │   │   ├── OutputSanitizer.cs              # Sanitiza texto de salida IA (quita URLs/markdown/HTML, escapa ángulos, cap)
+    │   │   └── OutputValidator.cs              # Detecta drift/canary/identity-probe/injection en salida IA (+ CanaryToken)
     │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
     │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
     │   │   ├── FallbackLlmClient.cs            # Encadena providers; limpia fences; valida JSON
@@ -229,6 +226,8 @@ LocalList.API.NET/
     │       ├── IPlaceTranslatorService.cs      # TranslatePlaceAsync, TranslatePlanAsync
     │       ├── IDescriptionGeneratorService.cs # GeneratePlaceDescriptionAsync + WithDiagnostics
     │       ├── IPlanGenerationService.cs       # GenerateAsync, ResolveStopPlaces
+    │       ├── ISchedulingService.cs           # Contrato cross-slice del scheduler (BuildPlanScheduleAsync). Impl = SchedulingService (Builder); lo consume Import T4 sin acoplarse al slice
+    │       ├── IPlanNamingService.cs           # Contrato cross-slice del naming de plan (BuildPlanName). Impl = PlanNamingProvider (Builder, delega en el helper estático PlanNamingService)
     │       ├── PlaceTranslatorService.cs       # Implementación (movida de Builder/Services/)
     │       ├── DescriptionGeneratorService.cs  # Implementación (movida de Builder/Services/)
     │       └── EmbeddingService.cs             # Gemini embeddings para RAG (movida de Builder/Services/)
@@ -242,6 +241,7 @@ LocalList.API.NET/
     │   └── FirebaseUserExtensions.cs    # GetFirebaseUid(), GetEmail(), GetUserIdAsync()
     ├── Constants/
     │   ├── PlanLimits.cs               # MaxStopsPerDay + MaxPlanDurationDays (hard cap 14, fuente única del [Range] de días)
+    │   ├── Tiers.cs                    # Pro/Free — fuente única del literal de tier (antes copiado en ~6 ficheros)
     │   └── PriceRanges.cs              # Rangos de precio normalizados
     ├── Coverage/                       # Gate de ciudades en vivo (contrato cross-slice)
     │   ├── ICityCoverageService.cs      # IsLive(city) + LiveCities (impl en Features/Cities/)
@@ -249,6 +249,7 @@ LocalList.API.NET/
     ├── Data/
     │   ├── LocalListDbContext.cs        # EF Core DbContext, entity configs, indices
     │   ├── DesignTimeDbContextFactory.cs
+    │   ├── PostgresErrorPredicates.cs   # IsUniqueViolation/IsForeignKeyViolation (23505/23503) — compartidos por Favorites e Import (antes controller→controller cross-slice)
     │   └── Entities/                   # EF Core entities
     │       ├── User.cs                  # firebase_uid (legado), google_user_id, apple_user_id, password_hash
     │       ├── UserProfile.cs           # Perfil PRIVADO (preferencias de viaje). ≠ Features/Social UserPublicProfile
@@ -268,7 +269,16 @@ LocalList.API.NET/
     │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
     │       ├── UsageCounter.cs          # Contador de uso (user, feature, period_start) — increment atómico vía UsageCounterService
     │       ├── Favorite.cs              # Favorito de sitio (user_id, place_id) PK compuesta = índice único (idempotencia vía 23505); ambos FK CASCADE (GDPR + borrado de place); índice (user_id, created_at DESC) para el listado
-    │       └── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
+    │       ├── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
+    │       │   # Entidades sociales S0 (movidas de Features/Social/Entities/; schema fijado por [Table]/[Column], sin migración):
+    │       ├── UserPublicProfile.cs    # Perfil PÚBLICO (handle citext único, avatar, contadores). SEPARADO de UserProfile (privado). Creación LAZY
+    │       ├── UserFollow.cs           # Grafo de follows. PK (follower_id, followee_id), CHECK no-self. NUNCA "Follow" (colisiona con Follow Mode)
+    │       ├── PlanCollaborator.cs     # Co-edición. PK (plan_id, user_id), role editor|viewer. Owner NO es fila (sigue en plans.created_by)
+    │       ├── PlanInvite.cs           # Invitación por token a colaborar (expira, max_uses, revocable)
+    │       ├── ActivityEvent.cs        # Feed append-only. object_id polimórfico (sin FK), UNIQUE (actor, verb, object) idempotente
+    │       ├── PlanLike.cs             # Like. PK (plan_id, user_id). Contador denormalizado en plans.likes_count
+    │       ├── ContentReport.cs        # Reporte de moderación. reporter_id FK SET NULL (sobrevive borrado de cuenta)
+    │       └── UserBlock.cs            # Bloqueo. PK (blocker_id, blocked_id). Consumido por PlanAccessService (bloqueo ↔ owner niega CanView)
     ├── I18n/
     │   └── LanguageAccessor.cs         # Resolución de idioma por Accept-Language / query param
     ├── Observability/
@@ -300,6 +310,7 @@ LocalList.API.NET/
     │   ├── CorsExtensions.cs               # AddCorsPolicy
     │   └── RateLimitingExtensions.cs       # AddRateLimitingPolicies
     ├── Usage/                          # F4 — gates del catálogo Plus (cross-slice: Chat + Builder)
+    │   ├── TierGate.cs                  # Lectura del tier FRESCO de DB (GetFreshTierAsync/IsPro/IsProAsync) — patrón compartido por Import/Favorites/Plans/generación
     │   ├── IUsageCounterService.cs      # TryConsumeAsync/GetUsedAsync — consumo atómico por (user, feature, periodo)
     │   ├── UsageCounterService.cs       # INSERT … ON CONFLICT … WHERE count < limit en 1 statement (sin ventana RMW)
     │   ├── IPlanGenerationGateService.cs # CheckAndConsumeAsync + PlanGateResult/PlanGateRejection

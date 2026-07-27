@@ -170,6 +170,20 @@ public class ImportPlanTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
     }
 
+    // ── (b') scheme pin: token FIREBASE (RS256, admin) contra endpoint pineado a App → 401 ──
+    [Fact]
+    public async Task FirebaseToken_AgainstAppPinnedEndpoint_Returns401()
+    {
+        // El endpoint está pineado a AuthSchemes.App; un token Firebase (RS256), aunque sea de un
+        // usuario pro válido, NO valida bajo el scheme App → 401 antes de ejecutar el controller.
+        var uid = Guid.NewGuid();
+        var client = await fixture.CreateAuthenticatedClientWithUser(
+            uid, firebaseUid: "fb-" + uid, email: $"fb-{uid:N}@test.com", role: "user", tier: "pro");
+
+        var res = await Post(client, "Miami", 1, new[] { Guid.NewGuid() });
+        Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
     // ── (c) placeId inexistente / draft / de otra ciudad → 400 opaco, 0 filas (atómico) ──
     [Theory]
     [InlineData("nonexistent")]
@@ -213,6 +227,26 @@ public class ImportPlanTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("import_invalid_places", body.GetProperty("error").GetString());
+    }
+
+    // ── (c'') más places que el cap (MaxStopsPerDay × days) → 400 import_too_many_places ──
+    [Fact]
+    public async Task TooManyPlaces_Returns400_WithMaxPlaces_NoPlanCreated()
+    {
+        var (client, userId) = await PlusClient("impl-toomany");
+        var city = LiveCity();
+        // days=1 → cap = MaxStopsPerDay (10). Sembramos cap+1 = 11 places válidos.
+        const int cap = LocalList.API.NET.Shared.Constants.PlanLimits.MaxStopsPerDay; // 10
+        var ids = await SeedLive(city, cap + 1);
+
+        var res = await Post(client, city, 1, ids);
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("import_too_many_places", body.GetProperty("error").GetString());
+        Assert.Equal(cap, body.GetProperty("maxPlaces").GetInt32());
+
+        // No se creó plan alguno (el cap rechaza ANTES de tocar la DB de escritura).
+        Assert.Equal(0, await fixture.GetDbContext().Plans.CountAsync(p => p.CreatedById == userId));
     }
 
     // ── (c') ciudad no cubierta → 400 city_unsupported ───────────────────────────
@@ -361,8 +395,8 @@ public class ImportPlanTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             new Npgsql.PostgresException("violates foreign key \"FK_plan_stops_places_place_id\"", "ERROR", "ERROR", "23503"));
         var other = new DbUpdateException("boom", new InvalidOperationException("connection lost"));
 
-        Assert.True(LocalList.API.NET.Features.Favorites.FavoritesController.IsForeignKeyViolation(fk));
-        Assert.False(LocalList.API.NET.Features.Favorites.FavoritesController.IsForeignKeyViolation(other));
+        Assert.True(LocalList.API.NET.Shared.Data.PostgresErrorPredicates.IsForeignKeyViolation(fk));
+        Assert.False(LocalList.API.NET.Shared.Data.PostgresErrorPredicates.IsForeignKeyViolation(other));
     }
 
     // ── (i) determinismo: mismo SET → misma secuencia de stops, aunque la 2ª llamada

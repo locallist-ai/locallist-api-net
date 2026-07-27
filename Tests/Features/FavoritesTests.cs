@@ -1,5 +1,6 @@
 using System.Text.Json;
 using LocalList.API.NET.Features.Favorites;
+using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
 using Npgsql;
 
@@ -371,14 +372,14 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             new PostgresException("duplicate key value violates unique constraint", "ERROR", "ERROR", "23505"));
         var other = new DbUpdateException("boom", new InvalidOperationException("connection lost"));
 
-        Assert.True(FavoritesController.IsForeignKeyViolation(fk));
-        Assert.False(FavoritesController.IsUniqueViolation(fk));
+        Assert.True(PostgresErrorPredicates.IsForeignKeyViolation(fk));
+        Assert.False(PostgresErrorPredicates.IsUniqueViolation(fk));
 
-        Assert.True(FavoritesController.IsUniqueViolation(unique));
-        Assert.False(FavoritesController.IsForeignKeyViolation(unique));
+        Assert.True(PostgresErrorPredicates.IsUniqueViolation(unique));
+        Assert.False(PostgresErrorPredicates.IsForeignKeyViolation(unique));
 
-        Assert.False(FavoritesController.IsForeignKeyViolation(other));
-        Assert.False(FavoritesController.IsUniqueViolation(other));
+        Assert.False(PostgresErrorPredicates.IsForeignKeyViolation(other));
+        Assert.False(PostgresErrorPredicates.IsUniqueViolation(other));
     }
 
     // ── /favorites/ids ───────────────────────────────────────────────────────

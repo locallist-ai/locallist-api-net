@@ -1,4 +1,4 @@
-using LocalList.API.NET.Features.Social.Entities;
+using LocalList.API.NET.Shared.Data.Entities;
 using LocalList.API.NET.Shared.Access;
 using LocalList.API.NET.Shared.Data.Entities;
 using Microsoft.EntityFrameworkCore;

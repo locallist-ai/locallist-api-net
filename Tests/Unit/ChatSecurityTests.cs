@@ -1,4 +1,5 @@
 using LocalList.API.NET.Features.Chat.Services;
+using LocalList.API.NET.Shared.AI.Security;
 
 namespace LocalList.API.Tests.Unit;
 
