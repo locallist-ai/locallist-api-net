@@ -23,7 +23,9 @@ public class PlanShareTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         return id;
     }
 
-    private async Task<Plan> SeedPlan(Guid ownerId, string visibility, string? shareToken = null, bool withStop = false)
+    private async Task<Plan> SeedPlan(
+        Guid ownerId, string visibility, string? shareToken = null, bool withStop = false,
+        string? tripContextJson = null)
     {
         var db = fixture.GetDbContext();
         var plan = new Plan
@@ -36,6 +38,7 @@ public class PlanShareTests(ApiFixture fixture) : IClassFixture<ApiFixture>
             Visibility = visibility,
             ShareToken = shareToken,
             CreatedById = ownerId,
+            TripContext = tripContextJson is null ? null : JsonDocument.Parse(tripContextJson),
         };
         db.Plans.Add(plan);
         if (withStop)
@@ -300,6 +303,59 @@ public class PlanShareTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         // Tras revocar: el mismo token ya no resuelve (plan volvió a private + token null).
         Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync($"/plans/shared/{token}")).StatusCode);
+    }
+
+    // ── (b) privacidad: el DTO compartido NO contiene tripContext (dieta, presupuesto,
+    // groupType... del dueño). Aserción sobre el JSON crudo: el campo debe estar AUSENTE
+    // (WhenWritingNull), no solo null. El GET dueño-por-GUID sí lo sirve (control).
+    [Fact]
+    public async Task GetShared_DoesNotExpose_TripContext()
+    {
+        var owner = await SeedUser("privtc");
+        const string sensitiveTripContext =
+            """{"city":"Miami","groupType":"couple","budgetAmount":900,"dietaryRestrictions":["halal"]}""";
+        var plan = await SeedPlan(owner, "unlisted", shareToken: ShareTokenGenerator.Generate(),
+            withStop: true, tripContextJson: sensitiveTripContext);
+        var anon = fixture.CreateClient();
+
+        var res = await anon.GetAsync($"/plans/shared/{plan.ShareToken}");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+        var raw = await res.Content.ReadAsStringAsync();
+        var body = JsonDocument.Parse(raw).RootElement;
+        Assert.False(body.TryGetProperty("tripContext", out _), "tripContext no debe salir en el DTO anónimo");
+        // Ni rastro de los valores sensibles en el JSON crudo (defensa contra renombrados).
+        Assert.DoesNotContain("halal", raw);
+        Assert.DoesNotContain("budgetAmount", raw);
+
+        // Control: el owner por GUID SÍ recibe su tripContext (solo se recorta el path anónimo).
+        var ownerClient = await AppClient(owner, "privtc-c");
+        var ownBody = await (await ownerClient.GetAsync($"/plans/{plan.Id}")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(ownBody.TryGetProperty("tripContext", out var tc) && tc.ValueKind == JsonValueKind.Object);
+    }
+
+    // ── (a/c) re-share tras revoke: token DISTINTO — el enlace revocado no revive ──
+    [Fact]
+    public async Task Share_AfterRevoke_ReturnsDifferentToken_OldTokenStaysDead()
+    {
+        var owner = await SeedUser("rerevoke");
+        var plan = await SeedPlan(owner, "private", withStop: true);
+        var client = await AppClient(owner, "rerevoke-c");
+        var anon = fixture.CreateClient();
+
+        var first = await (await client.PostAsync($"/plans/{plan.Id}/share", null)).Content.ReadFromJsonAsync<JsonElement>();
+        var oldToken = first.GetProperty("shareToken").GetString();
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/plans/{plan.Id}/share")).StatusCode);
+
+        var second = await (await client.PostAsync($"/plans/{plan.Id}/share", null)).Content.ReadFromJsonAsync<JsonElement>();
+        var newToken = second.GetProperty("shareToken").GetString();
+
+        Assert.False(string.IsNullOrEmpty(newToken));
+        Assert.NotEqual(oldToken, newToken); // revocar invalida DE VERDAD: el re-share no resucita el enlace viejo
+        // El token viejo sigue muerto; el nuevo resuelve.
+        Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync($"/plans/shared/{oldToken}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await anon.GetAsync($"/plans/shared/{newToken}")).StatusCode);
     }
 
     // ── (d) MINOR a: un plan 'unlisted' JAMÁS aparece en el listado público GET /plans ──

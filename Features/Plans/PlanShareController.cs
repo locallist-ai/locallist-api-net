@@ -191,8 +191,15 @@ public sealed class PlanShareController : ControllerBase
             return NotFound(new { error = "Plan not found" });
 
         var routeSegments = await _routeResolver.ResolveAsync(plan.Stops, RoutingMode.Walking, ct);
+        // Privacidad del DTO anónimo (review S1): se anulan los campos del DUEÑO, no del plan.
+        //  - CreatedById: identificador interno del owner.
+        //  - TripContext: preferencias personales del owner (dieta, presupuesto, groupType,
+        //    exclusiones...) — más sensible aún que el id; quien recibe el enlace no lo necesita.
+        //  - StartDate SE QUEDA (decisión hub 2026-07-27): es contenido útil del itinerario para
+        //    el receptor del enlace (qué días es el viaje), no un dato del dueño.
+        // Con el global WhenWritingNull ambos campos desaparecen del JSON.
         var dto = PlanDetailDto.FromEntity(plan, _lang.Language, routeSegments, _config["Api:PublicBaseUrl"])
-            with { CreatedById = null };
+            with { CreatedById = null, TripContext = null };
 
         return Ok(dto);
     }
