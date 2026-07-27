@@ -344,6 +344,8 @@ public class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
                     RateLimitPartition.GetNoLimiter(string.Empty));
                 options.AddPolicy("ImportLimit", context =>
                     RateLimitPartition.GetNoLimiter(string.Empty));
+                options.AddPolicy("SharedPlanLimit", context =>
+                    RateLimitPartition.GetNoLimiter(string.Empty));
             });
         });
     }

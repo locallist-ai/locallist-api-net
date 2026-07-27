@@ -269,6 +269,26 @@ public static class RateLimitingExtensions
                     $"import_ip_{ResolveIpOrWarn(context, "import_identity")}",
                     _ => CreateSlidingHourlyLimiter(importIpCeiling)));
 
+            // ── SharedPlanLimit: GET /plans/shared/{token} (social S1) ───────────────────────
+            // [AllowAnonymous] — los universal links / <a> no adjuntan auth. Cada request hace un
+            // lookup por share_token (índice único). El techo por IP acota tanto el scraping de un
+            // enlace viral como el intento de ENUMERAR tokens (aunque la entropía de 96 bits ya lo
+            // hace inviable). Sliding window por minuto (6 segmentos) para evitar el doubling del
+            // borde; tunable vía SharedPlan:RateLimitPerMinute.
+            var sharedPlanPerMinute = configuration.GetValue<int?>("SharedPlan:RateLimitPerMinute")
+                                      ?? DefaultSharedPlanRateLimitPerMinute;
+            options.AddPolicy("SharedPlanLimit", context =>
+                RateLimitPartition.Get(
+                    $"shared_plan_{ResolveIpOrWarn(context, "shared_plan_identity")}",
+                    _ => new SlidingWindowRateLimiter(new SlidingWindowRateLimiterOptions
+                    {
+                        AutoReplenishment = true,
+                        PermitLimit = sharedPlanPerMinute,
+                        QueueLimit = 0,
+                        Window = TimeSpan.FromMinutes(1),
+                        SegmentsPerWindow = 6,
+                    })));
+
             options.RejectionStatusCode = 429;
         });
 
@@ -282,6 +302,13 @@ public static class RateLimitingExtensions
     /// <c>Import:RateLimitPerHourPerIp</c>.
     /// </summary>
     internal const int DefaultImportIpCeilingPerHour = 20;
+
+    /// <summary>
+    /// Techo por minuto y por IP de <c>GET /plans/shared/{token}</c> (social S1). Generoso para
+    /// un enlace legítimamente popular (un link de TikTok abriéndose en muchos dispositivos tras la
+    /// misma NAT), pero acota el scraping/enumeración. Tunable vía <c>SharedPlan:RateLimitPerMinute</c>.
+    /// </summary>
+    internal const int DefaultSharedPlanRateLimitPerMinute = 60;
 
     // ── Partición identity-aware de los endpoints medidos (Builder/Chat) ────────────
     // Expuesto internal (InternalsVisibleTo LocalList.API.Tests) para poder testear la

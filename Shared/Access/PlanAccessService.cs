@@ -16,6 +16,12 @@ namespace LocalList.API.NET.Shared.Access;
 ///  5. visibility=='public' -> CanView (cualquiera, incluido anonimo userId==null).
 ///  6. visibility=='unlisted' o 'private' sin otra via -> Denied. 'unlisted' NO se resuelve por
 ///     GUID por este metodo: solo por token (S1).
+///
+/// Division de responsabilidades con el share-link (S1): este servicio autoriza por GUID+userId y
+/// JAMAS resuelve un plan 'unlisted' (la posesion del GUID no basta). El enlace compartido es un
+/// capability aparte — la posesion del share_token secreto ES la autorizacion — y su resolucion
+/// vive en PlanShareController.GetShared (lookup por token), no aqui. Mutar la visibilidad
+/// (share/revoke) si exige ownership, y para eso el controller SI consulta este servicio (IsOwner).
 /// </summary>
 public class PlanAccessService : IPlanAccessService
 {

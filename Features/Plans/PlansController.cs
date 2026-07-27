@@ -144,7 +144,10 @@ public class PlansController : ControllerBase
         limit = Math.Clamp(limit, 1, 100);
         var isAuthenticated = User.Identity?.IsAuthenticated ?? false;
 
-        var query = _db.Plans.AsNoTracking().Where(p => p.IsPublic);
+        // Social S1 (MINOR a): el listado público filtra por la FUENTE DE VERDAD visibility=='public',
+        // no por el espejo is_public. Un plan 'unlisted' (compartido por enlace) JAMÁS aparece en
+        // listados públicos: solo se resuelve por su token en GET /plans/shared/{token}.
+        var query = _db.Plans.AsNoTracking().Where(p => p.Visibility == "public");
 
         if (!string.IsNullOrEmpty(city))
             query = query.Where(p => p.City == city);
