@@ -14,8 +14,8 @@ namespace LocalList.API.Tests.Features;
 ///   (c) GET paginado con ORDEN TOTAL (created_at DESC, tiebreaker place_id DESC) — se asertan
 ///       secuencias exactas cruzando frontera de página; el tiebreaker se prueba con timestamps
 ///       iguales. Se siembra CON SaveChanges POR FILA para no dejar el test vacuo.
-///   (d) cap: free con 50 → 403 favorites_limit_reached; pro con 50+ → OK (ilimitado).
-///   (e) carrera: N favoritos concurrentes partiendo de 49 → count final EXACTO 50, excedentes 403.
+///   (d) cap: free en el cap → 403 favorites_limit_reached; pro por encima del cap → OK (ilimitado).
+///   (e) carrera: N favoritos concurrentes partiendo de cap-1 → count final EXACTO = cap, excedentes 403.
 ///   (f) 401 anónimo (PUT y GET).
 ///   (g) place inexistente / no publicado → 404 opaco.
 ///   (h) cascade: DELETE /account borra los favoritos (GDPR) y no se rompe; borrar el place también.
@@ -26,6 +26,9 @@ namespace LocalList.API.Tests.Features;
 /// </summary>
 public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
+    /// <summary>Cap de favoritos free — única fuente de verdad, ligada a la constante del controller.</summary>
+    private const int Cap = FavoritesController.FreeFavoritesLimit;
+
     // ── (a) favoritar + idempotencia ─────────────────────────────────────────
 
     [Fact]
@@ -139,13 +142,13 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(expected, ids);
     }
 
-    // ── (d) cap 50 free / ilimitado pro ──────────────────────────────────────
+    // ── (d) cap free / ilimitado pro ─────────────────────────────────────────
 
     [Fact]
-    public async Task Put_FreeUser_At50_Returns403_FavoritesLimitReached()
+    public async Task Put_FreeUser_AtCap_Returns403_FavoritesLimitReached()
     {
         var (client, userId) = await AuthedUser("fav-cap-free");
-        await SeedFavorites(userId, 50);
+        await SeedFavorites(userId, Cap);
 
         var extra = await SeedPlace();
         var res = await client.PutAsync($"/favorites/{extra.Id}", null);
@@ -153,11 +156,11 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("favorites_limit_reached", body.GetProperty("error").GetString());
-        Assert.Equal(50, body.GetProperty("used").GetInt32());
+        Assert.Equal(Cap, body.GetProperty("used").GetInt32());
         Assert.Equal(FavoritesController.FreeFavoritesLimit, body.GetProperty("limit").GetInt32());
 
-        // El 51º no coló: sigue exactamente en 50.
-        Assert.Equal(50, await FavoriteCount(userId));
+        // El que sobra no coló: sigue exactamente en el cap.
+        Assert.Equal(Cap, await FavoriteCount(userId));
     }
 
     [Fact]
@@ -166,29 +169,29 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var userId = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
             userId, $"fav-pro-{userId:N}@test.com", tier: "pro");
-        await SeedFavorites(userId, 55);
+        await SeedFavorites(userId, Cap + 5);
 
         var extra = await SeedPlace();
         var res = await client.PutAsync($"/favorites/{extra.Id}", null);
 
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-        Assert.Equal(56, await FavoriteCount(userId));
+        Assert.Equal(Cap + 6, await FavoriteCount(userId));
     }
 
     [Fact]
     public async Task Put_FreeUser_UnpublishedFavoritesDoNotCountTowardCap()
     {
-        // Cap y GET comparten semántica (lo que ves = lo que cuenta): 40 favoritos de places
-        // publicados + 10 de places DESPUBLICADOS → el cap efectivo es 40, no 50, y el PUT entra.
+        // Cap y GET comparten semántica (lo que ves = lo que cuenta): Cap-10 favoritos de places
+        // publicados + 10 de places DESPUBLICADOS → el cap efectivo es Cap-10, no Cap, y el PUT entra.
         var (client, userId) = await AuthedUser("fav-cap-unpub");
-        await SeedFavorites(userId, 40, status: "published");
+        await SeedFavorites(userId, Cap - 10, status: "published");
         await SeedFavorites(userId, 10, status: "draft");
 
         var extra = await SeedPlace();
         var ok = await client.PutAsync($"/favorites/{extra.Id}", null);
-        Assert.Equal(HttpStatusCode.OK, ok.StatusCode); // 41 visibles, no atascado en "50"
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode); // Cap-9 visibles, no atascado en el cap
 
-        // Rellena hasta 50 PUBLICADOS exactos → el siguiente PUT choca con el cap, y el used
+        // Rellena hasta Cap PUBLICADOS exactos → el siguiente PUT choca con el cap, y el used
         // del 403 es CONSISTENTE con el total del GET (ambos cuentan solo publicados).
         await SeedFavorites(userId, 9, status: "published");
 
@@ -197,21 +200,21 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("favorites_limit_reached", body.GetProperty("error").GetString());
-        Assert.Equal(50, body.GetProperty("used").GetInt32());
+        Assert.Equal(Cap, body.GetProperty("used").GetInt32());
 
         var list = await client.GetAsync("/favorites");
         var listBody = await list.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(50, listBody.GetProperty("total").GetInt32());
+        Assert.Equal(Cap, listBody.GetProperty("total").GetInt32());
     }
 
     [Fact]
     public async Task Put_RepublishedBeyondCap_Returns403_ButGetShowsAllPublished()
     {
-        // Borde aceptado (decisión hub): 50 publicados + 5 despublicados que luego se REPUBLICAN
-        // → 55 visibles. No pasa nada: el siguiente PUT da 403 hasta bajar de 50, y el GET
-        // muestra TODOS los publicados (55) — no se poda nada retroactivamente.
+        // Borde aceptado (decisión hub): Cap publicados + 5 despublicados que luego se REPUBLICAN
+        // → Cap+5 visibles. No pasa nada: el siguiente PUT da 403 hasta bajar del cap, y el GET
+        // muestra TODOS los publicados (Cap+5) — no se poda nada retroactivamente.
         var (client, userId) = await AuthedUser("fav-repub");
-        await SeedFavorites(userId, 50, status: "published");
+        await SeedFavorites(userId, Cap, status: "published");
         var draftIds = await SeedFavorites(userId, 5, status: "draft");
 
         var db = fixture.GetDbContext();
@@ -223,23 +226,23 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("favorites_limit_reached", body.GetProperty("error").GetString());
-        Assert.Equal(55, body.GetProperty("used").GetInt32());
+        Assert.Equal(Cap + 5, body.GetProperty("used").GetInt32());
 
         var list = await client.GetAsync("/favorites?limit=100");
         var listBody = await list.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(55, listBody.GetProperty("total").GetInt32());
-        Assert.Equal(55, listBody.GetProperty("places").GetArrayLength());
+        Assert.Equal(Cap + 5, listBody.GetProperty("total").GetInt32());
+        Assert.Equal(Cap + 5, listBody.GetProperty("places").GetArrayLength());
     }
 
     // ── (e) carrera: no overshoot ────────────────────────────────────────────
 
     [Fact]
-    public async Task Put_ConcurrentFromFortyNine_ExactlyOneSucceeds_CountEqualsFifty()
+    public async Task Put_ConcurrentFromCapMinusOne_ExactlyOneSucceeds_CountEqualsCap()
     {
         var (client, userId) = await AuthedUser("fav-race");
-        await SeedFavorites(userId, 49); // un único hueco antes del cap de 50
+        await SeedFavorites(userId, Cap - 1); // un único hueco antes del cap
 
-        // 10 places DISTINTOS favoritados a la vez: solo 1 debe entrar (llega a 50), 9 → 403.
+        // 10 places DISTINTOS favoritados a la vez: solo 1 debe entrar (llega al cap), 9 → 403.
         var places = new List<Guid>();
         for (var i = 0; i < 10; i++) places.Add((await SeedPlace(name: $"Race {i}")).Id);
 
@@ -250,8 +253,8 @@ public class FavoritesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 
         Assert.Equal(1, ok);
         Assert.Equal(9, denied);
-        // Sin overshoot: exactamente 50, jamás 51.
-        Assert.Equal(50, await FavoriteCount(userId));
+        // Sin overshoot: exactamente en el cap, jamás cap+1.
+        Assert.Equal(Cap, await FavoriteCount(userId));
 
         foreach (var d in responses.Where(r => r.StatusCode == HttpStatusCode.Forbidden))
         {

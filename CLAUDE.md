@@ -164,7 +164,7 @@ LocalList.API.NET/
 │   │   ├── CityCoverageService.cs      # ICityCoverageService impl (allowlist Coverage:LiveCities)
 │   │   └── CityNameNormalizer.cs       # Unicode FormD normalization para búsqueda
 │   ├── Favorites/
-│   │   └── FavoritesController.cs      # PUT/DELETE /favorites/:placeId (idempotentes), GET /favorites (paginado), GET /favorites/ids. [Authorize] AppScheme. Cap 50 free / ∞ Plus con tier FRESCO de DB; atomicidad del cap vía pg_advisory_xact_lock por usuario (no hay fila-contador única como usage_counters)
+│   │   └── FavoritesController.cs      # PUT/DELETE /favorites/:placeId (idempotentes), GET /favorites (paginado), GET /favorites/ids. [Authorize] AppScheme. Cap 20 free / ∞ Plus con tier FRESCO de DB; atomicidad del cap vía pg_advisory_xact_lock por usuario (no hay fila-contador única como usage_counters)
 │   ├── Follow/
 │   │   ├── FollowController.cs         # POST /follow/start (IDOR #116 cerrado vía IPlanAccessService.CanView), GET /active, PATCH next/skip/pause/complete
 │   │   └── FollowDtos.cs              # FollowStartRequest
@@ -354,7 +354,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Builder | `POST /builder/chat` (auth requerida desde F4; gates del catálogo Plus) |
 | Chat | `POST /chat/turn` (anonymous), `POST /chat/generate` (auth requerida desde F4; gates del catálogo Plus), `DELETE /chat/session/:id` |
 | Cities | `GET /cities/search`, `GET /cities/live` (allowlist de cobertura `Coverage:LiveCities`), `POST /cities`, `POST /cities/request` (anonymous; feedback "¿No ves tu ciudad?", `CityRequestLimit`) |
-| Favorites | `PUT /favorites/:placeId` (favorita, idempotente; 404 opaco si el place no existe/no publicado; 403 `favorites_limit_reached` en free con ≥50 favoritos de places PUBLICADOS — misma semántica que el GET: lo que ves = lo que cuenta), `DELETE /favorites/:placeId` (desfavorita, idempotente → 204), `GET /favorites` (paginado `limit`/`offset`, PlaceDto ordenado `created_at DESC` + tiebreaker `place_id DESC`, solo publicados), `GET /favorites/ids` (ids ligeros para pintar corazones). Todos `[Authorize]` AppScheme (anónimo → 401) |
+| Favorites | `PUT /favorites/:placeId` (favorita, idempotente; 404 opaco si el place no existe/no publicado; 403 `favorites_limit_reached` en free con ≥20 favoritos de places PUBLICADOS — misma semántica que el GET: lo que ves = lo que cuenta), `DELETE /favorites/:placeId` (desfavorita, idempotente → 204), `GET /favorites` (paginado `limit`/`offset`, PlaceDto ordenado `created_at DESC` + tiebreaker `place_id DESC`, solo publicados), `GET /favorites/ids` (ids ligeros para pintar corazones). Todos `[Authorize]` AppScheme (anónimo → 401) |
 | Follow | `POST /follow/start`, `GET /follow/active`, `PATCH /follow/:id/next`, `/skip`, `/pause`, `/complete` |
 | Places | `GET /places/`, `GET /places/:id`, `GET /places/:id/photos/:index` (anonymous; 302 al CDN de Google, key server-side, `PhotoLimit`) |
 | Plans | `GET /plans/` (listado público: filtra por `visibility=='public'`, un `unlisted` JAMÁS aparece), `GET /plans/mine`, `GET /plans/:id`, `POST /plans` (crea plan de usuario; gate del cupo de guardados free = 5), `PUT /plans/:id/stops` (reemplazo atómico de stops, día ≤14), `DELETE /plans/:id` |

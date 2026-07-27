@@ -99,7 +99,7 @@ generación (`POST /chat/generate` y `POST /builder/chat`), que desde F4 exigen 
 | Planes IA | 3/mes (mes natural UTC) | Ilimitado, cap antiabuso 50/día (UTC) | `PlanGenerationGateService` (generación) |
 | Duración del plan | ≤ 3 días | ≤ 14 días (hard cap para todos) | gate de generación + `[Range]` de los DTOs |
 | Multi-ciudad | no | sí (ver hueco abajo) | (imposible por construcción hoy) |
-| Favoritos | 50 | ilimitado | **`PUT /favorites/:placeId`** (FavoritesController) |
+| Favoritos | 20 | ilimitado | **`PUT /favorites/:placeId`** (FavoritesController) |
 | Planes guardados | 5 activos (filas en `plans` con `created_by`) | ilimitado | **`POST /plans`** (PlansController) |
 | Catálogo, edición manual, Follow online, `/chat/turn` | ilimitado | ilimitado | — |
 
