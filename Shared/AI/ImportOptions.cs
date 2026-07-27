@@ -1,4 +1,4 @@
-namespace LocalList.API.NET.Features.Import;
+namespace LocalList.API.NET.Shared.AI;
 
 /// <summary>
 /// Configuración de la slice de import de vídeo (F2). Bind desde config "Import".

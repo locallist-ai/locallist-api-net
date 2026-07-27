@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Features.Social.Entities;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 /// <summary>
 /// Grafo de follows (usuario sigue a usuario). Nombre NUNCA "Follow" — colisiona con Follow Mode.

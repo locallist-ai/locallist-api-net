@@ -1,7 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace LocalList.API.NET.Features.Social.Entities;
+namespace LocalList.API.NET.Shared.Data.Entities;
 
 /// <summary>
 /// Evento de actividad append-only — primitiva del feed (S1+). actor_id FK users CASCADE.

@@ -2,13 +2,18 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using LocalList.API.NET.Features.Import;
+using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.Auth;
+using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Usage;
 
 namespace LocalList.API.NET.Features.Account;
 
+// NOTA (scheme pin): a diferencia de Favorites/Import (pineados a AuthSchemes.App), /account NO se
+// pinea. Es dual-scheme a propósito: lo consume TANTO la app (token App HS256, sub=Guid) como el
+// admin interno (token Firebase RS256, sub=firebase_uid) — GetAccount resuelve ambos (Guid.TryParse
+// → id; si no, lookup por FirebaseUid). Pinearlo a App rompería el flujo admin Firebase.
 [ApiController]
 [Route("account")]
 [Authorize]
@@ -68,7 +73,7 @@ public class AccountController : ControllerBase
         // límite mensual no aplica (usan el cap diario antiabuso) → limit omitido = ilimitado;
         // used sigue siendo el contador mensual (0 para Plus). resetsAt = inicio del mes
         // siguiente (UTC), el momento en que el contador free se resetea.
-        var isPro = string.Equals(user.tier, PlanGenerationGateService.TierPro, StringComparison.Ordinal);
+        var isPro = string.Equals(user.tier, Tiers.Pro, StringComparison.Ordinal);
         var now = _time.GetUtcNow();
         var monthStart = new DateOnly(now.Year, now.Month, 1);
         var used = await _counters.GetUsedAsync(user.id, PlanGenerationGateService.FeatureMonthly, monthStart, ct);

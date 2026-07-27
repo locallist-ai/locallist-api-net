@@ -22,21 +22,32 @@ public class PlanGenerationOrderingTests(ApiFixture fixture) : IClassFixture<Api
     [Fact]
     public async Task FallbackKeyword_CandidatePool_IsReturnedSortedByIdAscending()
     {
-        // Arrange: 3 places inserted in REVERSE Id order so that heap-scan order
-        // would return them largest-first if there were no ORDER BY.
+        // Arrange: n≥8 places whose Ids are known. GOTCHA del repo: EF Core reordena los INSERT de
+        // un MISMO SaveChanges por PK, así que sembrar "en orden inverso" dentro de un solo
+        // SaveChanges no prueba nada — EF los mandaría igualmente ordenados por Id y el heap-scan
+        // saldría ascendente aunque NO hubiera ORDER BY (test vacuo). Para que el test MUERDA de
+        // verdad, insertamos UNA FILA POR SaveChanges en orden ANTI-PK (descendente): así el orden
+        // físico del heap es descendente y, sin el ORDER BY, la query devolvería descendente.
         var city = "TestCity_OrderBy_" + Guid.NewGuid().ToString("N")[..8];
 
-        var idSmall  = Guid.Parse("10000000-0000-0000-0000-000000000001");
-        var idMedium = Guid.Parse("50000000-0000-0000-0000-000000000001");
-        var idLarge  = Guid.Parse("f0000000-0000-0000-0000-000000000001");
+        const int n = 8;
+        // Ids deterministas y ordenables: 01..08 en el último byte.
+        var ascendingIds = Enumerable.Range(1, n)
+            .Select(i => Guid.Parse($"a0000000-0000-0000-0000-0000000000{i:D2}"))
+            .ToList();
 
         var db = fixture.GetDbContext();
-
-        // Insert largest → smallest so naive heap-scan returns descending
-        db.Places.Add(new Place { Id = idLarge,  Name = "C", Category = "food", WhyThisPlace = "t", Status = "published", City = city });
-        db.Places.Add(new Place { Id = idSmall,  Name = "A", Category = "food", WhyThisPlace = "t", Status = "published", City = city });
-        db.Places.Add(new Place { Id = idMedium, Name = "B", Category = "food", WhyThisPlace = "t", Status = "published", City = city });
-        await db.SaveChangesAsync();
+        // Inserta en orden DESCENDENTE, una fila por SaveChanges (EF no puede reordenar entre
+        // SaveChanges distintos) → el heap queda en orden físico descendente.
+        foreach (var id in Enumerable.Reverse(ascendingIds))
+        {
+            db.Places.Add(new Place
+            {
+                Id = id, Name = $"P{id.ToString()[^2..]}", Category = "food",
+                WhyThisPlace = "t", Status = "published", City = city,
+            });
+            await db.SaveChangesAsync();
+        }
 
         // Resolve PlanGenerationService from the DI container (real DB + fakes already wired)
         using var scope = fixture.Services.CreateScope();
@@ -53,10 +64,10 @@ public class PlanGenerationOrderingTests(ApiFixture fixture) : IClassFixture<Api
         // Act: call the internal method that contains the OrderBy
         var result = await svc.FallbackKeywordFilterAsync(city, prefs, CancellationToken.None);
 
-        // Assert: result must be sorted by Id ascending regardless of insertion order
-        Assert.Equal(3, result.Count);
-        Assert.Equal(idSmall,  result[0].Id);
-        Assert.Equal(idMedium, result[1].Id);
-        Assert.Equal(idLarge,  result[2].Id);
+        // Assert: la proyección debe salir ordenada por Id ASCENDENTE pese a la inserción anti-PK.
+        // Quitar el .OrderBy(p => p.Id) de FallbackKeywordFilterAsync hace fallar esto (el heap-scan
+        // devuelve descendente). Verificamos TODAS las posiciones, no solo el count.
+        Assert.Equal(n, result.Count);
+        Assert.Equal(ascendingIds, result.Select(p => p.Id).ToList());
     }
 }

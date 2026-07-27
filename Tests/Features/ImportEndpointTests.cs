@@ -101,7 +101,8 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var body = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(city, body.GetProperty("city").GetString());
         Assert.Equal("self", body.GetProperty("platform").GetString());
-        Assert.Equal("@chef", body.GetProperty("creatorHandle").GetString());
+        // Handle saneado con la semántica ESTRICTA unificada (T4): se guarda/echoa SIN el '@'.
+        Assert.Equal("chef", body.GetProperty("creatorHandle").GetString());
         var places = body.GetProperty("places");
         Assert.Equal(1, places.GetArrayLength());
         Assert.Equal("Sunny Rooftop", places[0].GetProperty("name").GetString());
@@ -122,6 +123,35 @@ public class ImportEndpointTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(1, await Daily(userId));
         Assert.Equal(1, await Monthly(userId));
         Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+    }
+
+    // ── (a2) sin platform en la query → default self (happy path, NO 403 terceros) ──
+    [Fact]
+    public async Task WithoutPlatform_DefaultsToSelf()
+    {
+        var (client, _) = await PlusClient("imp-noplat");
+        var city = "ImpNoPlatCity" + Guid.NewGuid().ToString("N")[..10];
+        fixture.FakeVideoImport.GenerateContentResponder = _ =>
+            fixture.FakeVideoImport.GenerateContentOk($$"""
+                {
+                  "city": "{{city}}",
+                  "country": "USA",
+                  "language": "en",
+                  "places": [
+                    { "name": "Corner Cafe", "descriptor": "cafe", "category": "coffee", "evidence": "ocr", "timestampSec": 3 }
+                  ],
+                  "vibes": [],
+                  "confidence": 0.7
+                }
+                """);
+
+        // Sin ?platform= en la query: el default debe ser "self" → pasa el gate de terceros
+        // (flag OFF) y llega a la extracción, NO un 403 third_party_import_disabled.
+        var res = await client.PostAsync(Url(), VideoForm());
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("self", body.GetProperty("platform").GetString());
+        Assert.True(fixture.FakeVideoImport.GenerateContentCalled);
     }
 
     // ── (b) free → 403 import_requires_plus, sin cuota ni Gemini ─────────────────

@@ -1,3 +1,5 @@
+using LocalList.API.NET.Shared.AI;
+
 namespace LocalList.API.NET.Features.Import;
 
 /// <summary>

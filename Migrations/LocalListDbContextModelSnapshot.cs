@@ -27,7 +27,7 @@ namespace LocalList.API.NET.Migrations
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "vector");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ActivityEvent", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.ActivityEvent", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -72,7 +72,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("activity_events");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ContentReport", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.ContentReport", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
@@ -131,7 +131,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("content_reports");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanCollaborator", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.PlanCollaborator", b =>
                 {
                     b.Property<Guid>("PlanId")
                         .HasColumnType("uuid")
@@ -164,7 +164,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("plan_collaborators");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanInvite", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.PlanInvite", b =>
                 {
                     b.Property<string>("Token")
                         .HasMaxLength(22)
@@ -210,7 +210,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("plan_invites");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanLike", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.PlanLike", b =>
                 {
                     b.Property<Guid>("PlanId")
                         .HasColumnType("uuid")
@@ -232,7 +232,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("plan_likes");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserBlock", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserBlock", b =>
                 {
                     b.Property<Guid>("BlockerId")
                         .HasColumnType("uuid")
@@ -253,7 +253,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("user_blocks");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserFollow", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserFollow", b =>
                 {
                     b.Property<Guid>("FollowerId")
                         .HasColumnType("uuid")
@@ -281,7 +281,7 @@ namespace LocalList.API.NET.Migrations
                         });
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserPublicProfile", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserPublicProfile", b =>
                 {
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid")
@@ -1782,7 +1782,7 @@ namespace LocalList.API.NET.Migrations
                     b.ToTable("waitlist_entries");
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ActivityEvent", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.ActivityEvent", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
                         .WithMany()
@@ -1791,7 +1791,7 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.ContentReport", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.ContentReport", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
                         .WithMany()
@@ -1799,7 +1799,7 @@ namespace LocalList.API.NET.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanCollaborator", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.PlanCollaborator", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
                         .WithMany()
@@ -1819,7 +1819,7 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanInvite", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.PlanInvite", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
                         .WithMany()
@@ -1834,7 +1834,7 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.PlanLike", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.PlanLike", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.Plan", null)
                         .WithMany()
@@ -1849,7 +1849,7 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserBlock", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserBlock", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
                         .WithMany()
@@ -1864,7 +1864,7 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserFollow", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserFollow", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", null)
                         .WithMany()
@@ -1879,11 +1879,11 @@ namespace LocalList.API.NET.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("LocalList.API.NET.Features.Social.Entities.UserPublicProfile", b =>
+            modelBuilder.Entity("LocalList.API.NET.Shared.Data.Entities.UserPublicProfile", b =>
                 {
                     b.HasOne("LocalList.API.NET.Shared.Data.Entities.User", "User")
                         .WithOne()
-                        .HasForeignKey("LocalList.API.NET.Features.Social.Entities.UserPublicProfile", "UserId")
+                        .HasForeignKey("LocalList.API.NET.Shared.Data.Entities.UserPublicProfile", "UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 

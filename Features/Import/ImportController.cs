@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
+using LocalList.API.NET.Shared.AI;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Usage;
@@ -63,11 +64,9 @@ public sealed class DisableFormValueModelBindingAttribute : Attribute, IResource
 /// </summary>
 [ApiController]
 [Route("import")]
-[Authorize]
+[Authorize(AuthenticationSchemes = AuthSchemes.App)]
 public class ImportController : ControllerBase
 {
-    private const string TierPro = "pro";
-
     /// <summary>Cuota mensual de imports por usuario (mes natural UTC). Decisión de producto: 30/mes.</summary>
     public const int MonthlyLimit = 30;
 
@@ -83,11 +82,6 @@ public class ImportController : ControllerBase
     /// <summary>Margen de overhead multipart (boundaries + headers de la part) sobre MaxSizeBytes
     /// para el rechazo temprano por Content-Length.</summary>
     private const int MultipartOverheadBytes = 16 * 1024;
-
-    /// <summary>Longitud máxima de <c>creatorHandle</c> tras sanear (atribución de creador).</summary>
-    private const int MaxCreatorHandleLength = 64;
-
-    private static readonly string[] AllowedPlatforms = { "self", "tiktok", "instagram", "other" };
 
     private readonly VideoExtractionService _extractor;
     private readonly ImportMatchingService _matcher;
@@ -138,13 +132,10 @@ public class ImportController : ControllerBase
 
         // 2. Gate Plus — import es feature del catálogo Plus. Tier SIEMPRE fresco de DB (el claim
         //    del JWT vive 15 min y es forjable), mismo patrón que PlanGenerationGateService.
-        var tier = await _db.Users
-            .Where(u => u.Id == userId.Value)
-            .Select(u => u.Tier)
-            .FirstOrDefaultAsync(ct);
+        var tier = await TierGate.GetFreshTierAsync(_db, userId.Value, ct);
         if (tier is null)
             return Unauthorized(new { error = "Invalid token claims." });
-        if (!string.Equals(tier, TierPro, StringComparison.Ordinal))
+        if (!TierGate.IsPro(tier))
         {
             _logger.LogInformation("Import: denied, user {UserId} not Plus (tier={Tier})", userId, tier);
             return StatusCode(StatusCodes.Status403Forbidden, new { error = "import_requires_plus" });
@@ -164,8 +155,8 @@ public class ImportController : ControllerBase
         //    SIEMPRE pre-body — un multipart hostil no puede forzarnos a streamear 150 MB a disco
         //    para acabar en 403 (con los metadatos dentro del form, el orden de las parts lo
         //    decidía el cliente).
-        var normalizedPlatform = NormalizePlatform(platform);
-        var sanitizedHandle = SanitizeCreatorHandle(creatorHandle);
+        var normalizedPlatform = ImportAttribution.NormalizePlatform(platform);
+        var sanitizedHandle = ImportAttribution.SanitizeCreatorHandle(creatorHandle);
         if (!IsPlatformAllowed(normalizedPlatform))
             return StatusCode(StatusCodes.Status403Forbidden, new { error = "third_party_import_disabled" });
 
@@ -341,23 +332,6 @@ public class ImportController : ControllerBase
 
     private bool IsPlatformAllowed(string platform) =>
         string.Equals(platform, "self", StringComparison.Ordinal) || _options.ThirdPartyEnabled;
-
-    private static string NormalizePlatform(string? raw)
-    {
-        var p = (raw ?? string.Empty).Trim().ToLowerInvariant();
-        return AllowedPlatforms.Contains(p) ? p : "other";
-    }
-
-    /// <summary>Handle de creador saneado: quita control/ángulos, recorta, sin URLs. Atribución inerte.</summary>
-    private static string? SanitizeCreatorHandle(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        // Reutilizamos el mismo sanitizador de salida del slice Chat que usa el import (quita
-        // URLs, markdown/HTML, escapa ángulos): el handle acaba pintado en un plan.
-        var s = LocalList.API.NET.Features.Chat.Services.OutputSanitizer.Sanitize(raw).Trim();
-        if (s.Length > MaxCreatorHandleLength) s = s[..MaxCreatorHandleLength].TrimEnd();
-        return string.IsNullOrWhiteSpace(s) ? null : s;
-    }
 
     /// <summary>
     /// Copia <paramref name="source"/> en <paramref name="dest"/> abortando en cuanto se supera

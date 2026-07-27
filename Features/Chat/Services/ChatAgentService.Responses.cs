@@ -1,3 +1,4 @@
+using LocalList.API.NET.Shared.AI.Security;
 using System.Text.Json;
 using LocalList.API.NET.Features.Chat.I18n;
 using LocalList.API.NET.Shared.Data.Entities;
