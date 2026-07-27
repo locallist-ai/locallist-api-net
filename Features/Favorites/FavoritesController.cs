@@ -13,12 +13,12 @@ namespace LocalList.API.NET.Features.Favorites;
 /// <summary>
 /// Favoritos de sitios (F-BE del build-out post-1.0). v1 = solo <see cref="Place"/> (no planes).
 /// Todos los endpoints exigen auth AppScheme: un invitado recibe 401 (la app lo mapea a
-/// <c>signup_required</c>). El cap (50 free · ilimitado Plus) se lee con el tier FRESCO de DB
+/// <c>signup_required</c>). El cap (20 free · ilimitado Plus) se lee con el tier FRESCO de DB
 /// (patrón de #108: nunca del claim JWT, que vive 15 min y es forjable).
 ///
-/// ATOMICIDAD DEL CAP (TOCTOU): favoritar es un "insert condicional a que count &lt; 50", y el
+/// ATOMICIDAD DEL CAP (TOCTOU): favoritar es un "insert condicional a que count &lt; 20", y el
 /// count abarca MUCHAS filas (una por place), así que —a diferencia de <c>usage_counters</c>— no
-/// hay una única fila-contador cuyo row-lock sirva. Un <c>INSERT … SELECT WHERE (count) &lt; 50</c>
+/// hay una única fila-contador cuyo row-lock sirva. Un <c>INSERT … SELECT WHERE (count) &lt; 20</c>
 /// bajo READ COMMITTED puede sobrepasar: dos statements concurrentes evalúan el subquery sobre el
 /// snapshot pre-insert (49) y ambos insertan → 51. Para cerrarlo serializamos por usuario con un
 /// <c>pg_advisory_xact_lock</c> (se libera solo al COMMIT/ROLLBACK de la transacción): dentro del
@@ -31,7 +31,7 @@ namespace LocalList.API.NET.Features.Favorites;
 public class FavoritesController : ControllerBase
 {
     /// <summary>Cap de favoritos para tier free. Plus/pro = ilimitado.</summary>
-    public const int FreeFavoritesLimit = 50;
+    public const int FreeFavoritesLimit = 20;
 
     private readonly LocalListDbContext _db;
     private readonly TimeProvider _clock;
@@ -53,7 +53,7 @@ public class FavoritesController : ControllerBase
     /// <summary>
     /// Favorita un place. Idempotente: si ya estaba favoritado devuelve 200 sin duplicar. Place
     /// inexistente o no publicado → 404 opaco (no confirma existencia de borradores). Si el tier
-    /// es free y ya hay 50 favoritos de places PUBLICADOS (misma semántica que el GET: lo que
+    /// es free y ya hay 20 favoritos de places PUBLICADOS (misma semántica que el GET: lo que
     /// ves = lo que cuenta) → 403 estructurado <c>favorites_limit_reached</c> (familia
     /// <c>*_limit_reached</c> que la app mapea a upsell). Cap comprobado atómicamente (ver clase).
     /// </summary>
@@ -102,10 +102,10 @@ public class FavoritesController : ControllerBase
         {
             // El cap cuenta SOLO favoritos de places PUBLICADOS — la MISMA semántica que el
             // GET (decisión hub post-review): lo que ves = lo que cuenta. Sin este filtro, un
-            // free con places despublicados quedaba atascado (403 used:50 viendo total:40).
-            // Borde aceptado: si places despublicados se REPUBLICAN y el usuario supera 50
-            // visibles, no pasa nada — el siguiente PUT devuelve 403 hasta bajar de 50, y el
-            // GET sigue mostrando todos los publicados (puede ser >50).
+            // free con places despublicados quedaba atascado (403 used:20 viendo total:15).
+            // Borde aceptado: si places despublicados se REPUBLICAN y el usuario supera 20
+            // visibles, no pasa nada — el siguiente PUT devuelve 403 hasta bajar de 20, y el
+            // GET sigue mostrando todos los publicados (puede ser >20).
             var count = await _db.Favorites
                 .Where(f => f.UserId == userId.Value)
                 .Join(_db.Places.Where(p => p.Status == "published"),
@@ -217,7 +217,7 @@ public class FavoritesController : ControllerBase
     /// Lista ligera de los <c>placeId</c> favoritos del usuario, para que la app pinte los
     /// corazones sin traer los <see cref="PlaceDto"/> completos. Vía única elegida (frente a
     /// meterlos en <c>GET /account</c>): mantiene <c>/account</c> acotado y este endpoint barato.
-    /// Devuelve TODOS los ids (el cap de 50 mantiene el payload trivial); incluye favoritos de
+    /// Devuelve TODOS los ids (el cap de 20 mantiene el payload trivial); incluye favoritos de
     /// places que pudieran haberse despublicado, para que el estado del corazón sea consistente.
     /// </summary>
     [HttpGet("ids")]
