@@ -13,11 +13,14 @@ namespace LocalList.API.Tests.Features;
 /// entorno (incl. PROD) donde el override está ABIERTO para un conjunto EXACTO de cuentas internas.
 /// Container propio (config distinta del default, que tiene el flag off y el allowlist vacío).
 ///
-/// El allowlist inyectado incluye variantes a propósito para ejercitar el matching EXACTO:
-///   • <see cref="MixedCaseAllowlisted"/> — entrada con MAYÚS/minús mezclado; el usuario en DB va en
-///     minúsculas (<see cref="MixedCaseDbEmail"/>) → prueba el match case-insensitive.
-///   • <see cref="SpacedAllowlisted"/> — entrada CON espacios alrededor; el usuario en DB sin espacios
-///     (<see cref="SpacedDbEmail"/>) → prueba el trim.
+/// El match es EXACTO byte-a-byte (Ordinal, case-sensitive, SIN trim) para espejar la unicidad de
+/// <c>users.email</c> (varchar, case/whitespace-sensitive). El allowlist incluye bases con las que se
+/// ejercita el BLOCKER de bypass por variante:
+///   • <see cref="CaseBaseAllowlisted"/> — allowlisteado; una cuenta con SU MISMA caja pasa (200),
+///     pero <see cref="CaseVariantAttacker"/> (misma dirección, distinta CAJA — fila distinta en la
+///     DB case-sensitive) NO matchea → 404 (cierra el self-upgrade por <c>PABLO@…</c>).
+///   • <see cref="SpaceBaseAllowlisted"/> — allowlisteado; <see cref="SpaceVariantAttacker"/> (con un
+///     espacio inicial, fila distinta) NO matchea → 404 (cierra el bypass por espacios).
 /// Los demás emails del camino "permitido" son EXACTOS (uno por test → sin colisión con el índice
 /// único de <c>users.email</c>). Un email interno NO listado (<see cref="NotAllowlistedInternal"/>)
 /// se deja FUERA a propósito para probar que el gate es exacto, no por dominio.
@@ -32,13 +35,19 @@ public sealed class DevTierOverrideEnabledFixture : ApiFixture
     public const string AllowedResetClear = "resetclear@locallist.ai";
     public const string AllowedResetScope = "resetscope@locallist.ai";
 
-    // Match case-insensitive: el allowlist trae la forma con mayúsculas; el user en DB, minúsculas.
-    public const string MixedCaseAllowlisted = "MixedCase@LocalList.Ai";
-    public const string MixedCaseDbEmail = "mixedcase@locallist.ai";
+    // BLOCKER de caja: la base allowlisteada (minúsculas). El atacante registra la MISMA dirección en
+    // otra CAJA → fila distinta (users.email es case-sensitive) → NO matchea con Ordinal → 404.
+    public const string CaseBaseAllowlisted = "casebase@locallist.ai";
+    public const string CaseVariantAttacker = "CASEBASE@locallist.ai";
 
-    // Trim: el allowlist trae la forma CON espacios alrededor; el user en DB, sin espacios.
-    public const string SpacedAllowlisted = "  spaced@locallist.ai  ";
-    public const string SpacedDbEmail = "spaced@locallist.ai";
+    // BLOCKER de espacios: la base allowlisteada (sin espacios). El atacante registra con un espacio
+    // inicial → fila distinta (whitespace-sensitive) → NO matchea sin trim → 404.
+    public const string SpaceBaseAllowlisted = "spacebase@locallist.ai";
+    public const string SpaceVariantAttacker = " spacebase@locallist.ai";
+
+    // BLOCKER de caja sobre reset-quota (base propia para no compartir usuario con el flip test).
+    public const string ResetCaseBaseAllowlisted = "resetcasebase@locallist.ai";
+    public const string ResetCaseVariantAttacker = "RESETCASEBASE@locallist.ai";
 
     // Interno (@locallist.ai) pero deliberadamente AUSENTE del allowlist → debe dar 404 (prueba de
     // que el gate es EXACTO, no por dominio; es el objetivo de la mutación del check de allowlist).
@@ -56,7 +65,7 @@ public sealed class DevTierOverrideEnabledFixture : ApiFixture
             AllowedFlip, AllowedInvalidTier, AllowedMissingTier,
             AllowedIgnoreBodyCaller, AllowedIgnoreBodyVictim,
             AllowedResetClear, AllowedResetScope,
-            MixedCaseAllowlisted, SpacedAllowlisted,
+            CaseBaseAllowlisted, SpaceBaseAllowlisted, ResetCaseBaseAllowlisted,
         };
         for (var i = 0; i < allowlist.Length; i++)
             builder.UseSetting($"Dev:AllowedEmails:{i}", allowlist[i]);
@@ -177,13 +186,13 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task FlagOn_AllowlistedEmail_CaseInsensitive_Flips()
+    public async Task FlagOn_ExactSameCaseAllowlistedEmail_Flips()
     {
-        // El allowlist trae "MixedCase@LocalList.Ai"; el user en DB va en minúsculas. Match
-        // case-insensitive → 200 y flip. Mutación (quitar OrdinalIgnoreCase) → 404.
-        var uid = StableId(DevTierOverrideEnabledFixture.MixedCaseDbEmail);
+        // La cuenta con el email allowlisteado en su MISMA caja (Ordinal exact) → 200 y flip. Es el
+        // control positivo del BLOCKER: el fix cierra las variantes sin romper el match legítimo.
+        var uid = StableId(DevTierOverrideEnabledFixture.CaseBaseAllowlisted);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, DevTierOverrideEnabledFixture.MixedCaseDbEmail, tier: "free");
+            uid, DevTierOverrideEnabledFixture.CaseBaseAllowlisted, tier: "free");
 
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
@@ -191,17 +200,50 @@ public class AccountDevTierTests(DevTierOverrideEnabledFixture fixture)
     }
 
     [Fact]
-    public async Task FlagOn_AllowlistedEmail_Trimmed_Flips()
+    public async Task FlagOn_CaseVariantOfAllowlistedEmail_Returns404_NoFlip()
     {
-        // El allowlist trae "  spaced@locallist.ai  " (con espacios); el user en DB sin espacios.
-        // El gate hace trim en ambos lados → 200 y flip. Mutación (quitar el Trim) → 404.
-        var uid = StableId(DevTierOverrideEnabledFixture.SpacedDbEmail);
+        // BLOCKER: el allowlist trae "casebase@locallist.ai" (minúsculas). Un atacante registra la
+        // MISMA dirección en otra CAJA ("CASEBASE@locallist.ai") — como users.email es case-sensitive
+        // es una FILA DISTINTA, NO colisiona con el índice único, obtiene token AppScheme. El gate
+        // Ordinal NO lo matchea → 404, sin self-upgrade. MUTACIÓN: volver a OrdinalIgnoreCase → 200.
+        var uid = StableId(DevTierOverrideEnabledFixture.CaseVariantAttacker);
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
-            uid, DevTierOverrideEnabledFixture.SpacedDbEmail, tier: "free");
+            uid, DevTierOverrideEnabledFixture.CaseVariantAttacker, tier: "free");
 
         var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
-        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-        Assert.Equal("pro", await TierInDb(fixture, uid));
+        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+        Assert.Equal("free", await TierInDb(fixture, uid)); // sin efecto: bypass cerrado
+    }
+
+    [Fact]
+    public async Task FlagOn_WhitespaceVariantOfAllowlistedEmail_Returns404_NoFlip()
+    {
+        // Misma clase de bypass por espacios: el allowlist trae "spacebase@locallist.ai"; el atacante
+        // registra " spacebase@locallist.ai" (espacio inicial), fila distinta (whitespace-sensitive).
+        // El gate NO hace trim → no matchea → 404. MUTACIÓN: reintroducir Trim() → 200.
+        var uid = StableId(DevTierOverrideEnabledFixture.SpaceVariantAttacker);
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(
+            uid, DevTierOverrideEnabledFixture.SpaceVariantAttacker, tier: "free");
+
+        var res = await client.PostAsJsonAsync("/account/dev/tier", new { tier = "pro" });
+        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+        Assert.Equal("free", await TierInDb(fixture, uid));
+    }
+
+    [Fact]
+    public async Task ResetQuota_FlagOn_CaseVariantOfAllowlistedEmail_Returns404_NoDelete()
+    {
+        // El BLOCKER también sobre reset-quota (gates compartidos): el allowlist trae
+        // "resetcasebase@locallist.ai" pero el atacante registra "RESETCASEBASE@locallist.ai" (otra
+        // caja, fila distinta) → 404 y las cuotas NO se borran. MUTACIÓN: OrdinalIgnoreCase → borra.
+        var uid = StableId(DevTierOverrideEnabledFixture.ResetCaseVariantAttacker);
+        var client = await fixture.CreateAppAuthenticatedClientWithUser(
+            uid, DevTierOverrideEnabledFixture.ResetCaseVariantAttacker, tier: "free");
+        await SeedCounter(fixture, uid, PlanGenerationGateService.FeatureMonthly, 3);
+
+        var res = await client.PostAsJsonAsync("/account/dev/reset-quota", new { });
+        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
+        Assert.Equal(1, await CounterRows(fixture, uid)); // gate cortó antes del DELETE
     }
 
     [Fact]

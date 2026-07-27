@@ -89,8 +89,9 @@ public class AccountDevController : ControllerBase
             return (null, NotFound());
 
         // ── Gate 2: allowlist de email EXACTO (fuente de verdad = fila de DB). Segundo fail-closed:
-        // allowlist vacío (default) O email no listado → 404 opaco. Match exacto case-insensitive +
-        // trim; NO por dominio (el dominio era inerte: register no verifica buzón).
+        // allowlist vacío (default) O email no listado → 404 opaco. Match EXACTO byte-a-byte
+        // (Ordinal, case-sensitive, SIN trim); NO por dominio (el dominio era inerte: register no
+        // verifica buzón).
         if (!IsAllowedEmail(user.Email))
             return (null, NotFound());
 
@@ -98,17 +99,22 @@ public class AccountDevController : ControllerBase
     }
 
     /// <summary>
-    /// True solo si <paramref name="email"/> coincide EXACTAMENTE (case-insensitive, con trim en
-    /// ambos lados) con alguna entrada de <c>Dev:AllowedEmails</c>. Allowlist vacío → siempre false.
+    /// True solo si <paramref name="email"/> coincide EXACTAMENTE (<see cref="StringComparison.Ordinal"/>,
+    /// case-sensitive, SIN trim) con alguna entrada de <c>Dev:AllowedEmails</c>. La semántica DEBE
+    /// espejar la unicidad de <c>users.email</c> (varchar: case-sensitive + whitespace-sensitive):
+    /// solo así el email allowlisteado es INAPROPIABLE — ninguna otra cuenta puede tener ese email
+    /// EXACTO (lo tiene la cuenta interna real), y una variante de caja/espacios (<c>PABLO@…</c>,
+    /// <c> pablo@…</c>) crea una fila DISTINTA que NO matchea → 404. Comparar case-insensitive o con
+    /// trim reabriría el bypass (registrar una variante para colarse por el gate). Allowlist vacío →
+    /// siempre false.
     /// </summary>
     private bool IsAllowedEmail(string? email)
     {
-        if (string.IsNullOrWhiteSpace(email)) return false;
-        var candidate = email.Trim();
+        if (string.IsNullOrEmpty(email)) return false;
         foreach (var allowed in _devOptions.AllowedEmails)
         {
-            if (string.IsNullOrWhiteSpace(allowed)) continue;
-            if (string.Equals(allowed.Trim(), candidate, StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrEmpty(allowed)) continue;
+            if (string.Equals(allowed, email, StringComparison.Ordinal))
                 return true;
         }
         return false;

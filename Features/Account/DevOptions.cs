@@ -23,12 +23,14 @@ public sealed class DevOptions
     public bool TierOverrideEnabled { get; set; } = false;
 
     /// <summary>
-    /// Allowlist de emails EXACTOS (case-insensitive, con trim) autorizados a usar los endpoints dev.
-    /// Default VACÍO → segundo fail-closed: aunque el flag esté ON, un allowlist vacío deja el endpoint
-    /// en 404 para todos. Match EXACTO (no por dominio): el email allowlisteado pertenece a una cuenta
-    /// interna REAL — está tomado en <c>users.email</c> (índice único) y no hay endpoint de cambio de
-    /// email sin verificar, así que un atacante no puede apropiárselo. En Railway se rellena por índice:
-    /// <c>Dev__AllowedEmails__0=pablo@locallist.ai</c>.
+    /// Allowlist de emails EXACTOS autorizados a usar los endpoints dev. Match byte-a-byte
+    /// (<c>Ordinal</c>, case-sensitive, SIN trim) para ESPEJAR la unicidad de <c>users.email</c>
+    /// (varchar: case/whitespace-sensitive). Default VACÍO → segundo fail-closed: aunque el flag esté
+    /// ON, un allowlist vacío deja el endpoint en 404 para todos. El match exacto (no por dominio, no
+    /// case-insensitive) hace el email INAPROPIABLE: lo tiene la cuenta interna REAL (índice único) y
+    /// no hay endpoint de cambio de email sin verificar; una variante de caja/espacios crea otra fila
+    /// que NO matchea. En Railway se rellena por índice con el email EXACTO (misma caja) con el que la
+    /// cuenta interna está registrada: <c>Dev__AllowedEmails__0=pablo@locallist.ai</c>.
     /// </summary>
     public string[] AllowedEmails { get; set; } = Array.Empty<string>();
 }
