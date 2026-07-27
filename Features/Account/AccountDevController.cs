@@ -23,7 +23,8 @@ namespace LocalList.API.NET.Features.Account;
 /// EXACTOS. Orden:
 ///   1) Config <c>Dev:TierOverrideEnabled</c> (default FALSE). Off → 404.
 ///   2) El email del usuario autenticado (fila de DB resuelta por el <c>User.Id</c> del TOKEN, nunca
-///      del body) ∈ <c>Dev:AllowedEmails</c> con match EXACTO (case-insensitive + trim). Allowlist
+///      del body) ∈ <c>Dev:AllowedEmails</c> con match EXACTO byte-a-byte (<c>Ordinal</c>,
+///      case-sensitive, SIN trim — ver <see cref="IsAllowedEmail"/>). Allowlist
 ///      VACÍO (default) o email no listado → 404. Es match EXACTO, no por dominio: un email
 ///      allowlisteado pertenece a una cuenta interna REAL (tomado en <c>users.email</c>, índice
 ///      único) y NO hay endpoint de cambio de email sin verificar, así que un atacante no puede
@@ -100,12 +101,15 @@ public class AccountDevController : ControllerBase
 
     /// <summary>
     /// True solo si <paramref name="email"/> coincide EXACTAMENTE (<see cref="StringComparison.Ordinal"/>,
-    /// case-sensitive, SIN trim) con alguna entrada de <c>Dev:AllowedEmails</c>. La semántica DEBE
-    /// espejar la unicidad de <c>users.email</c> (varchar: case-sensitive + whitespace-sensitive):
-    /// solo así el email allowlisteado es INAPROPIABLE — ninguna otra cuenta puede tener ese email
-    /// EXACTO (lo tiene la cuenta interna real), y una variante de caja/espacios (<c>PABLO@…</c>,
-    /// <c> pablo@…</c>) crea una fila DISTINTA que NO matchea → 404. Comparar case-insensitive o con
-    /// trim reabriría el bypass (registrar una variante para colarse por el gate). Allowlist vacío →
+    /// case-sensitive + whitespace-sensitive, SIN trim) con alguna entrada de <c>Dev:AllowedEmails</c>.
+    /// El match estricto ESPEJA la unicidad de <c>users.email</c> (ahora <c>citext</c> + normalizado en
+    /// escritura): el email allowlisteado es INAPROPIABLE — lo posee la cuenta interna real y no hay
+    /// endpoint de cambio de email sin verificar. Es defensa-en-profundidad contra el self-upgrade por
+    /// variante: desde la higiene de email una variante de caja (<c>PABLO@…</c>) ya NO puede
+    /// materializarse como fila distinta (citext la colapsa) y una de espacios se normaliza en el
+    /// registro; el gate estricto SIGUE cubriendo el borde de datos LEGADOS sin normalizar (una fila
+    /// vieja en caja/espacios distintos NO matchea → 404). Comparar aquí case-insensitive o con trim
+    /// reabriría ese borde (una fila legada variante se colaría por el gate). Allowlist vacío →
     /// siempre false.
     /// </summary>
     private bool IsAllowedEmail(string? email)

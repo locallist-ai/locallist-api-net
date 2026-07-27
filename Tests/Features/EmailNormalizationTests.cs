@@ -7,9 +7,15 @@ namespace LocalList.API.Tests.Features;
 /// <summary>
 /// Higiene de email: la normalización (lower+trim en TODA escritura/comparación) + el esquema
 /// citext (unicidad e igualdad case-insensitive) impiden cuentas duplicadas por variante de caja
-/// o espacios (Pablo@ vs pablo@ vs " pablo@ "). Auth es sensible → cobertura por MUTACIÓN:
-///  - quitar la normalización del write → cae DupCaseInsensitive_Register o StoredEmail_IsCanonical.
-///  - quitar el ALTER citext         → cae Schema_CaseVariants_ViolateUnique o Sso_LinksLegacyMixedCase.
+/// o espacios (Pablo@ vs pablo@ vs " pablo@ "). Son dos capas INDEPENDIENTES (defensa en
+/// profundidad); la cobertura por MUTACIÓN las separa a propósito:
+///  - quitar la normalización del write → cae StoredEmail_IsCanonical o WithSurroundingSpaces
+///    (el valor almacenado deja de ser lower/trim). OJO: DupCaseInsensitive_Register NO cae —
+///    citext ya hace el dup-check case-insensitive por su cuenta, así que ese test verifica la
+///    unicidad de esquema, no la normalización.
+///  - quitar el ALTER citext → cae Schema_CaseVariants_ViolateUnique (sin la unicidad
+///    case-insensitive) o Sso_LinksLegacyMixedCase (el link por email de una fila legada en caja
+///    mixta deja de matchear → crea duplicado).
 /// </summary>
 public class EmailNormalizationTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
