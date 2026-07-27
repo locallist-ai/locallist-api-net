@@ -127,14 +127,18 @@ public sealed class VideoExtractionService
                 // Camino IMAGEN: el bloque de duración (y con él el cap legal de 600s) NO se ejecuta
                 // porque una imagen no tiene duración. Pero `isImage` se decidió por el MIME
                 // DECLARADO por el caller en el multipart, 100% spoofeable. La metadata AUTORITATIVA
-                // del File API (la MISMA de la que sale file.DurationSec en el camino vídeo) delata un
-                // vídeo disfrazado de imagen: si reporta una duración O un mimeType `video/*`, es un
-                // vídeo que por esta vía se colaría SIN el cap legal → RECHAZO. Espejo exacto del
-                // re-check del tamaño autoritativo de abajo: fallo PRE-facturación (no llega a
-                // generateContent, sin `Billed`) → el endpoint reembolsa la cuota, sin gasto Gemini.
+                // del File API (la MISMA de la que sale file.DurationSec en el camino vídeo) es la
+                // única verdad: para procesar por la vía imagen EXIGIMOS que sea IMAGEN de verdad —
+                // mime autoritativo `image/*` Y SIN duración. Es un ALLOWLIST fail-CLOSED (simétrico
+                // con el fail-closed del vídeo ante "sin duración autoritativa"), no un blocklist:
+                // así un mime ambiguo (`application/octet-stream`, vacío) o `video/*`, o cualquier
+                // duración presente → RECHAZO, sin ventana fail-OPEN. Los 4 mimes de imagen
+                // permitidos empiezan por `image/`, así que NO falsa-rechaza ninguna imagen honesta.
+                // Fallo PRE-facturación (no llega a generateContent, sin `Billed`) → el endpoint
+                // reembolsa la cuota, sin gasto Gemini. Espejo del re-check del tamaño autoritativo.
                 var authoritativeMime = file.MimeType.Trim().ToLowerInvariant();
                 if (file.DurationSec is not null ||
-                    authoritativeMime.StartsWith("video/", StringComparison.Ordinal))
+                    !authoritativeMime.StartsWith("image/", StringComparison.Ordinal))
                 {
                     PersistMetric(platform, mimeType, sizeBytes, file.DurationSec, caption, result: null,
                         diag: null, errorCode: "media_type_mismatch",

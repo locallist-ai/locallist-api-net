@@ -482,4 +482,33 @@ public class VideoExtractionTests(ApiFixture fixture) : IClassFixture<ApiFixture
         var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
         Assert.Equal("media_type_mismatch", metric.ErrorCode);
     }
+
+    // ── SPOOF-3. Mime autoritativo AMBIGUO (ni image/ ni video/) SIN duración → RECHAZO. ──
+    // El check es un ALLOWLIST fail-CLOSED: procesar por la vía imagen EXIGE mime image/*. Un
+    // application/octet-stream (o mime vacío) con duración null NO cae en el blocklist video/*
+    // pero tampoco es imagen → se rechaza en vez de fail-OPEN (procesar saltándose el cap legal).
+    [Fact]
+    public async Task Extraction_ImageDeclared_ButAuthoritativeAmbiguousMime_Rejected()
+    {
+        await ClearMetricsAsync();
+        fixture.FakeVideoImport.ActiveMimeType = "application/octet-stream"; // ni image/ ni video/
+        fixture.FakeVideoImport.OmitDurationOnActive = true;                 // y SIN duración
+
+        var svc = ResolveService(out var scope);
+        MediaTypeMismatchException ex;
+        using (scope)
+        {
+            ex = await Assert.ThrowsAsync<MediaTypeMismatchException>(() =>
+                svc.ExtractAsync(Bytes(), 1024, "image/jpeg", "self", caption: null, CancellationToken.None));
+        }
+
+        Assert.Equal("application/octet-stream", ex.AuthoritativeMime);
+        Assert.Null(ex.AuthoritativeDurationSec);
+        Assert.False(fixture.FakeVideoImport.GenerateContentCalled); // pre-facturación, no fail-OPEN
+        Assert.Contains("files/test-video-abc", fixture.FakeVideoImport.DeleteCalledFor);
+
+        var db = fixture.GetDbContext();
+        var metric = await db.VideoImportMetrics.OrderByDescending(m => m.CreatedAt).FirstAsync();
+        Assert.Equal("media_type_mismatch", metric.ErrorCode);
+    }
 }
