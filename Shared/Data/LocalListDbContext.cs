@@ -120,6 +120,13 @@ public class LocalListDbContext : DbContext
         // Column default 'private' (seguro); el CLR default de la entidad es 'public' (compat con
         // el comportamiento historico is_public=true) y EF siempre envia el valor explicito.
         modelBuilder.Entity<Plan>().Property(p => p.Visibility).HasDefaultValue("private");
+        // Social S1 (MINOR d): CHECK de dominio de visibility. La app y los setters ya solo
+        // escriben estos tres valores; el CHECK lo garantiza a nivel de fila (defensa en
+        // profundidad contra un INSERT/UPDATE crudo que dejaría un plan en un estado que
+        // PlanAccessService no sabe autorizar → deny-by-default silencioso).
+        modelBuilder.Entity<Plan>()
+            .ToTable(t => t.HasCheckConstraint(
+                "ck_plans_visibility_domain", "visibility IN ('private', 'unlisted', 'public')"));
         modelBuilder.Entity<Plan>().HasIndex(p => p.ShareToken).IsUnique();
         // Feed: planes publicos ordenados por publicacion (published_at DESC).
         modelBuilder.Entity<Plan>().HasIndex(p => new { p.Visibility, p.PublishedAt }).IsDescending(false, true);
@@ -435,6 +442,11 @@ public class LocalListDbContext : DbContext
         // ── UserBlock ──
         modelBuilder.Entity<UserBlock>()
             .HasKey(b => new { b.BlockerId, b.BlockedId });
+        // Social S1 (MINOR c): CHECK anti-self-block. Un usuario no puede bloquearse a sí mismo
+        // (fila sin sentido que además haría que PlanAccessService negara al owner el acceso a su
+        // propio plan si el owner==blocker==blocked). Espejo de ck_user_follows_no_self.
+        modelBuilder.Entity<UserBlock>()
+            .ToTable(t => t.HasCheckConstraint("ck_user_blocks_no_self", "blocker_id <> blocked_id"));
         modelBuilder.Entity<UserBlock>()
             .HasOne<User>()
             .WithMany()

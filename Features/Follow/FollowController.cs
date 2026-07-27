@@ -103,6 +103,18 @@ public class FollowController : ControllerBase
         if (session == null)
             return Ok(new { session = (object?)null });
 
+        // Social S1 (MINOR b): re-chequea el acceso al plan EN CADA read. El follow se inició con
+        // CanView (IDOR #116), pero el estado pudo cambiar después: el plan pasó a private, el
+        // owner lo borró/despublicó, o el owner bloqueó al follower. Cualquiera de esas revoca el
+        // follow en curso — no seguimos sirviendo el itinerario. 403 estructurado (la sesión existe
+        // y es del user; lo revocado es el acceso al plan subyacente), no 404: el follower ya sabía
+        // que el plan existía, no filtramos existencia nueva.
+        if (!(await _access.GetAccessAsync(session.PlanId, userId.Value, ct)).CanView)
+        {
+            _logger.LogInformation("Follow session {SessionId}: plan {PlanId} access revoked mid-follow for user {UserId}", session.Id, session.PlanId, userId);
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "plan_access_revoked" });
+        }
+
         var currentDayStops = await _db.PlanStops.AsNoTracking()
             .Include(ps => ps.Place)
             .Where(ps => ps.PlanId == session.PlanId && ps.DayNumber == session.CurrentDayIndex)
@@ -151,8 +163,10 @@ public class FollowController : ControllerBase
     [HttpPatch("{id:guid}/next")]
     public async Task<IActionResult> AdvanceToNextStop(Guid id, CancellationToken ct)
     {
-        var updated = await AdvanceSessionInternal(id, ct);
-        if (updated == null) return NotFound(new { error = "Session not found or not active" });
+        var (session, revoked) = await LoadActiveWithAccessAsync(id, ct);
+        if (session == null) return NotFound(new { error = "Session not found or not active" });
+        if (revoked) return StatusCode(StatusCodes.Status403Forbidden, new { error = "plan_access_revoked" });
+        var updated = await AdvanceSessionInternal(session, ct);
         _logger.LogInformation("Follow session {SessionId}: {Action}", id, "next");
         return Ok(updated);
     }
@@ -161,8 +175,10 @@ public class FollowController : ControllerBase
     [HttpPatch("{id:guid}/skip")]
     public async Task<IActionResult> SkipStop(Guid id, CancellationToken ct)
     {
-        var updated = await AdvanceSessionInternal(id, ct);
-        if (updated == null) return NotFound(new { error = "Session not found or not active" });
+        var (session, revoked) = await LoadActiveWithAccessAsync(id, ct);
+        if (session == null) return NotFound(new { error = "Session not found or not active" });
+        if (revoked) return StatusCode(StatusCodes.Status403Forbidden, new { error = "plan_access_revoked" });
+        var updated = await AdvanceSessionInternal(session, ct);
         _logger.LogInformation("Follow session {SessionId}: {Action}", id, "skip");
         return Ok(updated);
     }
@@ -220,6 +236,10 @@ public class FollowController : ControllerBase
         return await User.GetUserIdAsync(_db, ct);
     }
 
+    // Nota S1 (MINOR b): pause/complete NO re-chequean el acceso al plan a propósito. No sirven
+    // contenido del plan (solo cambian el estado de la sesión) y un follower SIEMPRE debe poder
+    // pausar/terminar/abandonar su propia sesión aunque el plan haya dejado de ser accesible. La
+    // fuga de contenido se cierra en los read-paths (GetActiveSession, next, skip).
     private async Task<FollowSession?> GetSessionForUpdate(Guid sessionId, CancellationToken ct)
     {
         var userId = await GetUserIdAsync(ct);
@@ -230,17 +250,30 @@ public class FollowController : ControllerBase
             .FirstOrDefaultAsync(ct);
     }
 
-    private async Task<FollowSession?> AdvanceSessionInternal(Guid sessionId, CancellationToken ct)
+    /// <summary>
+    /// Social S1 (MINOR b): carga la sesión activa del user y re-chequea el acceso al plan.
+    /// Devuelve (null, _) si no hay sesión activa con ese id para el user; (session, true) si el
+    /// acceso al plan fue revocado tras iniciar el follow (plan→private, borrado/despublicado,
+    /// bloqueo owner↔follower); (session, false) si sigue accesible. La sesión vuelve TRACKED para
+    /// que <see cref="AdvanceSessionInternal"/> pueda mutarla.
+    /// </summary>
+    private async Task<(FollowSession? session, bool accessRevoked)> LoadActiveWithAccessAsync(Guid sessionId, CancellationToken ct)
     {
         var userId = await GetUserIdAsync(ct);
-        if (userId == null) return null;
+        if (userId == null) return (null, false);
 
         var session = await _db.FollowSessions
             .Where(fs => fs.Id == sessionId && fs.UserId == userId.Value && fs.Status == "active")
             .FirstOrDefaultAsync(ct);
 
-        if (session == null) return null;
+        if (session == null) return (null, false);
 
+        var revoked = !(await _access.GetAccessAsync(session.PlanId, userId.Value, ct)).CanView;
+        return (session, revoked);
+    }
+
+    private async Task<FollowSession?> AdvanceSessionInternal(FollowSession session, CancellationToken ct)
+    {
         var dayStopsCount = await _db.PlanStops
             .Where(ps => ps.PlanId == session.PlanId && ps.DayNumber == session.CurrentDayIndex)
             .CountAsync(ct);
@@ -261,7 +294,7 @@ public class FollowController : ControllerBase
                 session.CompletedAt = _clock.GetUtcNow();
                 session.LastActiveAt = _clock.GetUtcNow();
                 await _db.SaveChangesAsync(ct);
-                _logger.LogInformation("Follow session {SessionId}: auto-completed (end of plan)", sessionId);
+                _logger.LogInformation("Follow session {SessionId}: auto-completed (end of plan)", session.Id);
                 return session;
             }
 
