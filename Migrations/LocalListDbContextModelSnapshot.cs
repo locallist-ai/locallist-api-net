@@ -84,6 +84,21 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("app_user_id");
 
+                    b.Property<string>("CancelReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("cancel_reason");
+
+                    b.Property<string>("CountryCode")
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)")
+                        .HasColumnName("country_code");
+
+                    b.Property<string>("Currency")
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)")
+                        .HasColumnName("currency");
+
                     b.Property<long>("EventTimestampMs")
                         .HasColumnType("bigint")
                         .HasColumnName("event_timestamp_ms");
@@ -94,9 +109,33 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("event_type");
 
+                    b.Property<bool?>("IsTrialConversion")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_trial_conversion");
+
+                    b.Property<string>("PeriodType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("period_type");
+
+                    b.Property<decimal?>("Price")
+                        .HasPrecision(12, 4)
+                        .HasColumnType("numeric(12,4)")
+                        .HasColumnName("price");
+
+                    b.Property<decimal?>("PriceInPurchasedCurrency")
+                        .HasPrecision(12, 4)
+                        .HasColumnType("numeric(12,4)")
+                        .HasColumnName("price_in_purchased_currency");
+
                     b.Property<DateTimeOffset>("ProcessedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("processed_at");
+
+                    b.Property<string>("ProductId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("product_id");
 
                     b.Property<string>("RcEventId")
                         .IsRequired()
@@ -104,11 +143,18 @@ namespace LocalList.API.NET.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("rc_event_id");
 
+                    b.Property<string>("Store")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("store");
+
                     b.Property<Guid?>("UserId")
                         .HasColumnType("uuid")
                         .HasColumnName("user_id");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("EventTimestampMs");
 
                     b.HasIndex("RcEventId")
                         .IsUnique();

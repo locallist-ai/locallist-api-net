@@ -6,75 +6,104 @@ namespace LocalList.API.Tests.Features;
 
 /// <summary>
 /// Tests for GET /admin/billing/metrics — the read-only admin aggregation over billing_events.
-/// Each aggregate test scopes its assertions to a UNIQUE from/to window so that rows inserted by
-/// other tests (e.g. the webhook tests) against the shared Postgres container cannot pollute the
-/// counts. billing_events.user_id has NO foreign key (see the migration), so UserId can be seeded
-/// with arbitrary guids without materialising real users.
+/// Deterministic isolation: each aggregate test seeds into its OWN fixed far-past YEAR window and
+/// asserts within it (windows never overlap, and no other test writes billing_events in those
+/// years), so exact-equals assertions can't flake on a foreign row. billing_events.user_id has NO
+/// foreign key (see the migration), so UserId is seeded with arbitrary guids.
 /// </summary>
 public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
-    // ── Aggregates + breakdown (n = 9, non-vacuous: asserts actual values) ────
+    private const string ProductMonthly = "com.locallist.plus.monthly";
+    private const string ProductYearly = "com.locallist.plus.yearly";
+
+    // ── Aggregates + enriched segments (n = 9, exact values, deterministic) ───
 
     [Fact]
-    public async Task Metrics_AggregatesEventTypes_AndSegments()
+    public async Task Metrics_AggregatesAllSegments_WithExactValues()
     {
-        // A unique far-past window isolates these 9 seeds from any webhook-inserted rows (~now).
-        var day1 = new DateTimeOffset(2006, 3, 1, 0, 0, 0, TimeSpan.Zero)
-            .AddDays(Random.Shared.Next(0, 3000)).AddHours(10);
-        var day2 = day1.AddDays(1); // a second UTC day for the time series
+        // Fixed, test-private window (year 2006). day2 gives a 2-point time series.
+        var day1 = new DateTimeOffset(2006, 3, 10, 10, 0, 0, TimeSpan.Zero);
+        var day2 = day1.AddDays(1);
 
         var userA = Guid.NewGuid();
         var userB = Guid.NewGuid();
         var userC = Guid.NewGuid();
 
-        // day1: 5 events
-        await SeedEvent("INITIAL_PURCHASE", userA, day1);
-        await SeedEvent("INITIAL_PURCHASE", userB, day1);
-        await SeedEvent("RENEWAL", userA, day1);
-        await SeedEvent("CANCELLATION", userA, day1);
-        await SeedEvent("TRANSFER", null, day1); // unresolved (no mapped user)
-        // day2: 4 events
-        await SeedEvent("RENEWAL", userB, day2);
-        await SeedEvent("EXPIRATION", userC, day2);
-        await SeedEvent("PRODUCT_CHANGE", userB, day2);
-        await SeedEvent("UNCANCELLATION", userC, day2);
+        // day1 (5 events)
+        await Seed("INITIAL_PURCHASE", userA, day1,
+            product: ProductMonthly, period: "TRIAL", country: "US", price: 0m, currency: "USD", priceLocal: 0m, store: "APP_STORE");
+        await Seed("INITIAL_PURCHASE", userB, day1,
+            product: ProductYearly, period: "NORMAL", country: "US", price: 39.99m, currency: "USD", priceLocal: 39.99m, store: "APP_STORE");
+        await Seed("INITIAL_PURCHASE", userC, day1,
+            product: ProductMonthly, period: "TRIAL", country: "ES", price: 0m, currency: "EUR", priceLocal: 0m, store: "APP_STORE");
+        await Seed("RENEWAL", userA, day1,
+            product: ProductMonthly, period: "NORMAL", country: "US", price: 9.99m, currency: "USD", priceLocal: 9.99m, store: "APP_STORE", isTrialConversion: true);
+        await Seed("CANCELLATION", userB, day1,
+            product: ProductYearly, country: "US", cancelReason: "UNSUBSCRIBE");
+        // day2 (4 events)
+        await Seed("RENEWAL", userB, day2,
+            product: ProductYearly, period: "NORMAL", country: "US", price: 39.99m, currency: "USD", priceLocal: 39.99m, store: "APP_STORE");
+        await Seed("CANCELLATION", userC, day2,
+            product: ProductMonthly, country: "ES", cancelReason: "CUSTOMER_SUPPORT");
+        await Seed("EXPIRATION", userC, day2, product: ProductMonthly, country: "ES");
+        await Seed("TRANSFER", null, day2); // unresolved (no mapped user, no product/country)
 
-        var from = day1.AddDays(-1);
-        var to = day2.AddDays(1);
         var client = CreateAdminClient();
         var res = await client.GetAsync(
-            $"/admin/billing/metrics?from={Enc(from)}&to={Enc(to)}");
+            $"/admin/billing/metrics?from={Enc(day1.AddDays(-1))}&to={Enc(day2.AddDays(1))}");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var b = await res.Content.ReadFromJsonAsync<JsonElement>();
 
-        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
+        // Scalar counts.
+        Assert.Equal(9, b.GetProperty("totalEvents").GetInt32());
+        Assert.Equal(3, b.GetProperty("newSubscriptions").GetInt32());
+        Assert.Equal(2, b.GetProperty("trialStarts").GetInt32());          // A, C
+        Assert.Equal(1, b.GetProperty("directPaidPurchases").GetInt32());  // B
+        Assert.Equal(1, b.GetProperty("paidConversions").GetInt32());      // A's RENEWAL is_trial_conversion
+        Assert.Equal(2, b.GetProperty("renewals").GetInt32());
+        Assert.Equal(2, b.GetProperty("cancellations").GetInt32());
+        Assert.Equal(1, b.GetProperty("expirations").GetInt32());
+        Assert.Equal(1, b.GetProperty("transfers").GetInt32());
+        Assert.Equal(1, b.GetProperty("unresolvedEvents").GetInt32());
+        Assert.Equal(3, b.GetProperty("uniqueUsers").GetInt32());
 
-        Assert.Equal(9, body.GetProperty("totalEvents").GetInt32());
-        Assert.Equal(2, body.GetProperty("newSubscriptions").GetInt32());   // 2 INITIAL_PURCHASE
-        Assert.Equal(2, body.GetProperty("renewals").GetInt32());            // 2 RENEWAL
-        Assert.Equal(1, body.GetProperty("cancellations").GetInt32());       // 1 CANCELLATION
-        Assert.Equal(1, body.GetProperty("uncancellations").GetInt32());     // 1 UNCANCELLATION
-        Assert.Equal(1, body.GetProperty("expirations").GetInt32());         // 1 EXPIRATION
-        Assert.Equal(1, body.GetProperty("productChanges").GetInt32());      // 1 PRODUCT_CHANGE
-        Assert.Equal(1, body.GetProperty("transfers").GetInt32());           // 1 TRANSFER
-        Assert.Equal(1, body.GetProperty("unresolvedEvents").GetInt32());    // the null-user TRANSFER
-        Assert.Equal(3, body.GetProperty("uniqueUsers").GetInt32());         // A, B, C
+        // Revenue: sum of USD price = 39.99 + 9.99 + 39.99 = 89.97 (trials/others are 0/null).
+        Assert.Equal(89.97m, b.GetProperty("revenueUsd").GetDecimal());
 
-        // Authoritative full breakdown by event_type.
-        var byType = body.GetProperty("byEventType");
-        Assert.Equal(2, byType.GetProperty("INITIAL_PURCHASE").GetInt32());
+        // Plan mix by product_id (TRANSFER has null product → excluded).
+        var byProduct = b.GetProperty("byProductId");
+        Assert.Equal(5, byProduct.GetProperty(ProductMonthly).GetInt32()); // 1,3,4,7,8
+        Assert.Equal(3, byProduct.GetProperty(ProductYearly).GetInt32());  // 2,5,6
+
+        // Country breakdown.
+        var byCountry = b.GetProperty("byCountry");
+        Assert.Equal(5, byCountry.GetProperty("US").GetInt32());
+        Assert.Equal(3, byCountry.GetProperty("ES").GetInt32());
+
+        // Refund vs voluntary churn (cancel_reason).
+        var byCancel = b.GetProperty("byCancelReason");
+        Assert.Equal(1, byCancel.GetProperty("UNSUBSCRIBE").GetInt32());
+        Assert.Equal(1, byCancel.GetProperty("CUSTOMER_SUPPORT").GetInt32());
+
+        // Localized revenue per currency (never summed across currencies).
+        var byCur = b.GetProperty("revenueByCurrency");
+        Assert.Equal(89.97m, byCur.GetProperty("USD").GetDecimal());
+        Assert.Equal(0m, byCur.GetProperty("EUR").GetDecimal()); // only a 0-priced trial in EUR
+
+        // Full event-type breakdown.
+        var byType = b.GetProperty("byEventType");
+        Assert.Equal(3, byType.GetProperty("INITIAL_PURCHASE").GetInt32());
         Assert.Equal(2, byType.GetProperty("RENEWAL").GetInt32());
-        Assert.Equal(1, byType.GetProperty("CANCELLATION").GetInt32());
-        Assert.Equal(1, byType.GetProperty("PRODUCT_CHANGE").GetInt32());
+        Assert.Equal(2, byType.GetProperty("CANCELLATION").GetInt32());
 
-        // Time series: two UTC days, summing to the total.
-        var daily = body.GetProperty("daily").EnumerateArray().ToList();
+        // Daily time series: 2 UTC days, 5 then 4.
+        var daily = b.GetProperty("daily").EnumerateArray().ToList();
         Assert.Equal(2, daily.Count);
         Assert.Equal(9, daily.Sum(d => d.GetProperty("count").GetInt32()));
-        Assert.Equal(5, daily[0].GetProperty("count").GetInt32()); // day1 (ascending order)
-        Assert.Equal(4, daily[1].GetProperty("count").GetInt32()); // day2
-        Assert.Equal(
-            DateOnly.FromDateTime(day1.UtcDateTime).ToString("yyyy-MM-dd"),
-            daily[0].GetProperty("date").GetString());
+        Assert.Equal("2006-03-10", daily[0].GetProperty("date").GetString());
+        Assert.Equal(5, daily[0].GetProperty("count").GetInt32());
+        Assert.Equal("2006-03-11", daily[1].GetProperty("date").GetString());
+        Assert.Equal(4, daily[1].GetProperty("count").GetInt32());
     }
 
     // ── Empty table → zeros + 200 ─────────────────────────────────────────────
@@ -82,21 +111,24 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
     [Fact]
     public async Task Metrics_Empty_ReturnsZeroes()
     {
-        // A future window is guaranteed to contain no billing events.
-        var from = DateTimeOffset.UtcNow.AddYears(20);
+        var from = new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var client = CreateAdminClient();
         var res = await client.GetAsync($"/admin/billing/metrics?from={Enc(from)}");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
 
-        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(0, body.GetProperty("totalEvents").GetInt32());
-        Assert.Equal(0, body.GetProperty("newSubscriptions").GetInt32());
-        Assert.Equal(0, body.GetProperty("renewals").GetInt32());
-        Assert.Equal(0, body.GetProperty("cancellations").GetInt32());
-        Assert.Equal(0, body.GetProperty("unresolvedEvents").GetInt32());
-        Assert.Equal(0, body.GetProperty("uniqueUsers").GetInt32());
-        Assert.Empty(body.GetProperty("byEventType").EnumerateObject().ToList());
-        Assert.Empty(body.GetProperty("daily").EnumerateArray().ToList());
+        var b = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, b.GetProperty("totalEvents").GetInt32());
+        Assert.Equal(0, b.GetProperty("newSubscriptions").GetInt32());
+        Assert.Equal(0, b.GetProperty("trialStarts").GetInt32());
+        Assert.Equal(0, b.GetProperty("paidConversions").GetInt32());
+        Assert.Equal(0m, b.GetProperty("revenueUsd").GetDecimal());
+        Assert.Equal(0, b.GetProperty("uniqueUsers").GetInt32());
+        Assert.Empty(b.GetProperty("byEventType").EnumerateObject().ToList());
+        Assert.Empty(b.GetProperty("byProductId").EnumerateObject().ToList());
+        Assert.Empty(b.GetProperty("byCountry").EnumerateObject().ToList());
+        Assert.Empty(b.GetProperty("byCancelReason").EnumerateObject().ToList());
+        Assert.Empty(b.GetProperty("revenueByCurrency").EnumerateObject().ToList());
+        Assert.Empty(b.GetProperty("daily").EnumerateArray().ToList());
     }
 
     // ── Range filter excludes rows outside [from,to] ──────────────────────────
@@ -104,31 +136,27 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
     [Fact]
     public async Task Metrics_RangeFilter_ExcludesRowsOutsideWindow()
     {
-        var inside = new DateTimeOffset(2007, 6, 1, 12, 0, 0, TimeSpan.Zero)
-            .AddDays(Random.Shared.Next(0, 3000));
-        var beforeWindow = inside.AddDays(-30);
-        var afterWindow = inside.AddDays(30);
+        var inside = new DateTimeOffset(2009, 6, 15, 12, 0, 0, TimeSpan.Zero);
         var user = Guid.NewGuid();
 
-        await SeedEvent("INITIAL_PURCHASE", user, inside);
-        await SeedEvent("RENEWAL", user, beforeWindow); // must be excluded
-        await SeedEvent("CANCELLATION", user, afterWindow); // must be excluded
+        await Seed("INITIAL_PURCHASE", user, inside, product: ProductMonthly, period: "NORMAL", country: "US", price: 9.99m, currency: "USD", priceLocal: 9.99m);
+        await Seed("RENEWAL", user, inside.AddDays(-30));     // excluded
+        await Seed("CANCELLATION", user, inside.AddDays(30)); // excluded
 
-        var from = inside.AddDays(-1);
-        var to = inside.AddDays(1);
         var client = CreateAdminClient();
         var res = await client.GetAsync(
-            $"/admin/billing/metrics?from={Enc(from)}&to={Enc(to)}");
+            $"/admin/billing/metrics?from={Enc(inside.AddDays(-1))}&to={Enc(inside.AddDays(1))}");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
 
-        var body = await res.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(1, body.GetProperty("totalEvents").GetInt32());
-        Assert.Equal(1, body.GetProperty("newSubscriptions").GetInt32());
-        Assert.Equal(0, body.GetProperty("renewals").GetInt32());       // before-window excluded
-        Assert.Equal(0, body.GetProperty("cancellations").GetInt32());  // after-window excluded
+        var b = await res.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, b.GetProperty("totalEvents").GetInt32());
+        Assert.Equal(1, b.GetProperty("newSubscriptions").GetInt32());
+        Assert.Equal(0, b.GetProperty("renewals").GetInt32());       // before-window excluded
+        Assert.Equal(0, b.GetProperty("cancellations").GetInt32());  // after-window excluded
+        Assert.Equal(9.99m, b.GetProperty("revenueUsd").GetDecimal());
     }
 
-    // ── Auth: anonymous rejected ──────────────────────────────────────────────
+    // ── Auth: anonymous rejected (401) ────────────────────────────────────────
 
     [Fact]
     public async Task Metrics_Anonymous_Rejected()
@@ -138,29 +166,31 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
     }
 
-    // ── Auth: app HS256 (AppScheme) token rejected — NOT the admin scheme ─────
+    // ── Auth: app HS256 (AppScheme) token rejected at the admin gate (403) ────
 
     [Fact]
-    public async Task Metrics_AppSchemeToken_Rejected()
+    public async Task Metrics_AppSchemeToken_ForbiddenNot401()
     {
-        // A valid app-scheme (HS256) token authenticates as a normal user but is NOT an admin
-        // caller, so the FirebaseScheme admin gate rejects it (authenticated → 403 Forbidden).
-        // This proves the endpoint is behind the admin RS256 gate, not the app HS256 scheme.
+        // A valid app-scheme (HS256) token AUTHENTICATES as a normal user; the FirebaseScheme admin
+        // gate then rejects it with 403 (authenticated, but not an admin caller). Pinned to exactly
+        // Forbidden: a 401 here would mean AppScheme stopped authenticating — a regression this test
+        // must catch, not hide. Proves the endpoint is behind the admin RS256 gate, not app HS256.
         var userId = Guid.NewGuid();
         var client = await fixture.CreateAppAuthenticatedClientWithUser(
             userId, $"app-billing-{userId:N}@test.com");
 
         var res = await client.GetAsync("/admin/billing/metrics");
 
-        Assert.NotEqual(HttpStatusCode.OK, res.StatusCode);
-        Assert.True(
-            res.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized,
-            $"expected app token to be rejected, got {(int)res.StatusCode} {res.StatusCode}");
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private async Task SeedEvent(string eventType, Guid? userId, DateTimeOffset when)
+    private async Task Seed(
+        string eventType, Guid? userId, DateTimeOffset when,
+        string? product = null, string? period = null, string? country = null,
+        decimal? price = null, string? currency = null, decimal? priceLocal = null,
+        string? store = null, string? cancelReason = null, bool? isTrialConversion = null)
     {
         var db = fixture.GetDbContext();
         db.BillingEvents.Add(new BillingEvent
@@ -172,6 +202,15 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
             EventType = eventType,
             EventTimestampMs = when.ToUnixTimeMilliseconds(),
             ProcessedAt = DateTimeOffset.UtcNow,
+            ProductId = product,
+            PeriodType = period,
+            CountryCode = country,
+            Price = price,
+            Currency = currency,
+            PriceInPurchasedCurrency = priceLocal,
+            Store = store,
+            CancelReason = cancelReason,
+            IsTrialConversion = isTrialConversion,
         });
         await db.SaveChangesAsync(); // per-row SaveChanges as instructed
     }
@@ -180,18 +219,11 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
 
     private HttpClient CreateAdminClient()
     {
+        // The admin gate is 100% token-claim based (IsAdminCaller: Firebase RS256 issuer +
+        // @locallist.ai email + email_verified). NO DB user row is consulted — so we deliberately
+        // do NOT seed a User{Role="admin"} here; the Role column grants nothing on this path.
         var adminEmail = $"admin-billing-{Guid.NewGuid():N}@locallist.ai";
         var adminFbUid = $"fb-admin-billing-{Guid.NewGuid():N}";
-
-        var db = fixture.GetDbContext();
-        db.Users.Add(new User
-        {
-            Id = Guid.NewGuid(),
-            Email = adminEmail,
-            FirebaseUid = adminFbUid,
-            Role = "admin"
-        });
-        db.SaveChanges();
 
         var client = fixture.CreateClient();
         var token = fixture.CreateToken(adminFbUid, adminEmail);

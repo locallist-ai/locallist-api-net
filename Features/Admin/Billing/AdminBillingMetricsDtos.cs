@@ -2,50 +2,58 @@ namespace LocalList.API.NET.Features.Admin.Billing;
 
 /// <summary>
 /// Aggregated business KPIs over the <c>billing_events</c> ledger, for the admin dashboard.
-/// Empty-safe: zero rows in range → all counts 0, dictionary/list empty, HTTP 200.
+/// Empty-safe: zero rows in range → all counts 0, dictionaries/list empty, HTTP 200.
 ///
-/// SCHEMA NOTE (honest gap list): <c>billing_events</c> persists ONLY the event type, the two
-/// timestamps and the resolved local user (see <see cref="Shared.Data.Entities.BillingEvent"/>).
-/// It does NOT store <c>product_id</c>, price/currency, <c>country_code</c> or <c>period_type</c>.
-/// Therefore the following segments Pablo asked for are NOT derivable from this table and are
-/// deliberately OMITTED rather than fabricated:
-///   • plan mix (monthly vs yearly)      → needs product_id / period_type
-///   • revenue / MRR                     → needs price + currency
-///   • breakdown by country              → needs country_code
-///   • trial-vs-paid split, conversions  → needs period_type (a trial start is an
-///                                          INITIAL_PURCHASE with period_type=TRIAL)
-///   • refunds vs plain cancellations    → needs cancel_reason (both arrive as CANCELLATION)
-/// Everything below is derived from <c>event_type</c> alone (+ user_id / event_timestamp_ms).
+/// All aggregation runs in SQL (GROUP BY / COUNT / SUM) — the endpoint never streams the ledger
+/// into memory. The date range filters on <c>event_timestamp_ms</c> (the authoritative RevenueCat
+/// event time), which is index-backed (<c>IX_billing_events_event_timestamp_ms</c>).
+///
+/// SEGMENTS THAT ARE REAL (from the analytics columns captured on the row):
+///   • plan mix           → <see cref="ByProductId"/> (product_id). Monthly-vs-yearly is NOT a
+///                          webhook field, so the caller maps product IDs to durations.
+///   • country breakdown  → <see cref="ByCountry"/> (country_code).
+///   • trial vs paid      → <see cref="TrialStarts"/> / <see cref="DirectPaidPurchases"/> split of
+///                          new subscriptions by period_type == TRIAL.
+///   • paid conversions   → <see cref="PaidConversions"/> = RENEWALs flagged is_trial_conversion.
+///                          Exposed as a COUNT, not a rate: it is the clean in-payload signal, but a
+///                          precise trial→paid *rate* would need cross-event/cohort correlation
+///                          (which trial started, when) that a single-table query can't do honestly.
+///   • refunds vs churn   → <see cref="ByCancelReason"/> (cancel_reason on CANCELLATION events).
+///   • revenue            → <see cref="RevenueUsd"/> (sum of RC-normalized USD <c>price</c>) plus
+///                          <see cref="RevenueByCurrency"/> (localized, kept PER CURRENCY — never
+///                          summed across currencies).
+///
+/// STILL NOT DERIVABLE here: exact MRR/ARR (needs plan-duration mapping + active-subscriber state,
+/// not raw events) and net revenue after refunds (refund amounts aren't a distinct webhook field).
 /// </summary>
 public record AdminBillingMetricsDto(
     int TotalEvents,
-    // INITIAL_PURCHASE. New subscriptions. NB: trial-start vs direct-paid is NOT separable here
-    // (no period_type column) — see the schema note above.
+    // INITIAL_PURCHASE total (= TrialStarts + DirectPaidPurchases).
     int NewSubscriptions,
-    // RENEWAL — active / renewed subscriptions.
+    // INITIAL_PURCHASE with period_type == TRIAL.
+    int TrialStarts,
+    // INITIAL_PURCHASE without a trial (period_type NORMAL/INTRO/PROMOTIONAL/null).
+    int DirectPaidPurchases,
+    // RENEWAL events flagged is_trial_conversion == true (a trial that converted to paid).
+    int PaidConversions,
+    // RENEWAL — active / renewed subscriptions (includes conversions).
     int Renewals,
-    // CANCELLATION — auto-renew turned off. NB: refunds also arrive as CANCELLATION and are NOT
-    // separable here (no cancel_reason column).
+    // CANCELLATION — auto-renew turned off (see ByCancelReason to split refund vs voluntary churn).
     int Cancellations,
-    // UNCANCELLATION — auto-renew re-enabled.
-    int Uncancellations,
-    // EXPIRATION — subscription lapsed.
-    int Expirations,
-    // BILLING_ISSUE — a renewal failed to charge.
-    int BillingIssues,
-    // PRODUCT_CHANGE — up/downgrade or plan switch.
-    int ProductChanges,
-    // TRANSFER — subscription moved between App User IDs.
-    int Transfers,
-    // Events whose app_user_id did not map to any LocalList user (user_id IS NULL).
-    int UnresolvedEvents,
-    // Distinct mapped users touched by a billing event in range.
-    int UniqueUsers,
-    // Authoritative full breakdown by event_type (stored verbatim) so nothing is lost even for
-    // event types not surfaced as a named field above.
-    IReadOnlyDictionary<string, int> ByEventType,
-    // Events per UTC day over the range (by event_timestamp_ms), ascending. Small + cheap.
-    IReadOnlyList<AdminBillingDailyPointDto> Daily);
+    int Uncancellations,   // UNCANCELLATION
+    int Expirations,       // EXPIRATION
+    int BillingIssues,     // BILLING_ISSUE
+    int ProductChanges,    // PRODUCT_CHANGE
+    int Transfers,         // TRANSFER
+    int UnresolvedEvents,  // events with no mapped LocalList user (user_id IS NULL)
+    int UniqueUsers,       // distinct mapped users touched in range
+    decimal RevenueUsd,    // sum of RC price (USD-normalized); trials/non-transactions contribute 0
+    IReadOnlyDictionary<string, int> ByEventType,            // authoritative full breakdown
+    IReadOnlyDictionary<string, int> ByProductId,            // plan mix
+    IReadOnlyDictionary<string, int> ByCountry,              // country breakdown
+    IReadOnlyDictionary<string, int> ByCancelReason,         // refunds vs voluntary churn
+    IReadOnlyDictionary<string, decimal> RevenueByCurrency,  // localized revenue, per currency
+    IReadOnlyList<AdminBillingDailyPointDto> Daily);         // events per UTC day over the range
 
 /// <summary>One point of the daily time series: a UTC calendar day and the event count on it.</summary>
 public record AdminBillingDailyPointDto(DateOnly Date, int Count);
