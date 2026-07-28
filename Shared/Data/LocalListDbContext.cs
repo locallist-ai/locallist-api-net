@@ -300,6 +300,12 @@ public class LocalListDbContext : DbContext
         modelBuilder.Entity<BillingEvent>()
             .HasIndex(be => new { be.UserId, be.EventTimestampMs });
 
+        // Standalone index on event_timestamp_ms: the admin billing-metrics endpoint range-scans
+        // by event time with no user predicate, so the (user_id, event_timestamp_ms) composite
+        // above (which leads with user_id) cannot back it. Analytics-only.
+        modelBuilder.Entity<BillingEvent>()
+            .HasIndex(be => be.EventTimestampMs);
+
         // Usage counters (F4 — gates Plus). PK compuesta = target del ON CONFLICT del
         // upsert atómico de UsageCounterService. FK con cascade: DELETE /account
         // arrastra los contadores (GDPR); el reset-por-reregistro que eso permite

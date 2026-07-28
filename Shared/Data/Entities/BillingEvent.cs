@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
 
 namespace LocalList.API.NET.Shared.Data.Entities;
 
@@ -45,4 +46,61 @@ public class BillingEvent
 
     [Column("processed_at")]
     public DateTimeOffset ProcessedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    // ── Analytics-only columns (added 2026-07-28) ────────────────────────────
+    // Populated best-effort from the RevenueCat webhook event for the admin dashboard
+    // (plan mix / country / trial-vs-paid / conversion / revenue). ALL nullable — pre-IAP
+    // and pre-migration rows stay null, and any field absent from a given event stays null.
+    // NONE of these drive tier: the tier is derived from RevenueCat's REST state, never from
+    // the payload (see BillingEventProcessor). These are write-only side data for reporting.
+
+    /// <summary>RevenueCat <c>product_id</c> — the purchased product identifier (plan mix).</summary>
+    [Column("product_id")]
+    [StringLength(255)]
+    public string? ProductId { get; set; }
+
+    /// <summary>RevenueCat <c>period_type</c> — TRIAL | INTRO | NORMAL | PROMOTIONAL | PREPAID.
+    /// A trial start is an INITIAL_PURCHASE with period_type == TRIAL.</summary>
+    [Column("period_type")]
+    [StringLength(32)]
+    public string? PeriodType { get; set; }
+
+    /// <summary>RevenueCat <c>country_code</c> — ISO 3166-1 alpha-2 buyer country.</summary>
+    [Column("country_code")]
+    [StringLength(8)]
+    public string? CountryCode { get; set; }
+
+    /// <summary>RevenueCat <c>price</c> — the transaction price normalized to USD by RevenueCat.
+    /// Trials/non-transactions carry 0/null, so summing this yields real USD revenue.</summary>
+    [Column("price")]
+    [Precision(12, 4)]
+    public decimal? Price { get; set; }
+
+    /// <summary>RevenueCat <c>price_in_purchased_currency</c> — the price in the buyer's currency.</summary>
+    [Column("price_in_purchased_currency")]
+    [Precision(12, 4)]
+    public decimal? PriceInPurchasedCurrency { get; set; }
+
+    /// <summary>RevenueCat <c>currency</c> — ISO 4217 code of <see cref="PriceInPurchasedCurrency"/>.</summary>
+    [Column("currency")]
+    [StringLength(8)]
+    public string? Currency { get; set; }
+
+    /// <summary>RevenueCat <c>store</c> — APP_STORE | PLAY_STORE | STRIPE | RC_BILLING | ...</summary>
+    [Column("store")]
+    [StringLength(32)]
+    public string? Store { get; set; }
+
+    /// <summary>RevenueCat <c>cancel_reason</c> on CANCELLATION events — UNSUBSCRIBE |
+    /// BILLING_ERROR | DEVELOPER_INITIATED | PRICE_INCREASE | CUSTOMER_SUPPORT | UNKNOWN.
+    /// Lets the dashboard separate voluntary churn / refunds from billing failures.</summary>
+    [Column("cancel_reason")]
+    [StringLength(64)]
+    public string? CancelReason { get; set; }
+
+    /// <summary>RevenueCat <c>is_trial_conversion</c> — true on a RENEWAL that is a trial→paid
+    /// conversion. The one clean in-payload signal for a paid conversion (no cross-event
+    /// correlation needed). Absent on most events → null.</summary>
+    [Column("is_trial_conversion")]
+    public bool? IsTrialConversion { get; set; }
 }
