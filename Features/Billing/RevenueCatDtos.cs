@@ -37,7 +37,20 @@ public record RevenueCatEvent(
     // Source-of-truth ordering key (epoch millis). Used for the reorder guard.
     [property: JsonPropertyName("event_timestamp_ms")] long EventTimestampMs,
     [property: JsonPropertyName("expiration_at_ms")] long? ExpirationAtMs,
-    [property: JsonPropertyName("product_id")] string? ProductId);
-// NOTE: entitlement_ids / event_timestamp_ms are captured for audit/logging only. They are
-// NOT trusted to decide the tier — a leaked webhook secret would let an attacker forge them.
-// The tier is derived from RevenueCat's REST API (see IRevenueCatClient / BillingEventProcessor).
+    [property: JsonPropertyName("product_id")] string? ProductId,
+    // ── Analytics-only fields (2026-07-28) ───────────────────────────────────
+    // Persisted to billing_events for the admin dashboard (plan mix / country / trial-vs-paid /
+    // conversion / revenue). Like everything else in this payload they are UNTRUSTED for the tier
+    // decision — captured for reporting only, never fed into the RC REST verification.
+    [property: JsonPropertyName("period_type")] string? PeriodType,
+    [property: JsonPropertyName("country_code")] string? CountryCode,
+    [property: JsonPropertyName("price")] decimal? Price,
+    [property: JsonPropertyName("price_in_purchased_currency")] decimal? PriceInPurchasedCurrency,
+    [property: JsonPropertyName("currency")] string? Currency,
+    [property: JsonPropertyName("store")] string? Store,
+    [property: JsonPropertyName("cancel_reason")] string? CancelReason,
+    [property: JsonPropertyName("is_trial_conversion")] bool? IsTrialConversion);
+// NOTE: entitlement_ids / event_timestamp_ms and the analytics fields above are captured for
+// audit/reporting only. They are NOT trusted to decide the tier — a leaked webhook secret would
+// let an attacker forge them. The tier is derived from RevenueCat's REST API (see
+// IRevenueCatClient / BillingEventProcessor).

@@ -156,7 +156,7 @@ public class BillingEventProcessor
             }
         }
 
-        _db.BillingEvents.Add(new BillingEvent
+        var row = new BillingEvent
         {
             RcEventId = rcEventId,
             UserId = user?.Id,
@@ -164,7 +164,9 @@ public class BillingEventProcessor
             EventType = evt.Type ?? "UNKNOWN",
             EventTimestampMs = ClampTimestamp(evt.EventTimestampMs),
             ProcessedAt = _clock.GetUtcNow(),
-        });
+        };
+        ApplyAnalytics(row, evt);
+        _db.BillingEvents.Add(row);
 
         var result = await SaveLedgerAsync(rcEventId, outcome, ct);
         _logger.LogInformation(
@@ -243,7 +245,7 @@ public class BillingEventProcessor
         }
 
         var attributed = destination ?? origin;
-        _db.BillingEvents.Add(new BillingEvent
+        var row = new BillingEvent
         {
             RcEventId = rcEventId,
             UserId = attributed?.Id,
@@ -251,7 +253,9 @@ public class BillingEventProcessor
             EventType = evt.Type ?? "TRANSFER",
             EventTimestampMs = ClampTimestamp(evt.EventTimestampMs),
             ProcessedAt = _clock.GetUtcNow(),
-        });
+        };
+        ApplyAnalytics(row, evt);
+        _db.BillingEvents.Add(row);
 
         // If not a single id resolved there is nothing to credit — record as unresolved.
         var outcome = resolved.Count > 0 ? BillingEventOutcome.Transferred : BillingEventOutcome.UserNotFound;
@@ -284,6 +288,26 @@ public class BillingEventProcessor
                 rcEventId);
             return BillingEventOutcome.Duplicate;
         }
+    }
+
+    /// <summary>
+    /// Copies the ANALYTICS-ONLY fields from the webhook event onto the ledger row that is about
+    /// to be persisted. Pure side-data population: it does NOT touch the dedup key, the resolved
+    /// user, the event type/timestamp, the tier, or any control flow — every field here is
+    /// UNTRUSTED reporting data (mirrors the security note on <see cref="RevenueCatEvent"/>).
+    /// Any field absent from a given event stays null.
+    /// </summary>
+    private static void ApplyAnalytics(BillingEvent row, RevenueCatEvent evt)
+    {
+        row.ProductId = evt.ProductId;
+        row.PeriodType = evt.PeriodType;
+        row.CountryCode = evt.CountryCode;
+        row.Price = evt.Price;
+        row.PriceInPurchasedCurrency = evt.PriceInPurchasedCurrency;
+        row.Currency = evt.Currency;
+        row.Store = evt.Store;
+        row.CancelReason = evt.CancelReason;
+        row.IsTrialConversion = evt.IsTrialConversion;
     }
 
     /// <summary>True when this is a TRANSFER event (by type, or by populated transfer arrays).</summary>

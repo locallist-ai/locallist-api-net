@@ -228,6 +228,75 @@ public class BillingTests : IClassFixture<ApiFixture>
         Assert.Equal("pro", await GetTierAsync(userId));
     }
 
+    // ---- analytics columns (best-effort, side-effect-free) -----------------
+
+    [Fact]
+    public async Task Webhook_PersistsAnalyticsColumns_FromPayload()
+    {
+        // The processor must copy the analytics fields from the webhook onto the ledger row it
+        // already persists — WITHOUT changing dedup/tier/idempotency (asserted elsewhere). Post two
+        // representative events covering all nine new columns and assert they land.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        // A) RENEWAL that is a trial conversion, with price/currency/store/product/country/period.
+        var renewal = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-analytics-renewal",
+                type = "RENEWAL",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 1000L,
+                product_id = "com.locallist.plus.monthly",
+                period_type = "NORMAL",
+                country_code = "US",
+                price = 9.99,
+                price_in_purchased_currency = 9.49,
+                currency = "USD",
+                store = "APP_STORE",
+                is_trial_conversion = true,
+            },
+        };
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(BuildWebhook(renewal))).StatusCode);
+
+        // B) CANCELLATION carrying a cancel_reason.
+        var cancel = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-analytics-cancel",
+                type = "CANCELLATION",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 2000L,
+                product_id = "com.locallist.plus.monthly",
+                country_code = "US",
+                store = "APP_STORE",
+                cancel_reason = "CUSTOMER_SUPPORT",
+            },
+        };
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(BuildWebhook(cancel))).StatusCode);
+
+        var db = _fixture.GetDbContext();
+        var a = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-analytics-renewal");
+        Assert.Equal("com.locallist.plus.monthly", a.ProductId);
+        Assert.Equal("NORMAL", a.PeriodType);
+        Assert.Equal("US", a.CountryCode);
+        Assert.Equal(9.99m, a.Price);
+        Assert.Equal(9.49m, a.PriceInPurchasedCurrency);
+        Assert.Equal("USD", a.Currency);
+        Assert.Equal("APP_STORE", a.Store);
+        Assert.True(a.IsTrialConversion);
+
+        var c = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-analytics-cancel");
+        Assert.Equal("CUSTOMER_SUPPORT", c.CancelReason);
+        Assert.Null(c.Price);              // absent field stays null
+        Assert.Null(c.IsTrialConversion);  // absent field stays null
+    }
+
     // ---- idempotency + reorder --------------------------------------------
 
     [Fact]
