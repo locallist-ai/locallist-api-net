@@ -93,7 +93,7 @@ public class AdminBillingMetricsController : ControllerBase
 
         // Empty (the pre-IAP norm): short-circuit with a zeroed DTO before issuing more queries.
         if (totalEvents == 0)
-            return Ok(Empty());
+            return Ok(EmptyMetrics());
 
         int CountType(string type) =>
             byEventTypeRows
@@ -200,7 +200,7 @@ public class AdminBillingMetricsController : ControllerBase
         return rows.ToDictionary(r => r.Key, r => r.Count);
     }
 
-    private static AdminBillingMetricsDto Empty() => new(
+    private static AdminBillingMetricsDto EmptyMetrics() => new(
         TotalEvents: 0,
         NewSubscriptions: 0, TrialStarts: 0, DirectPaidPurchases: 0, PaidConversions: 0,
         Renewals: 0, Cancellations: 0, Uncancellations: 0, Expirations: 0,
