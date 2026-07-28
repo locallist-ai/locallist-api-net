@@ -105,6 +105,9 @@ LocalList.API.NET/
 │   │   │   ├── AdminChatTurnsController.cs    # GET /admin/analytics/chat-turns, /stats
 │   │   │   ├── AdminPlanMetricsController.cs  # GET /admin/analytics/plan-metrics, /stats
 │   │   │   └── AdminAnalyticsDtos.cs
+│   │   ├── Billing/
+│   │   │   ├── AdminBillingMetricsController.cs  # GET /admin/billing/metrics — KPIs de facturación agregados EN SQL sobre billing_events (GROUP BY/COUNT/SUM, nada se materializa). Empty-safe (tabla vacía pre-IAP → DTO a cero + 200). Solo revenue de eventos de CARGA (INITIAL_PURCHASE/RENEWAL/NON_RENEWING), no CANCELLATION/etc.
+│   │   │   └── AdminBillingMetricsDtos.cs        # AdminBillingMetricsDto + AdminBillingDailyPointDto
 │   │   ├── Cities/
 │   │   │   └── AdminCitiesController.cs       # DELETE /admin/cities/:id
 │   │   ├── Places/
@@ -132,10 +135,11 @@ LocalList.API.NET/
 │   │       └── JwksRetriever.cs            # Caché JWKS para Apple
 │   ├── Billing/
 │   │   ├── BillingController.cs        # POST /webhooks/revenuecat (anonymous, secreto Authorization verificado pre-body)
-│   │   ├── BillingEventProcessor.cs    # Único escritor de User.Tier; deriva tier de RC (no del payload), idempotente
+│   │   ├── BillingEventProcessor.cs    # Único escritor de User.Tier; deriva tier de RC (no del payload), idempotente. También rellena best-effort las columnas de analítica de billing_events (product_id/period_type/country_code/price+moneda/store/cancel_reason/is_trial_conversion) — solo reporting, NUNCA gobiernan el tier
 │   │   ├── IRevenueCatClient.cs        # Contrato + status; el webhook es trigger, RC REST es la fuente de verdad
 │   │   ├── RevenueCatClient.cs         # GET /subscribers/{app_user_id} con secret API key → entitlement activo?
-│   │   ├── RevenueCatDtos.cs           # RevenueCatWebhookRequest/Event (payload NO confiable para el tier)
+│   │   ├── RevenueCatDtos.cs           # RevenueCatWebhookRequest/Event (payload NO confiable para el tier). Los campos de analítica se bindean con LenientJsonConverters (tolerantes)
+│   │   ├── LenientJsonConverters.cs    # Converters JSON tolerantes SOLO para los campos de analítica del webhook (decimal?/bool?/string? nullable): valor con tipo erróneo/basura → null, nunca lanza. Aísla el reporting del binding estricto de los campos tier-críticos (id/type/app_user_id/timestamp) → un campo de analítica corrupto no puede tumbar (400) un evento crítico que RC ya no re-entrega
 │   │   └── README.md                   # Doc F4 + modelo de seguridad + PENDIENTE producto: catálogo features Plus
 │   ├── Builder/
 │   │   ├── BuilderController.cs        # POST /builder/chat
@@ -225,7 +229,8 @@ LocalList.API.NET/
     │   ├── Security/                           # Infra de seguridad IA COMPARTIDA (Chat + Import). Movida de Features/Chat/Services (2 slices la usan)
     │   │   ├── InputNormalizer.cs              # Normaliza input hostil (homoglyph/zero-width/control tokens) antes de slot extraction / caption import
     │   │   ├── OutputSanitizer.cs              # Sanitiza texto de salida IA (quita URLs/markdown/HTML, escapa ángulos, cap)
-    │   │   └── OutputValidator.cs              # Detecta drift/canary/identity-probe/injection en salida IA (+ CanaryToken)
+    │   │   ├── OutputValidator.cs              # Detecta drift/canary/identity-probe/injection en salida IA (+ CanaryToken)
+    │   │   └── TypographySanitizer.cs          # Guardrail de marca: normaliza dashes largos (em/en/figura/barra/minus → hyphen) en TODO punto de escritura de texto IA/externo (gen de plan runtime, traducciones ES, summaries editoriales de Google). Fuente ÚNICA que reemplaza las viejas cadenas `.Replace` inline
     │   ├── Llm/                                # Cadena de fallback multi-proveedor (chat + builder)
     │   │   ├── ILlmClient.cs                   # LlmJsonRequest/LlmJsonResponse + interfaz
     │   │   ├── FallbackLlmClient.cs            # Encadena providers; limpia fences; valida JSON
@@ -279,7 +284,7 @@ LocalList.API.NET/
     │       ├── ChatSession.cs           # Sesión de chat slot-filling
     │       ├── ChatTurn.cs             # Turno individual de chat (diagnósticos AI)
     │       ├── VideoImportMetric.cs     # Diagnóstico del import de vídeo (tokens/coste/resultado + city/country/language extraídos como contexto de mercado + num_matched de T3; sin FK, sin vídeo/URIs/nombres de sitios/uploader)
-    │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE)
+    │       ├── BillingEvent.cs          # Ledger idempotencia webhooks RevenueCat (rc_event_id UNIQUE). +columnas de analítica (nullable, best-effort): product_id, period_type, country_code, price(USD), price_in_purchased_currency+currency, store, cancel_reason, is_trial_conversion — SOLO reporting del dashboard admin, el tier viene de la REST de RC
     │       ├── UsageCounter.cs          # Contador de uso (user, feature, period_start) — increment atómico vía UsageCounterService
     │       ├── Favorite.cs              # Favorito de sitio (user_id, place_id) PK compuesta = índice único (idempotencia vía 23505); ambos FK CASCADE (GDPR + borrado de place); índice (user_id, created_at DESC) para el listado
     │       ├── RouteSegmentCache.cs    # Caché de segmentos de ruta Mapbox
@@ -371,6 +376,7 @@ Antes de habilitar múltiples réplicas: migrar rate limiting a Redis (`AddStack
 | Admin — Places | `GET /admin/places/cities`, `POST /admin/places/google-search`, `GET /admin/places/photo-preview` (preview de foto de Google pre-guardado por googlePlaceId+index, 302 con key server-side vía `IPlacePhotoService` de T1, nunca la expone al admin), `GET /admin/places`, `GET /admin/places/:id`, `POST /admin/places`, `POST /admin/places/bulk`, `POST /admin/places/import-from-urls`, `PATCH /admin/places/:id`, `PATCH /admin/places/:id/review`, `PATCH /admin/places/:id/postpone`, `DELETE /admin/places/:id`, `POST /admin/places/reindex-embeddings`, `POST /admin/places/backfill-opening-hours`, `POST /admin/places/:id/translate`, `POST /admin/places/:id/suggest-description`, `POST /admin/places/backfill-descriptions`, `POST /admin/places/translate-batch` |
 | Admin — Plans | `GET /admin/plans`, `POST /admin/plans`, `POST /admin/plans/bulk`, `GET /admin/plans/:id`, `PATCH /admin/plans/:id` (metadata; con campo `stops` escribe metadata+stops atómico en 1 transacción), `POST /admin/plans/:id/translate`, `POST /admin/plans/translate-batch`, `PUT /admin/plans/:id/stops` (deprecado — usar PATCH atómico), `DELETE /admin/plans/:id` |
 | Admin — Analytics | `GET /admin/analytics/chat-turns`, `GET /admin/analytics/chat-turns/stats`, `GET /admin/analytics/plan-metrics`, `GET /admin/analytics/plan-metrics/stats` |
+| Admin — Billing | `GET /admin/billing/metrics?from=&to=` (`[AdminAuthorize]` FirebaseScheme RS256 + `AdminLimit` 60/min; KPIs de facturación agregados EN SQL sobre `billing_events` — event-type breakdown, trial vs directo, conversiones, revenue USD + por moneda, splits por producto/país/cancel-reason, serie diaria; rango sobre `event_timestamp_ms` index-backed, omitir `from`=all-time. Empty-safe: tabla vacía pre-IAP → DTO a cero + 200, corto-circuito tras un COUNT) |
 | Admin — Cities | `DELETE /admin/cities/:id` |
 | Admin — Subcategories | `GET /admin/subcategories`, `POST /admin/subcategories`, `PATCH /admin/subcategories/:id`, `DELETE /admin/subcategories/:id` |
 
