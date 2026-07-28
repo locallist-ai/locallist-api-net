@@ -1,3 +1,4 @@
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Data;
 using LocalList.API.NET.Shared.Data.Entities;
@@ -385,11 +386,12 @@ public class PlanGenerationService : IPlanGenerationService
     private static string CanonicalList(List<string>? values) =>
         values is null ? "" : string.Join(",", values.OrderBy(v => v, StringComparer.Ordinal));
 
-    private static string Sanitize(string value, int maxLen)
+    internal static string Sanitize(string value, int maxLen)
     {
         if (string.IsNullOrEmpty(value)) return value;
-        // Strip control chars (including null bytes), cap length
-        var clean = new string(value.Where(c => !char.IsControl(c)).ToArray()).Trim();
+        // Strip control chars (including null bytes), neutralize long dashes (brand ban), cap length
+        var noDashes = TypographySanitizer.StripLongDashes(value)!;
+        var clean = new string(noDashes.Where(c => !char.IsControl(c)).ToArray()).Trim();
         return clean.Length > maxLen ? clean[..maxLen] : clean;
     }
 

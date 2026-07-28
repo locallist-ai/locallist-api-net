@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Taxonomy;
 
@@ -175,7 +176,7 @@ public partial class AdminPlacesController
                 var details = await _googlePlaces.GetDetailsAsync(place.GooglePlaceId!, ct);
                 if (!string.IsNullOrWhiteSpace(details?.EditorialSummary))
                 {
-                    place.WhyThisPlace = details.EditorialSummary;
+                    place.WhyThisPlace = TypographySanitizer.StripLongDashes(details.EditorialSummary)!;
                     place.UpdatedAt = now;
                     googleFilled++;
                 }

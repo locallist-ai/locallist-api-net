@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.Data.Entities;
 
 namespace LocalList.API.NET.Shared.AI.Services;
@@ -104,17 +105,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             var text = GetPartsText(geminiContent) ?? "{}";
 
             using var result = JsonDocument.Parse(text);
-            var root = result.RootElement;
-
-            return new PlaceTranslationDraft(
-                Name: GetStr(root, "name"),
-                WhyThisPlace: GetStr(root, "whyThisPlace"),
-                BestTimes: GetStrList(root, "bestTimes"),
-                Neighborhood: GetStr(root, "neighborhood"),
-                Subcategories: GetStrList(root, "subcategories"),
-                BestFor: GetStrList(root, "bestFor"),
-                SuitableFor: GetStrList(root, "suitableFor")
-            );
+            return MapPlaceDraft(result.RootElement);
         }
         catch (Exception ex)
         {
@@ -187,12 +178,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             var text = GetPartsText(geminiContent) ?? "{}";
 
             using var result = JsonDocument.Parse(text);
-            var root = result.RootElement;
-
-            return new PlanTranslationDraft(
-                Name: GetStr(root, "name"),
-                Description: GetStr(root, "description")
-            );
+            return MapPlanDraft(result.RootElement);
         }
         catch (Exception ex)
         {
@@ -214,6 +200,26 @@ public class PlaceTranslatorService : IPlaceTranslatorService
         return parts[0].TryGetProperty("text", out var t) ? t.GetString() : null;
     }
 
+    // Parsed-JSON → draft mapping, with the long-dash brand normalization applied to
+    // every free-text ES field before it leaves the service (persisted downstream).
+    // Extracted as an internal seam so the sanitization is testable without a live Gemini call.
+    internal static PlaceTranslationDraft MapPlaceDraft(JsonElement root) =>
+        new(
+            Name: TypographySanitizer.StripLongDashes(GetStr(root, "name")),
+            WhyThisPlace: TypographySanitizer.StripLongDashes(GetStr(root, "whyThisPlace")),
+            BestTimes: StripLongDashes(GetStrList(root, "bestTimes")),
+            Neighborhood: TypographySanitizer.StripLongDashes(GetStr(root, "neighborhood")),
+            Subcategories: GetStrList(root, "subcategories"),
+            BestFor: StripLongDashes(GetStrList(root, "bestFor")),
+            SuitableFor: StripLongDashes(GetStrList(root, "suitableFor"))
+        );
+
+    internal static PlanTranslationDraft MapPlanDraft(JsonElement root) =>
+        new(
+            Name: TypographySanitizer.StripLongDashes(GetStr(root, "name")),
+            Description: TypographySanitizer.StripLongDashes(GetStr(root, "description"))
+        );
+
     private static string? GetStr(JsonElement el, string key) =>
         el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
@@ -225,6 +231,10 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             .Select(e => e.GetString()!)
             .ToList();
     }
+
+    // Applies the long-dash brand normalization element-wise over a free-text list.
+    private static List<string>? StripLongDashes(List<string>? values) =>
+        values?.Select(v => TypographySanitizer.StripLongDashes(v)!).ToList();
 }
 
 public record PlaceTranslationDraft(
