@@ -37,19 +37,32 @@ public record RevenueCatEvent(
     // Source-of-truth ordering key (epoch millis). Used for the reorder guard.
     [property: JsonPropertyName("event_timestamp_ms")] long EventTimestampMs,
     [property: JsonPropertyName("expiration_at_ms")] long? ExpirationAtMs,
-    [property: JsonPropertyName("product_id")] string? ProductId,
-    // ── Analytics-only fields (2026-07-28) ───────────────────────────────────
+    // ── Analytics-only fields ────────────────────────────────────────────────
     // Persisted to billing_events for the admin dashboard (plan mix / country / trial-vs-paid /
     // conversion / revenue). Like everything else in this payload they are UNTRUSTED for the tier
     // decision — captured for reporting only, never fed into the RC REST verification.
-    [property: JsonPropertyName("period_type")] string? PeriodType,
-    [property: JsonPropertyName("country_code")] string? CountryCode,
-    [property: JsonPropertyName("price")] decimal? Price,
-    [property: JsonPropertyName("price_in_purchased_currency")] decimal? PriceInPurchasedCurrency,
-    [property: JsonPropertyName("currency")] string? Currency,
-    [property: JsonPropertyName("store")] string? Store,
-    [property: JsonPropertyName("cancel_reason")] string? CancelReason,
-    [property: JsonPropertyName("is_trial_conversion")] bool? IsTrialConversion);
+    //
+    // CRITICAL: each binds through a LENIENT converter so a type-mismatched value degrades THAT
+    // field to null instead of throwing a JsonException that would 400-drop the whole (tier-critical)
+    // event. The control-path fields above (id/type/app_user_id/timestamp) keep strict binding.
+    [property: JsonPropertyName("product_id")]
+    [property: JsonConverter(typeof(LenientNullableStringConverter))] string? ProductId,
+    [property: JsonPropertyName("period_type")]
+    [property: JsonConverter(typeof(LenientNullableStringConverter))] string? PeriodType,
+    [property: JsonPropertyName("country_code")]
+    [property: JsonConverter(typeof(LenientNullableStringConverter))] string? CountryCode,
+    [property: JsonPropertyName("price")]
+    [property: JsonConverter(typeof(LenientNullableDecimalConverter))] decimal? Price,
+    [property: JsonPropertyName("price_in_purchased_currency")]
+    [property: JsonConverter(typeof(LenientNullableDecimalConverter))] decimal? PriceInPurchasedCurrency,
+    [property: JsonPropertyName("currency")]
+    [property: JsonConverter(typeof(LenientNullableStringConverter))] string? Currency,
+    [property: JsonPropertyName("store")]
+    [property: JsonConverter(typeof(LenientNullableStringConverter))] string? Store,
+    [property: JsonPropertyName("cancel_reason")]
+    [property: JsonConverter(typeof(LenientNullableStringConverter))] string? CancelReason,
+    [property: JsonPropertyName("is_trial_conversion")]
+    [property: JsonConverter(typeof(LenientNullableBoolConverter))] bool? IsTrialConversion);
 // NOTE: entitlement_ids / event_timestamp_ms and the analytics fields above are captured for
 // audit/reporting only. They are NOT trusted to decide the tier — a leaked webhook secret would
 // let an attacker forge them. The tier is derived from RevenueCat's REST API (see

@@ -39,8 +39,15 @@ public class AdminBillingMetricsController : ControllerBase
     private const string ProductChange = "PRODUCT_CHANGE";
     private const string Transfer = "TRANSFER";
 
+    private const string NonRenewingPurchase = "NON_RENEWING_PURCHASE";
+
     private const string TrialPeriod = "TRIAL";
     private const long MsPerDay = 86_400_000L;
+
+    // Event types that represent an actual CHARGE — the only rows that count toward revenue.
+    // RevenueCat also stamps `price` on non-charge events (CANCELLATION/EXPIRATION/UNCANCELLATION/
+    // PRODUCT_CHANGE/BILLING_ISSUE), so summing price over all rows double-counts/misstates revenue.
+    private static readonly string[] ChargeEventTypes = { InitialPurchase, Renewal, NonRenewingPurchase };
 
     private readonly LocalListDbContext _db;
     private readonly ILogger<AdminBillingMetricsController> _logger;
@@ -95,13 +102,18 @@ public class AdminBillingMetricsController : ControllerBase
 
         var newSubscriptions = CountType(InitialPurchase);
 
-        // (2) Trial vs direct-paid split of new subscriptions — SQL COUNT with predicate.
-        var trialStarts = await baseQuery
-            .CountAsync(e => e.EventType == InitialPurchase && e.PeriodType == TrialPeriod, ct);
+        // (2) Trial vs direct-paid split of new subscriptions — SQL COUNT with predicate. Same
+        //     case-normalization (upper()) as CountType/newSubscriptions so the subtraction below
+        //     can't misattribute under casing drift. INITIAL_PURCHASE with null period_type falls
+        //     into directPaidPurchases (documented in the DTO).
+        var trialStarts = await baseQuery.CountAsync(
+            e => e.EventType.ToUpper() == InitialPurchase && e.PeriodType != null && e.PeriodType.ToUpper() == TrialPeriod,
+            ct);
         var directPaidPurchases = newSubscriptions - trialStarts;
 
-        // (3) Paid conversions — the clean in-payload signal (RENEWAL flagged is_trial_conversion).
-        var paidConversions = await baseQuery.CountAsync(e => e.IsTrialConversion == true, ct);
+        // (3) Paid conversions — the clean in-payload signal: a RENEWAL flagged is_trial_conversion.
+        var paidConversions = await baseQuery.CountAsync(
+            e => e.EventType.ToUpper() == Renewal && e.IsTrialConversion == true, ct);
 
         // (4) User attribution — SQL COUNT / COUNT(DISTINCT).
         var unresolvedEvents = await baseQuery.CountAsync(e => e.UserId == null, ct);
@@ -111,16 +123,21 @@ public class AdminBillingMetricsController : ControllerBase
             .Distinct()
             .CountAsync(ct);
 
-        // (5) Revenue — SUM in SQL. price is RC's USD-normalized amount, so it sums cleanly;
-        //     nullable so an empty/all-null slice yields null → 0.
-        var revenueUsd = (await baseQuery.SumAsync(e => e.Price, ct)) ?? 0m;
+        // (5) Revenue — GROSS charge revenue only. Restrict to actual CHARGE event types so we don't
+        //     sum `price` off CANCELLATION/EXPIRATION/etc. price is RC's USD-normalized amount, so
+        //     the USD sum is currency-consistent; refunds are NOT netted (no refund-amount field).
+        //     Nullable sum → null on an empty/all-null slice → 0.
+        var chargeQuery = baseQuery.Where(e => ChargeEventTypes.Contains(e.EventType.ToUpper()));
+        var revenueUsd = (await chargeQuery.SumAsync(e => e.Price, ct)) ?? 0m;
 
         // (6) Segment breakdowns — SQL GROUP BY over the analytics columns (null keys filtered out).
         var byProductId = await GroupCountAsync(baseQuery, e => e.ProductId, ct);
         var byCountry = await GroupCountAsync(baseQuery, e => e.CountryCode, ct);
         var byCancelReason = await GroupCountAsync(baseQuery, e => e.CancelReason, ct);
 
-        var revenueByCurrency = (await baseQuery
+        // Localized revenue per currency, also restricted to charge rows (kept per-currency, never
+        // summed across currencies).
+        var revenueByCurrency = (await chargeQuery
                 .Where(e => e.Currency != null)
                 .GroupBy(e => e.Currency!)
                 .Select(g => new { Currency = g.Key, Sum = g.Sum(x => x.PriceInPurchasedCurrency) })

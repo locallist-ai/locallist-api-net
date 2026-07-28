@@ -19,9 +19,11 @@ namespace LocalList.API.NET.Features.Admin.Billing;
 ///                          precise trial→paid *rate* would need cross-event/cohort correlation
 ///                          (which trial started, when) that a single-table query can't do honestly.
 ///   • refunds vs churn   → <see cref="ByCancelReason"/> (cancel_reason on CANCELLATION events).
-///   • revenue            → <see cref="RevenueUsd"/> (sum of RC-normalized USD <c>price</c>) plus
-///                          <see cref="RevenueByCurrency"/> (localized, kept PER CURRENCY — never
-///                          summed across currencies).
+///   • revenue            → <see cref="RevenueUsd"/> and <see cref="RevenueByCurrency"/>, computed
+///                          over CHARGE event types ONLY (INITIAL_PURCHASE / RENEWAL /
+///                          NON_RENEWING_PURCHASE). This is GROSS charge revenue: refunds are NOT
+///                          netted (RevenueCat gives no refund-amount field). RevenueByCurrency is
+///                          kept PER CURRENCY — never summed across currencies.
 ///
 /// STILL NOT DERIVABLE here: exact MRR/ARR (needs plan-duration mapping + active-subscriber state,
 /// not raw events) and net revenue after refunds (refund amounts aren't a distinct webhook field).
@@ -47,7 +49,8 @@ public record AdminBillingMetricsDto(
     int Transfers,         // TRANSFER
     int UnresolvedEvents,  // events with no mapped LocalList user (user_id IS NULL)
     int UniqueUsers,       // distinct mapped users touched in range
-    decimal RevenueUsd,    // sum of RC price (USD-normalized); trials/non-transactions contribute 0
+    decimal RevenueUsd,    // GROSS charge revenue (INITIAL_PURCHASE/RENEWAL/NON_RENEWING_PURCHASE),
+                           // RC USD-normalized price; trials contribute 0; refunds NOT netted
     IReadOnlyDictionary<string, int> ByEventType,            // authoritative full breakdown
     IReadOnlyDictionary<string, int> ByProductId,            // plan mix
     IReadOnlyDictionary<string, int> ByCountry,              // country breakdown

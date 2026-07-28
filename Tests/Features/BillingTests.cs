@@ -297,6 +297,50 @@ public class BillingTests : IClassFixture<ApiFixture>
         Assert.Null(c.IsTrialConversion);  // absent field stays null
     }
 
+    [Fact]
+    public async Task Webhook_MalformedAnalyticsField_DoesNotDropTierCriticalEvent()
+    {
+        // REGRESSION GUARD: the analytics fields are UNTRUSTED. A type-mismatched value must degrade
+        // that ONE field to null and MUST NOT abort deserialization → a 400 would permanently drop
+        // the event (only 503 makes RevenueCat re-deliver), so a paying user could miss Plus.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        // Garbage shapes across a money field (object), another money field (array), and the bool.
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-malformed-analytics",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 1000L,
+                product_id = "com.locallist.plus.monthly",
+                price = new { nonsense = true },          // object where a number is expected
+                price_in_purchased_currency = new[] { 1, 2 }, // array where a number is expected
+                is_trial_conversion = "not-a-bool",       // string where a bool is expected
+                country_code = "US",
+            },
+        };
+        var res = await client.SendAsync(BuildWebhook(body));
+
+        // The tier-critical event still processes (NOT 400/500) and the tier is applied.
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("pro", await GetTierAsync(userId));
+
+        // The malformed analytics fields persist as null; the well-formed ones survive.
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-malformed-analytics");
+        Assert.Null(row.Price);
+        Assert.Null(row.PriceInPurchasedCurrency);
+        Assert.Null(row.IsTrialConversion);
+        Assert.Equal("US", row.CountryCode);
+        Assert.Equal("com.locallist.plus.monthly", row.ProductId);
+    }
+
     // ---- idempotency + reorder --------------------------------------------
 
     [Fact]

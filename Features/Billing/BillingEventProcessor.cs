@@ -391,9 +391,14 @@ public class BillingEventProcessor
         return await _db.Users.FirstOrDefaultAsync(u => u.RcCustomerId == candidate, ct);
     }
 
-    /// <summary>Clamps an absurdly-future timestamp to "now" for audit sanity (see field doc).</summary>
+    /// <summary>
+    /// Clamps an absurdly-future timestamp to "now" and floors a negative one at 0 for audit sanity
+    /// (see field doc). The floor prevents a negative epoch value from landing the analytics daily
+    /// bucket in a pre-1970 date.
+    /// </summary>
     private long ClampTimestamp(long eventTimestampMs)
     {
+        if (eventTimestampMs < 0) return 0;
         var ceiling = _clock.GetUtcNow().Add(FutureTolerance).ToUnixTimeMilliseconds();
         return eventTimestampMs > ceiling ? _clock.GetUtcNow().ToUnixTimeMilliseconds() : eventTimestampMs;
     }

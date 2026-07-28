@@ -13,17 +13,18 @@ namespace LocalList.API.Tests.Features;
 /// </summary>
 public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFixture>
 {
-    private const string ProductMonthly = "com.locallist.plus.monthly";
-    private const string ProductYearly = "com.locallist.plus.yearly";
-
     // ── Aggregates + enriched segments (n = 9, exact values, deterministic) ───
 
     [Fact]
-    public async Task Metrics_AggregatesAllSegments_WithExactValues()
+    public async Task Metrics_AggregatesAllSegments_AndExcludesNonChargeRevenue()
     {
-        // Fixed, test-private window (year 2006). day2 gives a 2-point time series.
-        var day1 = new DateTimeOffset(2006, 3, 10, 10, 0, 0, TimeSpan.Zero);
+        // Fixed far-future window (year 2100) disjoint from every other billing_events writer, PLUS
+        // test-unique product_id tags so the plan-mix assertions are provably about THESE rows and
+        // not a foreign row that happened to fall in the window. day2 gives a 2-point time series.
+        var day1 = new DateTimeOffset(2100, 3, 10, 10, 0, 0, TimeSpan.Zero);
         var day2 = day1.AddDays(1);
+        var pM = $"com.locallist.plus.monthly.{Guid.NewGuid():N}";
+        var pY = $"com.locallist.plus.yearly.{Guid.NewGuid():N}";
 
         var userA = Guid.NewGuid();
         var userB = Guid.NewGuid();
@@ -31,21 +32,26 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
 
         // day1 (5 events)
         await Seed("INITIAL_PURCHASE", userA, day1,
-            product: ProductMonthly, period: "TRIAL", country: "US", price: 0m, currency: "USD", priceLocal: 0m, store: "APP_STORE");
+            product: pM, period: "TRIAL", country: "US", price: 0m, currency: "USD", priceLocal: 0m, store: "APP_STORE");
         await Seed("INITIAL_PURCHASE", userB, day1,
-            product: ProductYearly, period: "NORMAL", country: "US", price: 39.99m, currency: "USD", priceLocal: 39.99m, store: "APP_STORE");
+            product: pY, period: "NORMAL", country: "US", price: 39.99m, currency: "USD", priceLocal: 39.99m, store: "APP_STORE");
         await Seed("INITIAL_PURCHASE", userC, day1,
-            product: ProductMonthly, period: "TRIAL", country: "ES", price: 0m, currency: "EUR", priceLocal: 0m, store: "APP_STORE");
+            product: pM, period: "TRIAL", country: "ES", price: 0m, currency: "EUR", priceLocal: 0m, store: "APP_STORE");
         await Seed("RENEWAL", userA, day1,
-            product: ProductMonthly, period: "NORMAL", country: "US", price: 9.99m, currency: "USD", priceLocal: 9.99m, store: "APP_STORE", isTrialConversion: true);
+            product: pM, period: "NORMAL", country: "US", price: 9.99m, currency: "USD", priceLocal: 9.99m, store: "APP_STORE", isTrialConversion: true);
+        // ANTI-MASK: a CANCELLATION carrying a non-null USD price. RevenueCat stamps price on
+        // non-charge events too; it must NOT count toward revenue.
         await Seed("CANCELLATION", userB, day1,
-            product: ProductYearly, country: "US", cancelReason: "UNSUBSCRIBE");
+            product: pY, country: "US", price: 5.55m, currency: "USD", priceLocal: 5.55m, cancelReason: "UNSUBSCRIBE");
         // day2 (4 events)
         await Seed("RENEWAL", userB, day2,
-            product: ProductYearly, period: "NORMAL", country: "US", price: 39.99m, currency: "USD", priceLocal: 39.99m, store: "APP_STORE");
+            product: pY, period: "NORMAL", country: "US", price: 39.99m, currency: "USD", priceLocal: 39.99m, store: "APP_STORE");
+        // ANTI-MASK: a CANCELLATION with a non-null EUR price — must be excluded from EUR revenue.
         await Seed("CANCELLATION", userC, day2,
-            product: ProductMonthly, country: "ES", cancelReason: "CUSTOMER_SUPPORT");
-        await Seed("EXPIRATION", userC, day2, product: ProductMonthly, country: "ES");
+            product: pM, country: "ES", price: 7.77m, currency: "EUR", priceLocal: 7.77m, cancelReason: "CUSTOMER_SUPPORT");
+        // ANTI-MASK: an EXPIRATION with a non-null USD price — must be excluded from USD revenue.
+        await Seed("EXPIRATION", userC, day2,
+            product: pM, country: "ES", price: 8.88m, currency: "USD", priceLocal: 8.88m);
         await Seed("TRANSFER", null, day2); // unresolved (no mapped user, no product/country)
 
         var client = CreateAdminClient();
@@ -67,13 +73,14 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
         Assert.Equal(1, b.GetProperty("unresolvedEvents").GetInt32());
         Assert.Equal(3, b.GetProperty("uniqueUsers").GetInt32());
 
-        // Revenue: sum of USD price = 39.99 + 9.99 + 39.99 = 89.97 (trials/others are 0/null).
+        // Revenue = GROSS charge rows ONLY: 39.99 + 9.99 + 39.99 = 89.97. If the non-charge rows
+        // (5.55 cancel + 8.88 expire) leaked in, this would be 104.40 → the anti-mask.
         Assert.Equal(89.97m, b.GetProperty("revenueUsd").GetDecimal());
 
-        // Plan mix by product_id (TRANSFER has null product → excluded).
+        // Plan mix by product_id (test-unique tags; TRANSFER has null product → excluded).
         var byProduct = b.GetProperty("byProductId");
-        Assert.Equal(5, byProduct.GetProperty(ProductMonthly).GetInt32()); // 1,3,4,7,8
-        Assert.Equal(3, byProduct.GetProperty(ProductYearly).GetInt32());  // 2,5,6
+        Assert.Equal(5, byProduct.GetProperty(pM).GetInt32()); // 1,3,4,7,8
+        Assert.Equal(3, byProduct.GetProperty(pY).GetInt32()); // 2,5,6
 
         // Country breakdown.
         var byCountry = b.GetProperty("byCountry");
@@ -85,10 +92,10 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
         Assert.Equal(1, byCancel.GetProperty("UNSUBSCRIBE").GetInt32());
         Assert.Equal(1, byCancel.GetProperty("CUSTOMER_SUPPORT").GetInt32());
 
-        // Localized revenue per currency (never summed across currencies).
+        // Localized revenue per currency, charge rows only (never summed across currencies).
         var byCur = b.GetProperty("revenueByCurrency");
-        Assert.Equal(89.97m, byCur.GetProperty("USD").GetDecimal());
-        Assert.Equal(0m, byCur.GetProperty("EUR").GetDecimal()); // only a 0-priced trial in EUR
+        Assert.Equal(89.97m, byCur.GetProperty("USD").GetDecimal()); // excludes 5.55 + 8.88 non-charge
+        Assert.Equal(0m, byCur.GetProperty("EUR").GetDecimal());     // only a 0-priced EUR trial; excludes 7.77 cancel
 
         // Full event-type breakdown.
         var byType = b.GetProperty("byEventType");
@@ -100,9 +107,9 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
         var daily = b.GetProperty("daily").EnumerateArray().ToList();
         Assert.Equal(2, daily.Count);
         Assert.Equal(9, daily.Sum(d => d.GetProperty("count").GetInt32()));
-        Assert.Equal("2006-03-10", daily[0].GetProperty("date").GetString());
+        Assert.Equal("2100-03-10", daily[0].GetProperty("date").GetString());
         Assert.Equal(5, daily[0].GetProperty("count").GetInt32());
-        Assert.Equal("2006-03-11", daily[1].GetProperty("date").GetString());
+        Assert.Equal("2100-03-11", daily[1].GetProperty("date").GetString());
         Assert.Equal(4, daily[1].GetProperty("count").GetInt32());
     }
 
@@ -111,9 +118,11 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
     [Fact]
     public async Task Metrics_Empty_ReturnsZeroes()
     {
-        var from = new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        // Bounded far-future window that no test writes into.
+        var from = new DateTimeOffset(2150, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(2150, 2, 1, 0, 0, 0, TimeSpan.Zero);
         var client = CreateAdminClient();
-        var res = await client.GetAsync($"/admin/billing/metrics?from={Enc(from)}");
+        var res = await client.GetAsync($"/admin/billing/metrics?from={Enc(from)}&to={Enc(to)}");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
 
         var b = await res.Content.ReadFromJsonAsync<JsonElement>();
@@ -136,10 +145,11 @@ public class AdminBillingMetricsTests(ApiFixture fixture) : IClassFixture<ApiFix
     [Fact]
     public async Task Metrics_RangeFilter_ExcludesRowsOutsideWindow()
     {
-        var inside = new DateTimeOffset(2009, 6, 15, 12, 0, 0, TimeSpan.Zero);
+        var inside = new DateTimeOffset(2101, 6, 15, 12, 0, 0, TimeSpan.Zero);
+        var product = $"com.locallist.plus.monthly.{Guid.NewGuid():N}";
         var user = Guid.NewGuid();
 
-        await Seed("INITIAL_PURCHASE", user, inside, product: ProductMonthly, period: "NORMAL", country: "US", price: 9.99m, currency: "USD", priceLocal: 9.99m);
+        await Seed("INITIAL_PURCHASE", user, inside, product: product, period: "NORMAL", country: "US", price: 9.99m, currency: "USD", priceLocal: 9.99m);
         await Seed("RENEWAL", user, inside.AddDays(-30));     // excluded
         await Seed("CANCELLATION", user, inside.AddDays(30)); // excluded
 
