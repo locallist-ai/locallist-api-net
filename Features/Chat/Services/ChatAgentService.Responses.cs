@@ -50,7 +50,6 @@ public partial class ChatAgentService
         // L6: sanitize aiMessage before persisting and returning
         aiMessage = OutputSanitizer.Sanitize(aiMessage ?? ChatStrings.GreetingNoCity(lang));
 
-        var wasAlreadyReady = session.Status == "ready";
         session.TurnCount++;
         session.LastTurnAt = DateTimeOffset.UtcNow;
         session.Status = ready ? "ready" : "active";
@@ -67,18 +66,6 @@ public partial class ChatAgentService
         _logger.LogInformation(
             "Chat: turn={Turn} sessionId={Session} missing=[{Missing}] ready={Ready} suspicion={Score}",
             session.TurnCount, session.Id, string.Join(",", missing), ready, suspicion.Score);
-
-        if (ready && !wasAlreadyReady)
-        {
-            var readyDistinctId = session.UserId?.ToString() ?? session.AnonymousIpHash ?? session.Id.ToString();
-            _ = _posthog.CaptureAsync(readyDistinctId, "chat_ready", new()
-            {
-                ["session_id"] = session.Id.ToString(),
-                ["turn_count"] = session.TurnCount,
-                ["city"] = slots.City,
-                ["days"] = (object?)slots.Days,
-            });
-        }
 
         return new ChatTurnResponse
         {
