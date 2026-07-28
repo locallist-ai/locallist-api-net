@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using LocalList.API.NET.Features.Plans;
 using LocalList.API.NET.Shared.AI;
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Auth;
 using LocalList.API.NET.Shared.Constants;
@@ -163,8 +164,8 @@ public class ImportPlanController : ControllerBase
     private static string? SanitizePlanName(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
-        var clean = new string(raw.Where(c => !char.IsControl(c)).ToArray())
-            .Replace("—", "-").Replace("–", "-")
+        var noDashes = TypographySanitizer.StripLongDashes(raw)!;
+        var clean = new string(noDashes.Where(c => !char.IsControl(c)).ToArray())
             .Trim();
         if (clean.Length > MaxPlanNameLength) clean = clean[..MaxPlanNameLength].Trim();
         return clean.Length == 0 ? null : clean;

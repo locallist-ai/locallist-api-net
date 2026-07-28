@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using LocalList.API.NET.Shared.AI.Security;
 
 namespace LocalList.API.NET.Shared.AI.Services;
 
@@ -113,9 +114,7 @@ public class DescriptionGeneratorService : IDescriptionGeneratorService
             if (raw == null)
                 return new GeneratePlaceDescriptionResult(null, "empty_parts", "Gemini returned empty parts array");
 
-            var text = raw.Trim()
-                .Replace("—", "-").Replace("–", "-")
-                .Replace("‒", "-").Replace("―", "-");
+            var text = TypographySanitizer.StripLongDashes(raw.Trim())!;
 
             if (text.Length > 800) text = text[..800];
             if (string.IsNullOrEmpty(text))

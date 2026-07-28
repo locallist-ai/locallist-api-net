@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using LocalList.API.NET.Shared.AI.Security;
 using LocalList.API.NET.Shared.AI.Services;
 using LocalList.API.NET.Shared.Constants;
 using LocalList.API.NET.Shared.Data;
@@ -183,7 +184,7 @@ public class PlaceImportService
                 Name = details.Name,
                 Category = validCategory,
                 Subcategories = subcategory != null ? new List<string> { subcategory } : null,
-                WhyThisPlace = details.EditorialSummary ?? "",
+                WhyThisPlace = TypographySanitizer.StripLongDashes(details.EditorialSummary) ?? "",
                 City = details.City ?? request.DefaultCity ?? "Miami",
                 Neighborhood = details.Neighborhood,
                 Latitude = details.Lat,
