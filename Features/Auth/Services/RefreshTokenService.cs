@@ -105,29 +105,40 @@ public class RefreshTokenService : IRefreshTokenService
                 return null;
 
             // (3) ROTATED but not revoked → distinguish a benign lost-response
-            //     re-presentation from a genuine after-the-fact replay via the grace
-            //     window. NEITHER outcome is a 401-only dead end for a legit client:
-            //     within grace we hand back a working pair so the session survives.
+            //     re-presentation from a genuine after-the-fact replay. NEITHER outcome
+            //     is a 401-only dead end for a legit client: benign cases hand back a
+            //     fresh pair so the session survives.
             if (candidate.RotatedAt is not null)
             {
+                // (3a) FAST PATH — within grace: assume benign (lost-response retry or a
+                //      rapid legit double-submit) and mint a fresh pair, no chain lookup,
+                //      no revoke. Repeated retries in-window stay graceful.
                 if (now - candidate.RotatedAt.Value <= ReuseGrace)
-                {
-                    // Benign: rotation RESPONSE was almost certainly lost and the client
-                    // still holds the old token. Issue a fresh pair WITHOUT revoking.
-                    // Repeated retries within the window stay graceful (idempotent-ish),
-                    // so a flaky client is never logged out by its own retries.
                     return await MintFreshPairAsync(candidate, now, ct);
+
+                // (3b) PAST GRACE — revoke ONLY on evidence the chain advanced: the direct
+                //      successor was itself CONSUMED (rotated or revoked), i.e. a second
+                //      party used it → genuine exfil-then-replay (RFC 6819 discriminator).
+                //      If the successor was never consumed (or there is none), this is a
+                //      benign LATE lost-response retry — the client was suspended past the
+                //      window before the successor ever arrived → recover gracefully. The
+                //      recovery mint deliberately does NOT advance the successor, so any
+                //      number of late retries stay benign at any delay (retry-storm safe).
+                var successorConsumed = candidate.ReplacedById is Guid successorId
+                    && await _db.RefreshTokens.AnyAsync(
+                        rt => rt.Id == successorId && (rt.RotatedAt != null || rt.RevokedAt != null), ct);
+
+                if (successorConsumed)
+                {
+                    // Generic 401: never leak to the caller that reuse was detected.
+                    await RevokeFamilyAsync(candidate.UserId, ct);
+                    _logger.LogWarning(
+                        "Refresh token reuse detected for user {UserId}; revoked all refresh tokens for that user",
+                        candidate.UserId);
+                    return null;
                 }
 
-                // Past the grace window → a spent token replayed long after the session
-                // moved on is treated as exfiltration. Revoke the WHOLE family (kills
-                // active AND still-grace-eligible tokens) + alarm. Generic 401: never
-                // leak to the caller that reuse was detected.
-                await RevokeFamilyAsync(candidate.UserId, ct);
-                _logger.LogWarning(
-                    "Refresh token reuse detected for user {UserId}; revoked all refresh tokens for that user",
-                    candidate.UserId);
-                return null;
+                return await MintFreshPairAsync(candidate, now, ct);
             }
 
             // (4) ACTIVE token → atomic single-use rotation (concurrency-safe).
@@ -154,39 +165,61 @@ public class RefreshTokenService : IRefreshTokenService
 
         if (claimed == 0) return null;
 
-        return await MintFreshPairAsync(candidate, now, ct);
+        var (rotation, newTokenId) = await MintPairAsync(candidate, now, ct);
+
+        // Link the chain A→B (legit single-use rotation only). This is what lets the
+        // past-grace branch tell a benign late retry (successor never consumed) from a
+        // genuine replay (successor consumed). ExecuteUpdate keeps it off the tracker.
+        await _db.RefreshTokens
+            .Where(rt => rt.Id == candidate.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(rt => rt.ReplacedById, newTokenId), ct);
+
+        return rotation;
     }
 
-    // Mint a brand-new refresh/access pair for the token's user WITHOUT consuming any
-    // existing row. Used by the winner of a rotation (after it claimed the old token)
-    // and by the grace-window lost-response recovery.
+    // Grace / benign lost-response recovery: mint a fresh pair WITHOUT consuming or
+    // advancing the source's successor (so unlimited late retries stay benign).
     private async Task<RefreshTokenRotation> MintFreshPairAsync(
         RefreshToken source, DateTimeOffset now, CancellationToken ct)
     {
+        var (rotation, _) = await MintPairAsync(source, now, ct);
+        return rotation;
+    }
+
+    // Mint a brand-new refresh/access pair for the token's user WITHOUT consuming any
+    // existing row. Returns the new refresh token's Id so the caller can chain-link it
+    // (legit rotation) or discard it (benign recovery).
+    private async Task<(RefreshTokenRotation rotation, Guid newTokenId)> MintPairAsync(
+        RefreshToken source, DateTimeOffset now, CancellationToken ct)
+    {
         var newPlain = GenerateToken();
-        _db.RefreshTokens.Add(new RefreshToken
+        var entity = new RefreshToken
         {
             UserId = source.UserId,
             TokenHash = HashToken(newPlain),
             TokenPrefix = newPlain[..PrefixLength],
             ExpiresAt = now.Add(RefreshLifetime),
             CreatedAt = now
-        });
+        };
+        _db.RefreshTokens.Add(entity);
         var accessToken = _jwt.SignAccessToken(source.UserId, source.User!.Email, source.User.Tier);
         await _db.SaveChangesAsync(ct);
-        return new RefreshTokenRotation(newPlain, accessToken);
+        return (new RefreshTokenRotation(newPlain, accessToken), entity.Id);
     }
 
-    // Token-family revocation: kill every not-yet-revoked refresh token for the user in
-    // a single atomic UPDATE — active AND still-grace-eligible rotated rows alike (so a
-    // just-revoked token cannot slip back in through the grace window). Bypasses the
-    // change tracker (ExecuteUpdate) so it never conflicts with the tracked candidate.
+    // Token-family revocation: kill every not-yet-revoked refresh token for the user —
+    // active AND still-grace-eligible rotated rows alike (so a just-revoked token cannot
+    // slip back in through the grace window). Bypasses the change tracker (ExecuteUpdate)
+    // so it never conflicts with the tracked candidate. Wrapped in an explicit
+    // transaction so the bulk kill commits atomically as one unit.
     private async Task RevokeFamilyAsync(Guid userId, CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
         await _db.RefreshTokens
             .Where(rt => rt.UserId == userId && rt.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(rt => rt.RevokedAt, now), ct);
+        await tx.CommitAsync(ct);
     }
 
     private static string GenerateToken()

@@ -392,12 +392,57 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     }
 
     [Fact]
-    public async Task Refresh_ReplayPastGrace_RevokesWholeFamily()
+    public async Task Refresh_ReplayPastGrace_SuccessorNotConsumed_RecoversGracefully()
     {
-        // SECURITY: a genuine exfiltration replays a long-spent token well after the
-        // session moved on. A→B→C, then the clock advances past the grace window and A is
-        // replayed → treated as reuse → the WHOLE family is revoked, so the live token C
-        // also stops working.
+        // AVAILABILITY (the SHOULD-FIX): a client rotates A→B, the response is lost and the
+        // app is SUSPENDED before B ever arrives; it reopens well past the 60s grace window
+        // and re-presents the stored A. Because A's successor B was NEVER consumed (no
+        // second party used it → no theft), this is a benign LATE lost-response retry: a
+        // fresh pair, NOT a family revocation. A late retry on a flaky network must not log
+        // the user out.
+        var email = $"latebenign-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "LateBenign1!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        // A → B (B is never consumed by anyone).
+        var b = await (await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken })).Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+
+        // Suspend well past the grace window, then re-present the stored A.
+        fixture.FakeTime.Advance(TimeSpan.FromSeconds(90));
+
+        var retry = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        var recovered = await retry.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+        Assert.NotEqual(registered.RefreshToken, recovered!.RefreshToken);
+
+        // Nothing was revoked, and the recovered session works.
+        var db = fixture.GetDbContext();
+        var user = await db.Users.FirstAsync(u => u.Email == email);
+        Assert.Equal(0, await db.RefreshTokens.CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt != null));
+        var withRecovered = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = recovered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, withRecovered.StatusCode);
+
+        // Retry-storm safety: re-presenting A AGAIN (still past grace, successor still
+        // never consumed) stays benign — no revoke, another fresh pair.
+        var retry2 = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, retry2.StatusCode);
+        var db2 = fixture.GetDbContext();
+        Assert.Equal(0, await db2.RefreshTokens.CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt != null));
+    }
+
+    [Fact]
+    public async Task Refresh_ReplayPastGrace_SuccessorConsumed_RevokesWholeFamily()
+    {
+        // SECURITY: a genuine exfiltration replays a long-spent token AFTER a second party
+        // advanced the chain. A→B→C (so A's successor B was CONSUMED), then the clock
+        // advances past the grace window and A is replayed → evidence the chain moved on →
+        // treated as reuse → the WHOLE family is revoked, so the live token C also stops
+        // working.
         var email = $"replay-{Guid.NewGuid():N}@test.com";
         var client = fixture.CreateClient();
         var registered = await (await client.PostAsJsonAsync("/auth/register",

@@ -44,5 +44,15 @@ public class RefreshToken
     [Column("revoked_at")]
     public DateTimeOffset? RevokedAt { get; set; }
 
+    // Chain link set ONLY on legit single-use rotation: A→B stores A.ReplacedById = B.Id.
+    // The past-grace theft discriminator (RFC 6819): a re-presented spent token is only
+    // treated as reuse if its direct successor was itself CONSUMED (the chain advanced
+    // beyond it) — evidence a second party used it. Benign recovery mints deliberately do
+    // NOT set/advance this, so unlimited lost-response retries of a token whose successor
+    // was never consumed stay graceful at any delay. Plain Guid (no FK) so pruning a
+    // superseded row never trips a constraint.
+    [Column("replaced_by_id")]
+    public Guid? ReplacedById { get; set; }
+
     public User? User { get; set; }
 }
