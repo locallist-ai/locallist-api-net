@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using Microsoft.Extensions.DependencyInjection;
 using LocalList.API.NET.Features.Auth.Services;
 using LocalList.API.NET.Shared.Data.Entities;
 
@@ -260,7 +261,7 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
     // ─── Refresh ─────────────────────────────────────────
 
     [Fact]
-    public async Task Refresh_RotatesTokens_AndOldTokenIsInvalidatedAfterUse()
+    public async Task Refresh_RotatesTokens_ProducesFreshWorkingPair()
     {
         var email = $"refresh-{Guid.NewGuid():N}@test.com";
         var client = fixture.CreateClient();
@@ -273,10 +274,10 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var rotated = await first.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
         Assert.NotEqual(registered.RefreshToken, rotated!.RefreshToken);
 
-        // Reusing the original token must fail (single-use)
-        var reuse = await client.PostAsJsonAsync("/auth/refresh",
-            new { refreshToken = registered.RefreshToken });
-        Assert.Equal(HttpStatusCode.Unauthorized, reuse.StatusCode);
+        // The freshly rotated token is itself usable (chain keeps moving forward).
+        var second = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = rotated.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
     }
 
     [Fact]
@@ -286,6 +287,216 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         var res = await client.PostAsJsonAsync("/auth/refresh",
             new { refreshToken = new string('a', 128) });
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refresh_LostResponseRetry_WithinGrace_RecoversSessionWithoutRevoking()
+    {
+        // AVAILABILITY (the BLOCKER): a client rotates A→B, the RESPONSE is lost (roaming
+        // / backgrounded app), so it still holds A and re-fires refresh with A on the next
+        // 401. Within the grace window this MUST be a graceful lost-response recovery — a
+        // fresh working pair, NOT a 401 and NOT a family revocation. A legit retry can
+        // never log the user out.
+        var email = $"lostresp-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "LostResp1!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        // A → B (imagine the client never receives this response).
+        var rotate = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, rotate.StatusCode);
+        var b = await rotate.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+
+        // Re-present A (the lost-response retry). Graceful: 200 + a brand-new token.
+        var retry = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        var c = await retry.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+        Assert.NotEqual(registered.RefreshToken, c!.RefreshToken);
+        Assert.NotEqual(b!.RefreshToken, c.RefreshToken);
+
+        // The recovered session is alive: the new token works.
+        var withC = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = c.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, withC.StatusCode);
+
+        // Nothing was revoked — a lost-response retry must not trip family revocation.
+        var db = fixture.GetDbContext();
+        var user = await db.Users.FirstAsync(u => u.Email == email);
+        var revoked = await db.RefreshTokens
+            .CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt != null);
+        Assert.Equal(0, revoked);
+    }
+
+    [Fact]
+    public async Task Refresh_ConcurrentDoubleSubmit_IsCoherent_NoFamilyRevoke()
+    {
+        // CONCURRENCY: two refreshes of the SAME valid token race (double-submit, e.g. two
+        // parallel 401s). The atomic claim must let exactly ONE win — never two valid
+        // tokens — and it must NOT be mistaken for reuse (no family revocation).
+        var email = $"concurrent-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "Concurr1!" })).Content.ReadFromJsonAsync<TokensResponse>();
+        var tokenA = registered!.RefreshToken;
+
+        // Two independent DI scopes → two DbContexts → a real race against Postgres. A
+        // Barrier aligns both callers so they enter RotateAsync (and read A as ACTIVE)
+        // at the same instant — a genuine tight race on the active-rotation path, which
+        // is where the atomic claim must serialize.
+        using var scope1 = fixture.Services.CreateScope();
+        using var scope2 = fixture.Services.CreateScope();
+        var svc1 = scope1.ServiceProvider.GetRequiredService<IRefreshTokenService>();
+        var svc2 = scope2.ServiceProvider.GetRequiredService<IRefreshTokenService>();
+
+        using var barrier = new Barrier(2);
+        async Task<RefreshTokenRotation?> Race(IRefreshTokenService svc)
+        {
+            barrier.SignalAndWait();
+            return await svc.RotateAsync(tokenA, CancellationToken.None);
+        }
+        var results = await Task.WhenAll(Task.Run(() => Race(svc1)), Task.Run(() => Race(svc2)));
+
+        // Every caller gets a COHERENT result: a valid rotation, never an error and
+        // never a family revocation. In a tight race the atomic claim yields exactly one
+        // winner (the loser sees 0 rows → null); if one call happens to settle first the
+        // other is absorbed by the SAME safe grace path (a fresh pair). Either way at
+        // least one non-null result and no exception.
+        var winners = results.Where(r => r is not null).ToList();
+        Assert.NotEmpty(winners);
+
+        var db = fixture.GetDbContext();
+        var user = await db.Users.FirstAsync(u => u.Email == email);
+
+        // Anti-corruption invariant (the atomicity fix): the original active token A was
+        // consumed EXACTLY ONCE (rotated, not deleted, not left active), and every live
+        // token corresponds to exactly one successful caller — no rotation was
+        // double-spent into extra tokens, and the count stays bounded by the 2 callers.
+        var tokenAPrefix = tokenA[..16];
+        var tokenARow = await db.RefreshTokens.FirstAsync(rt =>
+            rt.UserId == user.Id && rt.TokenPrefix == tokenAPrefix);
+        Assert.NotNull(tokenARow.RotatedAt);
+        var live = await db.RefreshTokens
+            .CountAsync(rt => rt.UserId == user.Id && rt.RotatedAt == null && rt.RevokedAt == null);
+        Assert.Equal(winners.Count, live);
+        Assert.InRange(live, 1, 2);
+
+        // Critical: a concurrent double-submit is NOT reuse → nothing revoked.
+        Assert.Equal(0, await db.RefreshTokens.CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt != null));
+
+        // Session intact: a winner's freshly minted token is usable.
+        var useWinner = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = winners[0]!.NewPlainToken });
+        Assert.Equal(HttpStatusCode.OK, useWinner.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refresh_ReplayPastGrace_SuccessorNotConsumed_RecoversGracefully()
+    {
+        // AVAILABILITY (the SHOULD-FIX): a client rotates A→B, the response is lost and the
+        // app is SUSPENDED before B ever arrives; it reopens well past the 60s grace window
+        // and re-presents the stored A. Because A's successor B was NEVER consumed (no
+        // second party used it → no theft), this is a benign LATE lost-response retry: a
+        // fresh pair, NOT a family revocation. A late retry on a flaky network must not log
+        // the user out.
+        var email = $"latebenign-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "LateBenign1!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        // A → B (B is never consumed by anyone).
+        var b = await (await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken })).Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+
+        // Suspend well past the grace window, then re-present the stored A.
+        fixture.FakeTime.Advance(TimeSpan.FromSeconds(90));
+
+        var retry = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        var recovered = await retry.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+        Assert.NotEqual(registered.RefreshToken, recovered!.RefreshToken);
+
+        // Nothing was revoked, and the recovered session works.
+        var db = fixture.GetDbContext();
+        var user = await db.Users.FirstAsync(u => u.Email == email);
+        Assert.Equal(0, await db.RefreshTokens.CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt != null));
+        var withRecovered = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = recovered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, withRecovered.StatusCode);
+
+        // Retry-storm safety: re-presenting A AGAIN (still past grace, successor still
+        // never consumed) stays benign — no revoke, another fresh pair.
+        var retry2 = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, retry2.StatusCode);
+        var db2 = fixture.GetDbContext();
+        Assert.Equal(0, await db2.RefreshTokens.CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt != null));
+    }
+
+    [Fact]
+    public async Task Refresh_ReplayPastGrace_SuccessorConsumed_RevokesWholeFamily()
+    {
+        // SECURITY: a genuine exfiltration replays a long-spent token AFTER a second party
+        // advanced the chain. A→B→C (so A's successor B was CONSUMED), then the clock
+        // advances past the grace window and A is replayed → evidence the chain moved on →
+        // treated as reuse → the WHOLE family is revoked, so the live token C also stops
+        // working.
+        var email = $"replay-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "Replay12!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        // A → B
+        var b = await (await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken })).Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+        // B → C
+        var c = await (await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = b!.RefreshToken })).Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+
+        // Move past the grace window so replaying the long-spent A counts as reuse.
+        fixture.FakeTime.Advance(TimeSpan.FromSeconds(90));
+
+        // Replay A (spent, past grace) → 401 + family revocation.
+        var replay = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+
+        // C, the live token, is now revoked because reuse of A nuked the family.
+        var withC = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = c!.RefreshToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, withC.StatusCode);
+
+        // DB: no live (non-revoked) refresh token remains for the user.
+        var db = fixture.GetDbContext();
+        var user = await db.Users.FirstAsync(u => u.Email == email);
+        var live = await db.RefreshTokens
+            .CountAsync(rt => rt.UserId == user.Id && rt.RevokedAt == null);
+        Assert.Equal(0, live);
+    }
+
+    [Fact]
+    public async Task Refresh_GarbageToken_Returns401_WithoutRevokingActiveSession()
+    {
+        // A never-existed / garbage token must NOT be treated as reuse: it must 401
+        // WITHOUT mass-revoking the user's session. The user's current valid token
+        // keeps working afterwards.
+        var email = $"garbage-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "Garbage12!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        var garbage = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = new string('b', 128) });
+        Assert.Equal(HttpStatusCode.Unauthorized, garbage.StatusCode);
+
+        // The genuine current token still rotates — session was not nuked.
+        var rotate = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, rotate.StatusCode);
+        var rotated = await rotate.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+        Assert.NotEqual(registered.RefreshToken, rotated!.RefreshToken);
     }
 
     // ─── End-to-end multi-scheme: app token reaches authenticated endpoints ───
