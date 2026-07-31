@@ -30,5 +30,12 @@ public class RefreshToken
     [Column("created_at")]
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
+    // Reuse detection: NULL = active (never rotated); non-NULL = already
+    // rotated/invalidated. Rotated rows are RETAINED (not hard-deleted) so a
+    // replay of a spent token can be distinguished from a token that never
+    // existed → triggers token-family revocation. Pruned once past ExpiresAt.
+    [Column("rotated_at")]
+    public DateTimeOffset? RotatedAt { get; set; }
+
     public User? User { get; set; }
 }

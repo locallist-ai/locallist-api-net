@@ -288,6 +288,64 @@ public class AppAuthTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
     }
 
+    [Fact]
+    public async Task Refresh_ReplayOfRotatedToken_Returns401_AndRevokesWholeFamily()
+    {
+        // Reuse detection: rotate A→B (A now invalid). Replaying the spent token A
+        // must 401 AND revoke the entire token family, so the still-fresh token B
+        // also stops working (a thief who replays A cannot let the victim keep B).
+        var email = $"reuse-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "Reuse1234!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        // A → B
+        var rotate = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, rotate.StatusCode);
+        var b = await rotate.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+
+        // Replay A (already rotated) → 401 + family revocation
+        var replay = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered.RefreshToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+
+        // B, though never spent, is now revoked because reuse of A nuked the family.
+        var withB = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = b!.RefreshToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, withB.StatusCode);
+
+        // Verify at the DB level: no active (RotatedAt == null) refresh token remains.
+        var db = fixture.GetDbContext();
+        var user = await db.Users.FirstAsync(u => u.Email == email);
+        var activeRemaining = await db.RefreshTokens
+            .CountAsync(rt => rt.UserId == user.Id && rt.RotatedAt == null);
+        Assert.Equal(0, activeRemaining);
+    }
+
+    [Fact]
+    public async Task Refresh_GarbageToken_Returns401_WithoutRevokingActiveSession()
+    {
+        // A never-existed / garbage token must NOT be treated as reuse: it must 401
+        // WITHOUT mass-revoking the user's session. The user's current valid token
+        // keeps working afterwards.
+        var email = $"garbage-{Guid.NewGuid():N}@test.com";
+        var client = fixture.CreateClient();
+        var registered = await (await client.PostAsJsonAsync("/auth/register",
+            new { email, password = "Garbage12!" })).Content.ReadFromJsonAsync<TokensResponse>();
+
+        var garbage = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = new string('b', 128) });
+        Assert.Equal(HttpStatusCode.Unauthorized, garbage.StatusCode);
+
+        // The genuine current token still rotates — session was not nuked.
+        var rotate = await client.PostAsJsonAsync("/auth/refresh",
+            new { refreshToken = registered!.RefreshToken });
+        Assert.Equal(HttpStatusCode.OK, rotate.StatusCode);
+        var rotated = await rotate.Content.ReadFromJsonAsync<RefreshOnlyResponse>();
+        Assert.NotEqual(registered.RefreshToken, rotated!.RefreshToken);
+    }
+
     // ─── End-to-end multi-scheme: app token reaches authenticated endpoints ───
 
     [Fact]
