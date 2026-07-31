@@ -168,7 +168,7 @@ public class BillingEventProcessor
         ApplyAnalytics(row, evt);
         _db.BillingEvents.Add(row);
 
-        var result = await SaveLedgerAsync(rcEventId, outcome, ct);
+        var result = await SaveLedgerAsync(row, rcEventId, outcome, ct);
         _logger.LogInformation(
             "RevenueCat event {EventId} ({Type}) processed for user {UserId}: {Outcome}",
             rcEventId, evt.Type, user?.Id, result);
@@ -259,7 +259,7 @@ public class BillingEventProcessor
 
         // If not a single id resolved there is nothing to credit — record as unresolved.
         var outcome = resolved.Count > 0 ? BillingEventOutcome.Transferred : BillingEventOutcome.UserNotFound;
-        var result = await SaveLedgerAsync(rcEventId, outcome, ct);
+        var result = await SaveLedgerAsync(row, rcEventId, outcome, ct);
         _logger.LogInformation(
             "RevenueCat TRANSFER {EventId} processed: {Resolved} user(s) re-verified, {Unresolved} unresolved → {Outcome}",
             rcEventId, resolved.Count, unresolved.Count, result);
@@ -272,9 +272,15 @@ public class BillingEventProcessor
     /// SAME event id won the INSERT race on the rc_event_id unique index (the tier writes in THIS
     /// transaction roll back with it — the winner already applied the identical, RC-derived effect).
     /// Only that specific constraint is swallowed; any other unique violation propagates.
+    ///
+    /// DEFENSE-IN-DEPTH: if a NON-dedup <see cref="DbUpdateException"/> still fires (e.g. an
+    /// analytics value the truncation didn't anticipate), retry the persist ONCE with the analytics
+    /// columns nulled. The tracked tier write commits with the (now analytics-free) row, so a
+    /// malformed side-data field can never abort the tier-critical event. If the retry also fails
+    /// for a non-dedup reason, it propagates (a genuine infra fault, not analytics side-data).
     /// </summary>
     private async Task<BillingEventOutcome> SaveLedgerAsync(
-        string rcEventId, BillingEventOutcome outcome, CancellationToken ct)
+        BillingEvent row, string rcEventId, BillingEventOutcome outcome, CancellationToken ct)
     {
         try
         {
@@ -288,26 +294,85 @@ public class BillingEventProcessor
                 rcEventId);
             return BillingEventOutcome.Duplicate;
         }
+        catch (DbUpdateException ex)
+        {
+            // A non-dedup persist failure — almost certainly a bad analytics value (e.g. 22001).
+            // Best-effort analytics must NEVER drop the tier-critical event: null the side-data and
+            // retry once so the tier write still commits.
+            _logger.LogWarning(ex,
+                "RevenueCat event {EventId} ledger persist failed (non-dedup); retrying with analytics nulled",
+                rcEventId);
+            ClearAnalytics(row);
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+                _logger.LogWarning(
+                    "RevenueCat event {EventId} persisted WITHOUT analytics after retry (side-data dropped)",
+                    rcEventId);
+                return outcome;
+            }
+            catch (DbUpdateException retryEx) when (IsDuplicateEventRace(retryEx))
+            {
+                _logger.LogInformation(
+                    "RevenueCat event {EventId} lost the insert race on analytics-null retry; treating as processed",
+                    rcEventId);
+                return BillingEventOutcome.Duplicate;
+            }
+        }
     }
+
+    // Column widths of the analytics string columns on billing_events (mirror the [StringLength]
+    // attributes on BillingEvent — single source of truth for the truncation below). The
+    // LenientJsonConverters tolerate a wrong TYPE (→ null) but NOT an over-LENGTH string; without
+    // truncation a value longer than its column throws Postgres 22001 on SaveChangesAsync and would
+    // abort the tier-critical persist. These are UNTRUSTED reporting strings — silently truncating
+    // is correct (a value that doesn't fit the reporting column is not worth losing a Plus grant).
+    private const int MaxProductId = 255;
+    private const int MaxPeriodType = 32;
+    private const int MaxCountryCode = 8;
+    private const int MaxCurrency = 8;
+    private const int MaxStore = 32;
+    private const int MaxCancelReason = 64;
 
     /// <summary>
     /// Copies the ANALYTICS-ONLY fields from the webhook event onto the ledger row that is about
     /// to be persisted. Pure side-data population: it does NOT touch the dedup key, the resolved
     /// user, the event type/timestamp, the tier, or any control flow — every field here is
     /// UNTRUSTED reporting data (mirrors the security note on <see cref="RevenueCatEvent"/>).
-    /// Any field absent from a given event stays null.
+    /// Any field absent from a given event stays null. Each string is TRUNCATED to its column
+    /// width so an over-length attacker-shaped value can never throw 22001 and drop the event.
     /// </summary>
     private static void ApplyAnalytics(BillingEvent row, RevenueCatEvent evt)
     {
-        row.ProductId = evt.ProductId;
-        row.PeriodType = evt.PeriodType;
-        row.CountryCode = evt.CountryCode;
+        row.ProductId = Trunc(evt.ProductId, MaxProductId);
+        row.PeriodType = Trunc(evt.PeriodType, MaxPeriodType);
+        row.CountryCode = Trunc(evt.CountryCode, MaxCountryCode);
         row.Price = evt.Price;
         row.PriceInPurchasedCurrency = evt.PriceInPurchasedCurrency;
-        row.Currency = evt.Currency;
-        row.Store = evt.Store;
-        row.CancelReason = evt.CancelReason;
+        row.Currency = Trunc(evt.Currency, MaxCurrency);
+        row.Store = Trunc(evt.Store, MaxStore);
+        row.CancelReason = Trunc(evt.CancelReason, MaxCancelReason);
         row.IsTrialConversion = evt.IsTrialConversion;
+    }
+
+    /// <summary>Truncates a nullable string to at most <paramref name="max"/> chars (null/short
+    /// values pass through). Keeps every analytics write within its column width.</summary>
+    private static string? Trunc(string? value, int max) =>
+        value is not null && value.Length > max ? value[..max] : value;
+
+    /// <summary>Nulls every analytics column on the row — used by the defense-in-depth retry so a
+    /// tier-critical event is never lost to a bad analytics value the truncation didn't catch.</summary>
+    private static void ClearAnalytics(BillingEvent row)
+    {
+        row.ProductId = null;
+        row.PeriodType = null;
+        row.CountryCode = null;
+        row.Price = null;
+        row.PriceInPurchasedCurrency = null;
+        row.Currency = null;
+        row.Store = null;
+        row.CancelReason = null;
+        row.IsTrialConversion = null;
     }
 
     /// <summary>True when this is a TRANSFER event (by type, or by populated transfer arrays).</summary>
@@ -392,15 +457,17 @@ public class BillingEventProcessor
     }
 
     /// <summary>
-    /// Clamps an absurdly-future timestamp to "now" and floors a negative one at 0 for audit sanity
-    /// (see field doc). The floor prevents a negative epoch value from landing the analytics daily
-    /// bucket in a pre-1970 date.
+    /// Clamps an out-of-range timestamp to "now" for audit sanity (see field doc). Both an
+    /// absurdly-future value AND a negative one collapse to now — a negative epoch would otherwise
+    /// land the admin analytics daily bucket in a pre-1970 date (flooring at 0 == 1970-01-01 did
+    /// the same). It no longer drives any tier decision (RevenueCat state does).
     /// </summary>
     private long ClampTimestamp(long eventTimestampMs)
     {
-        if (eventTimestampMs < 0) return 0;
-        var ceiling = _clock.GetUtcNow().Add(FutureTolerance).ToUnixTimeMilliseconds();
-        return eventTimestampMs > ceiling ? _clock.GetUtcNow().ToUnixTimeMilliseconds() : eventTimestampMs;
+        var now = _clock.GetUtcNow();
+        if (eventTimestampMs < 0) return now.ToUnixTimeMilliseconds();
+        var ceiling = now.Add(FutureTolerance).ToUnixTimeMilliseconds();
+        return eventTimestampMs > ceiling ? now.ToUnixTimeMilliseconds() : eventTimestampMs;
     }
 
     private static bool IsDuplicateEventRace(DbUpdateException ex) =>

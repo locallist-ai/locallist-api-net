@@ -341,6 +341,121 @@ public class BillingTests : IClassFixture<ApiFixture>
         Assert.Equal("com.locallist.plus.monthly", row.ProductId);
     }
 
+    [Fact]
+    public async Task Webhook_OverLengthAnalyticsField_TruncatesAndKeepsTierCriticalEvent()
+    {
+        // REGRESSION GUARD (2026-07-29 audit): the LenientJsonConverters degrade a wrong-TYPE value
+        // to null but do NOT bound LENGTH. A string longer than its varchar column would throw
+        // Postgres 22001 on SaveChangesAsync and abort the tier-critical persist → a 500 that drops
+        // the event (only 503 makes RevenueCat re-deliver). The processor must TRUNCATE each
+        // analytics string to its column width so the row always fits and the tier still lands.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        var longProductId = new string('p', 300);  // column is varchar(255)
+        var longCountry = new string('C', 40);      // column is varchar(8)
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-overlength-analytics",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 1000L,
+                product_id = longProductId,
+                country_code = longCountry,
+                store = "APP_STORE",
+            },
+        };
+        var res = await client.SendAsync(BuildWebhook(body));
+
+        // The tier-critical event still processes (NOT 500/dropped) and the tier is applied.
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("pro", await GetTierAsync(userId));
+
+        // The over-length analytics values persist TRUNCATED to their column widths, not dropped.
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-overlength-analytics");
+        Assert.Equal(255, row.ProductId!.Length);
+        Assert.Equal(longProductId[..255], row.ProductId);
+        Assert.Equal(8, row.CountryCode!.Length);
+        Assert.Equal("APP_STORE", row.Store); // in-bounds value survives intact
+    }
+
+    [Fact]
+    public async Task Webhook_OverflowingAnalyticsPrice_RetriesWithAnalyticsNulled_AndStillGrantsPro()
+    {
+        // Covers the SaveLedgerAsync defense-in-depth retry branch. Truncation can't help a numeric
+        // overflow: price/price_in_purchased_currency are numeric(12,4), so a value with >8 integer
+        // digits throws Postgres 22003 on SaveChangesAsync (not 22001, not the 23505 dedup race).
+        // The processor must retry ONCE with the analytics columns nulled so the tier write still
+        // commits — best-effort analytics must never lose the tier-critical event.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-overflow-price",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 1000L,
+                product_id = "com.locallist.plus.monthly",
+                price = 123456789012345.67, // overflows numeric(12,4) → PG 22003 on first save
+                country_code = "US",
+            },
+        };
+        var res = await client.SendAsync(BuildWebhook(body));
+
+        // The tier-critical event still processes (retry path) and the tier is applied.
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("pro", await GetTierAsync(userId));
+
+        // The retry nulled ALL analytics columns to make the row persist; tier write survived.
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-overflow-price");
+        Assert.Null(row.Price);
+        Assert.Null(row.CountryCode);  // nulled by the retry, even though it was in-bounds
+        Assert.Null(row.ProductId);
+    }
+
+    [Fact]
+    public async Task Webhook_NegativeEventTimestamp_ClampedToNow_NotPre1970()
+    {
+        // ClampTimestamp used to floor a negative event_timestamp_ms at 0 (== 1970-01-01), which
+        // would land the admin daily-series bucket in a pre-1970 date. A negative value must clamp
+        // to "now" (like the absurdly-future cap) so it can never produce a 1970 bucket.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-negative-ts",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = -5000L,
+                product_id = "com.locallist.plus.monthly",
+            },
+        };
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(BuildWebhook(body))).StatusCode);
+
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-negative-ts");
+        Assert.Equal(_fixture.FakeTime.GetUtcNow().ToUnixTimeMilliseconds(), row.EventTimestampMs);
+        Assert.True(row.EventTimestampMs > 1_577_836_800_000L, "must be clamped to now, not 1970");
+    }
+
     // ---- idempotency + reorder --------------------------------------------
 
     [Fact]
