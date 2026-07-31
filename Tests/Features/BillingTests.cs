@@ -341,6 +341,80 @@ public class BillingTests : IClassFixture<ApiFixture>
         Assert.Equal("com.locallist.plus.monthly", row.ProductId);
     }
 
+    [Fact]
+    public async Task Webhook_OverLengthAnalyticsField_TruncatesAndKeepsTierCriticalEvent()
+    {
+        // REGRESSION GUARD (2026-07-29 audit): the LenientJsonConverters degrade a wrong-TYPE value
+        // to null but do NOT bound LENGTH. A string longer than its varchar column would throw
+        // Postgres 22001 on SaveChangesAsync and abort the tier-critical persist → a 500 that drops
+        // the event (only 503 makes RevenueCat re-deliver). The processor must TRUNCATE each
+        // analytics string to its column width so the row always fits and the tier still lands.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        var longProductId = new string('p', 300);  // column is varchar(255)
+        var longCountry = new string('C', 40);      // column is varchar(8)
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-overlength-analytics",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 1000L,
+                product_id = longProductId,
+                country_code = longCountry,
+                store = "APP_STORE",
+            },
+        };
+        var res = await client.SendAsync(BuildWebhook(body));
+
+        // The tier-critical event still processes (NOT 500/dropped) and the tier is applied.
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("pro", await GetTierAsync(userId));
+
+        // The over-length analytics values persist TRUNCATED to their column widths, not dropped.
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-overlength-analytics");
+        Assert.Equal(255, row.ProductId!.Length);
+        Assert.Equal(longProductId[..255], row.ProductId);
+        Assert.Equal(8, row.CountryCode!.Length);
+        Assert.Equal("APP_STORE", row.Store); // in-bounds value survives intact
+    }
+
+    [Fact]
+    public async Task Webhook_NegativeEventTimestamp_ClampedToNow_NotPre1970()
+    {
+        // ClampTimestamp used to floor a negative event_timestamp_ms at 0 (== 1970-01-01), which
+        // would land the admin daily-series bucket in a pre-1970 date. A negative value must clamp
+        // to "now" (like the absurdly-future cap) so it can never produce a 1970 bucket.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-negative-ts",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = -5000L,
+                product_id = "com.locallist.plus.monthly",
+            },
+        };
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(BuildWebhook(body))).StatusCode);
+
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-negative-ts");
+        Assert.Equal(_fixture.FakeTime.GetUtcNow().ToUnixTimeMilliseconds(), row.EventTimestampMs);
+        Assert.True(row.EventTimestampMs > 1_577_836_800_000L, "must be clamped to now, not 1970");
+    }
+
     // ---- idempotency + reorder --------------------------------------------
 
     [Fact]
