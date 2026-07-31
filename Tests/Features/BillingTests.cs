@@ -386,6 +386,47 @@ public class BillingTests : IClassFixture<ApiFixture>
     }
 
     [Fact]
+    public async Task Webhook_OverflowingAnalyticsPrice_RetriesWithAnalyticsNulled_AndStillGrantsPro()
+    {
+        // Covers the SaveLedgerAsync defense-in-depth retry branch. Truncation can't help a numeric
+        // overflow: price/price_in_purchased_currency are numeric(12,4), so a value with >8 integer
+        // digits throws Postgres 22003 on SaveChangesAsync (not 22001, not the 23505 dedup race).
+        // The processor must retry ONCE with the analytics columns nulled so the tier write still
+        // commits — best-effort analytics must never lose the tier-critical event.
+        var userId = await SeedUserAsync();
+        RcActive(userId);
+        var client = _fixture.CreateClient();
+
+        var body = new
+        {
+            api_version = "1.0",
+            @event = new
+            {
+                id = "evt-overflow-price",
+                type = "INITIAL_PURCHASE",
+                app_user_id = userId.ToString(),
+                event_timestamp_ms = 1000L,
+                product_id = "com.locallist.plus.monthly",
+                price = 123456789012345.67, // overflows numeric(12,4) → PG 22003 on first save
+                country_code = "US",
+            },
+        };
+        var res = await client.SendAsync(BuildWebhook(body));
+
+        // The tier-critical event still processes (retry path) and the tier is applied.
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Equal("GrantedPro", (await res.Content.ReadFromJsonAsync<WebhookResult>())!.Outcome);
+        Assert.Equal("pro", await GetTierAsync(userId));
+
+        // The retry nulled ALL analytics columns to make the row persist; tier write survived.
+        var db = _fixture.GetDbContext();
+        var row = await db.BillingEvents.SingleAsync(be => be.RcEventId == "evt-overflow-price");
+        Assert.Null(row.Price);
+        Assert.Null(row.CountryCode);  // nulled by the retry, even though it was in-bounds
+        Assert.Null(row.ProductId);
+    }
+
+    [Fact]
     public async Task Webhook_NegativeEventTimestamp_ClampedToNow_NotPre1970()
     {
         // ClampTimestamp used to floor a negative event_timestamp_ms at 0 (== 1970-01-01), which
