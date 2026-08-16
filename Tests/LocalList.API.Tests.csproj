@@ -17,6 +17,8 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0" />
     <!-- Override de la transitiva Microsoft.OpenApi (HIGH GHSA-v5pm-xwqc-g5wc); parcheada en 2.7.5+. Ver csproj principal. -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.7.6" />
+    <!-- Override de la transitiva SSH.NET (HIGH GHSA-q939-rpr3-3284, path traversal SCP) que arrastra Testcontainers; parcheada en 2026.0.0. Solo test-tooling, nil exposición en runtime. -->
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
   <ItemGroup>
