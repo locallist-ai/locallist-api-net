@@ -75,16 +75,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             }
             """;
 
-        var requestBody = new
-        {
-            contents = new[] { new { parts = new[] { new { text = prompt } } } },
-            generationConfig = new
-            {
-                temperature = 0.2,
-                maxOutputTokens = 800,
-                responseMimeType = "application/json"
-            }
-        };
+        var requestBody = BuildTranslationRequestBody(prompt, maxOutputTokens: 2048);
 
         try
         {
@@ -99,9 +90,9 @@ public class PlaceTranslatorService : IPlaceTranslatorService
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(responseJson);
-            var geminiContent = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content");
+            var candidate = doc.RootElement.GetProperty("candidates")[0];
+            WarnIfTruncated(candidate, "place", place.Id);
+            var geminiContent = candidate.GetProperty("content");
             var text = GetPartsText(geminiContent) ?? "{}";
 
             using var result = JsonDocument.Parse(text);
@@ -148,16 +139,7 @@ public class PlaceTranslatorService : IPlaceTranslatorService
             }
             """;
 
-        var requestBody = new
-        {
-            contents = new[] { new { parts = new[] { new { text = prompt } } } },
-            generationConfig = new
-            {
-                temperature = 0.2,
-                maxOutputTokens = 300,
-                responseMimeType = "application/json"
-            }
-        };
+        var requestBody = BuildTranslationRequestBody(prompt, maxOutputTokens: 1024);
 
         try
         {
@@ -172,9 +154,9 @@ public class PlaceTranslatorService : IPlaceTranslatorService
 
             var responseJson = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(responseJson);
-            var geminiContent = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content");
+            var candidate = doc.RootElement.GetProperty("candidates")[0];
+            WarnIfTruncated(candidate, "plan", plan.Id);
+            var geminiContent = candidate.GetProperty("content");
             var text = GetPartsText(geminiContent) ?? "{}";
 
             using var result = JsonDocument.Parse(text);
@@ -188,6 +170,38 @@ public class PlaceTranslatorService : IPlaceTranslatorService
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
+
+    // Builds the Gemini generateContent request body for a translation call.
+    // thinkingConfig.thinkingBudget=0 disables chain-of-thought: gemini-2.5-flash has
+    // thinking ON by default and the thinking-tokens count against maxOutputTokens, so
+    // without this the ES JSON was truncated mid-object (finishReason=MAX_TOKENS) and
+    // failed to parse. Mirrors GeminiLlmClient (chat/builder extraction). Translation is
+    // a transformation, not a reasoning task. Extracted as an internal seam so the
+    // generationConfig serialization is testable without a live Gemini call.
+    internal static object BuildTranslationRequestBody(string prompt, int maxOutputTokens) => new
+    {
+        contents = new[] { new { parts = new[] { new { text = prompt } } } },
+        generationConfig = new
+        {
+            temperature = 0.2,
+            maxOutputTokens,
+            responseMimeType = "application/json",
+            thinkingConfig = new { thinkingBudget = 0 },
+        },
+    };
+
+    // Diagnostic: a truncated (MAX_TOKENS) candidate leaves the JSON cut mid-object, which
+    // then surfaces in the catch as a generic parse exception. Logging the finishReason here
+    // makes a future truncation legible in the logs instead of an opaque JsonReaderException.
+    private void WarnIfTruncated(JsonElement candidate, string kind, Guid id)
+    {
+        if (candidate.TryGetProperty("finishReason", out var fr) && fr.GetString() == "MAX_TOKENS")
+        {
+            _logger.LogWarning(
+                "Gemini translate {Kind} {Id} truncated (finishReason=MAX_TOKENS) — raise maxOutputTokens",
+                kind, id);
+        }
+    }
 
     private static string EscapeJson(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
