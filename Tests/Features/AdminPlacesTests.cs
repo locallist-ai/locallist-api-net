@@ -375,6 +375,86 @@ public class AdminPlacesTests(ApiFixture fixture) : IClassFixture<ApiFixture>
         }
     }
 
+    [Fact]
+    public async Task TranslateBatch_TranslatesAllPublishedSources_NotJustCurated()
+    {
+        // Mixed sources, none translated yet: curated + google (the imports that used to
+        // be skipped). Plus an in-review google place that must stay untranslated (still
+        // gated on Status == "published").
+        var tag = Guid.NewGuid().ToString("N");
+        var curatedId = Guid.NewGuid();
+        var googleId = Guid.NewGuid();
+        var inReviewGoogleId = Guid.NewGuid();
+
+        var db = fixture.GetDbContext();
+        db.Places.Add(new Place
+        {
+            Id = curatedId,
+            Name = $"Curated {tag}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "test",
+            Status = "published",
+            Source = "curated",
+        });
+        db.Places.Add(new Place
+        {
+            Id = googleId,
+            Name = $"Google Published {tag}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "test",
+            Status = "published",
+            Source = "google",
+        });
+        db.Places.Add(new Place
+        {
+            Id = inReviewGoogleId,
+            Name = $"Google InReview {tag}",
+            Category = "Food",
+            City = "Miami",
+            WhyThisPlace = "test",
+            Status = "in_review",
+            Source = "google",
+        });
+        await db.SaveChangesAsync();
+
+        fixture.FakeGemini.Responder = _ => GeminiOk("""{"name":"Nombre ES","whyThisPlace":"Por qué","bestTimes":["Tarde"],"neighborhood":"Barrio","subcategory":"Restaurante","bestFor":["todos"],"suitableFor":["familias"]}""");
+        try
+        {
+            var client = CreateAdminClient();
+            // limit=50 (max) so our few seeded rows are inside the batch regardless of other rows.
+            var response = await client.PostAsync("/admin/places/translate-batch?lang=es&limit=50", content: null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            var freshDb = fixture.GetDbContext();
+            var curated = await freshDb.Places.AsNoTracking().FirstAsync(p => p.Id == curatedId);
+            var google = await freshDb.Places.AsNoTracking().FirstAsync(p => p.Id == googleId);
+            var inReview = await freshDb.Places.AsNoTracking().FirstAsync(p => p.Id == inReviewGoogleId);
+
+            // BOTH curated and google published places get the ES translation + approved stamp.
+            Assert.True(HasLang(curated.NameI18n, "es"), "curated place should be translated");
+            Assert.True(HasLang(google.NameI18n, "es"), "google published place should be translated");
+            Assert.Equal("approved", StatusForLang(curated.TranslationStatus, "es"));
+            Assert.Equal("approved", StatusForLang(google.TranslationStatus, "es"));
+
+            // The in-review place is NOT translated (still gated on published).
+            Assert.False(HasLang(inReview.NameI18n, "es"), "in-review place must not be translated");
+        }
+        finally
+        {
+            fixture.FakeGemini.Responder = null;
+        }
+    }
+
+    private static bool HasLang(JsonDocument? doc, string lang) =>
+        doc != null && doc.RootElement.TryGetProperty(lang, out _);
+
+    private static string? StatusForLang(JsonDocument? doc, string lang) =>
+        doc != null && doc.RootElement.TryGetProperty(lang, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString()
+            : null;
+
     // ── import-from-urls ───────────────────────────────────────────────────
 
     [Fact]

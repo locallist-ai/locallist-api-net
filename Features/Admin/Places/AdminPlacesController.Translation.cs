@@ -15,9 +15,6 @@ public partial class AdminPlacesController
         var place = await _db.Places.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
         if (place == null) return NotFound(new { error = "Place not found" });
 
-        if (place.Source != "curated")
-            return BadRequest(new { error = "Translation is only supported for curated places." });
-
         var draft = await _translator.TranslatePlaceAsync(place, "es", ct);
         if (draft == null)
             return StatusCode(503, new { error = "Translation service unavailable." });
@@ -59,19 +56,19 @@ public partial class AdminPlacesController
     {
         limit = Math.Clamp(limit, 1, 50);
 
-        var allCurated = await _db.Places
-            .Where(p => p.Source == "curated" && p.Status == "published")
+        var allPublished = await _db.Places
+            .Where(p => p.Status == "published")
             .ToListAsync(ct);
 
-        var toTranslate = allCurated
+        var toTranslate = allPublished
             .Where(p => p.NameI18n == null
                      || !p.NameI18n.RootElement.TryGetProperty(lang, out _))
             .ToList();
 
         if (toTranslate.Count == 0)
-            return Ok(new { translated = 0, failed = 0, skipped = allCurated.Count,
+            return Ok(new { translated = 0, failed = 0, skipped = allPublished.Count,
                 remaining = 0,
-                message = $"All published curated places already have '{lang}' translation." });
+                message = $"All published places already have '{lang}' translation." });
 
         var totalPending = toTranslate.Count;
         var batch = toTranslate.Take(limit).ToList();
@@ -109,13 +106,13 @@ public partial class AdminPlacesController
         }
 
         _logger.LogInformation("translate-batch places: translated={T} failed={F} skipped={S} remaining={R}",
-            translated, failed, allCurated.Count - toTranslate.Count, totalPending - translated - failed);
+            translated, failed, allPublished.Count - toTranslate.Count, totalPending - translated - failed);
 
         return Ok(new
         {
             translated,
             failed,
-            skipped = allCurated.Count - toTranslate.Count,
+            skipped = allPublished.Count - toTranslate.Count,
             remaining = totalPending - translated - failed
         });
     }
